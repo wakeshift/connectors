@@ -13,6 +13,6 @@ Before you open one:
 - Don't include keys, tokens or other secrets, including in tests.
 - Change only the code: files this repository's export generates (`go.mod`, `go.sum`, `LICENSE`, `.source-commit`) are updated when it's published.
 
-Report a security problem privately to support@clawvisor.com, not in an issue.
+Report a security problem privately to support@wakeshift.ai, not in an issue.
 
 By contributing, you agree your contribution is licensed under the Apache License 2.0.

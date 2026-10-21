@@ -17,9 +17,13 @@
         "type": "string",
         "description": "The Wakeshift whose beacons the plugin trusts, e.g. https://app.wakeshift.ai (the installer sets it)."
       },
+      "allowNetworkHooks": {
+        "type": "boolean",
+        "description": "The user agreed to OpenClaw's hooks endpoint while the gateway listens beyond this computer (its bind isn't loopback): the hooks share its listener (the installer sets it, with WAKESHIFT_OPENCLAW_NETWORK_HOOKS=1)."
+      },
       "heartbeatTarget": {
         "type": "string",
-        "description": "Where a woken turn's reply goes, as heartbeat.target (default: last)."
+        "description": "Unused: from the earlier heartbeat wake. A woken turn's reply now goes to the channel the conversation last spoke on."
       }
     }
   }

@@ -4,27 +4,30 @@
 // A record lives at <state dir>/deliveries/<sha256(conversation)>/<sha256(delivery ID)>.json
 // (0600 in 0700 directories) and moves through
 //
-//   taken → enqueued → turn-started → acked
+//   taken → turn-started → acked
 //
 // (or `refused`: Wakeshift answered 400 for that ID alone, so it's not
 // sent again).
 //
-//   taken         recorded on arrival, with the delivery; nothing done yet.
-//   enqueued      queued as a system event in the session, in this gateway
-//                 process (`boot`). OpenClaw's queue is in memory, so after
-//                 a restart (another boot) a record that's enqueued but has
-//                 no turn yet is queued again: the queue that held it is gone.
-//   turn-started  a heartbeat turn ran in the session after it was queued:
-//                 the turn took it. Only now may it be acknowledged.
+//   taken         recorded on arrival, with the delivery; not yet handled
+//                 by a turn that finished.
+//   turn-started  a woken turn that had it finished (OpenClaw's /hooks/agent
+//                 answered completion ok): only now may it be acknowledged.
 //   acked         Wakeshift answered 2xx to its ack.
+//
+// (`enqueued`, from the plugin's earlier heartbeat wake, is read as taken.)
 //
 // Invariants (tested in test/deliveries.test.ts, including random
 // interleavings of redelivery, failures and restarts):
 //
-//   1. Each delivery is in at most one live queue at a time: it's queued
-//      only from `taken`, or from `enqueued` in an earlier boot. A
-//      redelivery never queues it again; it only tries the turn again.
-//      So every turn that takes it is the only one that does.
+//   1. A delivery is in at most one wake request at a time: requests are
+//      made on the conversation's one chain, one after another, and a
+//      redelivery only opens a new window for the next try. A try after an
+//      outcome that isn't known (unreachable, busy, a timeout) sends the
+//      same request again, the same records with the same idempotency key
+//      (recorded as `unsure`), before anything newer, so OpenClaw replays a
+//      run it admitted instead of running it again; a try after a known
+//      one (a run that ended without ok, a refused request) uses a new key.
 //   2. It's acknowledged only from `turn-started`, and only a 2xx moves it
 //      to `acked`; nothing is acknowledged after that.
 //   3. A record isn't evicted while it isn't acked or refused (no capped
@@ -34,24 +37,25 @@
 //      the conversation's one chain (the gateway is one process, and owns
 //      its state dir), so no two decisions for it interleave.
 //
-// The one gap: a process that dies between a turn running and its records
-// becoming turn-started queues them again when it starts, so that turn and
-// the next both see them (at least once, never lost).
+// The gaps (at least once, never lost): OpenClaw keeps its replay keys in
+// memory, so a request in flight when the gateway restarts is sent again
+// and may run a second time; so may a turn that finished after its
+// request's answer was lost, once its key has aged out.
 //
-// Turns: a turn is started with runHeartbeatOnce. One that can't run
-// (skipped: busy, rate limits; failed; thrown) is tried again with backoff
-// for `wakeFor` from when it was queued (or redelivered); past that, the
-// transport reconnects so Wakeshift hands it out again, which opens a new
-// window. Acks: sent in chunks of at most 100, retried with backoff on
-// their own timer; a 400 splits the chunk to find the bad ID (logged and
-// marked refused), and the rest go on.
+// Turns: a turn is a wake request (wake.ts). One that doesn't run is tried
+// again with backoff for `wakeFor` from when the delivery arrived (or was
+// redelivered); past that, the transport reconnects so Wakeshift hands it
+// out again, which opens a new window. Acks: sent in chunks of at most
+// 100, retried with backoff on their own timer; a 400 splits the chunk to
+// find the bad ID (logged and marked refused), and the rest go on.
 
-import { createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { prompt, WAKE_PROMPT } from "./framing.js";
+import { prompt } from "./framing.js";
 import { writeAtomic } from "./store.js";
 import type { Delivery } from "./transport.js";
+import type { Route, WakeRequest, WakeResult } from "./wake.js";
 
 export type State = "taken" | "enqueued" | "turn-started" | "acked" | "refused";
 
@@ -61,8 +65,11 @@ export interface Record {
   state: State;
   delivery: Delivery;
   takenAt: number;
-  boot?: string; // the process it was queued in
+  boot?: string; // (the heartbeat wake) the process it was queued in
   windowFrom?: number; // when its current turn window opened
+  attempt?: number; // its wake requests so far that ended known (the idempotency key's part)
+  unsure?: string; // the key of a request it was in whose outcome isn't known: sent again as is
+  unsureRoute?: Route; // that request's route
   turnAt?: number;
   doneAt?: number; // acked or refused
 }
@@ -171,10 +178,8 @@ function read(dir: string): Record[] {
 
 /** What a conversation needs from OpenClaw. */
 export interface Host {
-  enqueueSystemEvent(text: string, opts: { sessionKey: string; agentId?: string }): boolean;
-  runHeartbeatOnce(opts: { reason: string; agentId?: string; sessionKey: string; heartbeat?: { target: string; prompt?: string } }): Promise<{ status: string; reason?: string }>;
-  /** Runs work inside the gateway's admission (the plugin service's scheduler). */
-  run<T>(fn: () => Promise<T>): Promise<T>;
+  /** One wake request (wake.ts). */
+  wake(r: WakeRequest): Promise<WakeResult>;
   log: { info(m: string): void; warn(m: string): void };
 }
 
@@ -188,9 +193,12 @@ export interface ConversationOptions {
   ack: (ids: string[]) => Promise<number>;
   /** Makes Wakeshift hand out again what isn't acknowledged. */
   redeliver: () => void;
-  /** This gateway process (default: random per process). */
-  boot?: string;
-  target?: string;
+  /** Where the woken turn's reply goes, when the conversation has a channel. */
+  route?: () => Route | undefined;
+  /** The route was refused: it's dropped. */
+  routeRefused?: () => void;
+  /** OpenClaw's hooks can't take the wake (why), or can again (""). */
+  problem?: (why: string) => void;
   wakeFor?: number; // default 5 minutes
   wakeRetry?: number; // first turn retry (default 5s, doubling to 60s)
   ackRetry?: number; // first ack retry (default 1s, doubling to 30s)
@@ -203,13 +211,13 @@ export interface ConversationOptions {
   after?: Promise<void>;
 }
 
-/**
- * This gateway process's boot ID. Kept on the process, not the module:
- * OpenClaw reloads a plugin in the same process (a config change), and
- * its queue, which this stands for, survives that.
- */
-const g = globalThis as { __wakeshiftOpenClawBoot?: string };
-export const BOOT = (g.__wakeshiftOpenClawBoot ??= randomBytes(8).toString("hex"));
+/** Not yet handled by a turn that finished (enqueued: the earlier heartbeat wake's state). */
+const pending = (r: Record) => r.state === "taken" || r.state === "enqueued";
+
+/** The wake request's idempotency key: the same deliveries and attempt, the same key. */
+export function idempotencyKey(conversation: string, ids: string[], attempt: number, variant = ""): string {
+  return "wakeshift-" + createHash("sha256").update(JSON.stringify([conversation, [...ids].sort(), attempt, variant])).digest("hex").slice(0, 40);
+}
 
 /** One conversation's deliveries: every decision about them is made here, on one chain. */
 export class Conversation {
@@ -220,10 +228,8 @@ export class Conversation {
   private redeliverTimer?: ReturnType<typeof setTimeout>;
   private turnDelay = 0;
   private ackDelay = 0;
-  private readonly boot: string;
 
   constructor(private readonly o: ConversationOptions) {
-    this.boot = o.boot ?? BOOT;
     if (o.after) this.chain = o.after.catch(() => {});
   }
 
@@ -240,7 +246,7 @@ export class Conversation {
     return p;
   }
 
-  /** Picks up what an earlier process left (queues, turns, acks). */
+  /** Picks up what an earlier process left (turns, acks). */
   start() {
     void this.on(() => this.step());
   }
@@ -262,8 +268,8 @@ export class Conversation {
 
   /**
    * Records deliveries from the stream; resolves once recorded, with how
-   * many were new. A redelivery of one queued in this process opens a new
-   * turn window; one already acked or refused is left alone.
+   * many were new. A redelivery of one not yet handled opens a new turn
+   * window; one a turn handled, acked or refused is left alone.
    */
   receive(ds: Delivery[]): Promise<number> {
     return this.on(async () => {
@@ -274,7 +280,7 @@ export class Conversation {
         if (!r) {
           this.o.ledger.put({ id: d.delivery_id, conversation: this.o.conversation, state: "taken", delivery: d, takenAt: now });
           fresh++;
-        } else if (r.state === "taken" || (r.state === "enqueued" && r.boot === this.boot)) {
+        } else if (pending(r)) {
           this.o.ledger.put({ ...r, windowFrom: now });
           this.turnDelay = 0;
         }
@@ -286,57 +292,63 @@ export class Conversation {
 
   // Everything that can happen now, from the records alone.
   private async step() {
-    const rs = this.o.ledger.of(this.o.conversation);
-    const toQueue = rs.filter((r) => r.state === "taken" || (r.state === "enqueued" && r.boot !== this.boot));
-    // After stop() nothing new starts (a step already past a host call
-    // still records what that call did).
-    if (toQueue.length > 0 && !this.stopped) await this.enqueue(toQueue);
-    if (!this.stopped && this.o.ledger.of(this.o.conversation).some((r) => r.state === "enqueued" && r.boot === this.boot)) await this.turn();
+    // After stop() nothing new starts (a step already past a wake request
+    // still records what came of it).
+    if (!this.stopped && this.o.ledger.of(this.o.conversation).some(pending)) await this.turn();
     if (!this.stopped && this.o.ledger.of(this.o.conversation).some((r) => r.state === "turn-started")) await this.acks();
   }
 
-  private opts() {
-    return { sessionKey: this.o.sessionKey, ...(this.o.agentId ? { agentId: this.o.agentId } : {}) };
-  }
-
-  private async enqueue(rs: Record[]) {
-    const { host } = this.o;
-    let queued = false;
-    try {
-      queued = await host.run(async () => host.enqueueSystemEvent(prompt(rs.map((r) => r.delivery)), this.opts()));
-    } catch (e) {
-      host.log.warn(`wakeshift (${this.o.sessionKey}): queueing failed: ${(e as Error).message}`);
-    }
-    if (!queued) {
-      // Still taken: tried again with the turn's backoff, within its window.
-      host.log.warn(`wakeshift (${this.o.sessionKey}): OpenClaw didn't queue the message; trying again`);
-      this.retryTurn(Math.min(...rs.map((r) => r.windowFrom ?? r.takenAt)));
-      return;
-    }
-    const now = this.now();
-    for (const r of rs) this.o.ledger.put({ ...r, state: "enqueued", boot: this.boot, windowFrom: now });
-  }
-
+  // One wake request for everything not yet handled; or, after a request
+  // whose outcome isn't known, that same request again (the same records,
+  // the same key), so OpenClaw replays it rather than running it twice.
   private async turn() {
     const { host } = this.o;
-    const waiting = this.o.ledger.of(this.o.conversation).filter((r) => r.state === "enqueued" && r.boot === this.boot);
-    let r: { status: string; reason?: string } | undefined;
+    const all = this.o.ledger.of(this.o.conversation).filter(pending);
+    const unsure = all.find((r) => r.unsure)?.unsure;
+    const waiting = unsure ? all.filter((r) => r.unsure === unsure) : all;
+    if (waiting.length === 0) return;
+    const attempt = Math.max(...waiting.map((w) => w.attempt ?? 0));
+    let req = {
+      sessionKey: this.o.sessionKey,
+      ...(this.o.agentId ? { agentId: this.o.agentId } : {}),
+      message: prompt(waiting.map((w) => w.delivery)),
+      idempotencyKey: unsure ?? idempotencyKey(this.o.conversation, waiting.map((w) => w.id), attempt),
+      // A request sent again as is (unsure) keeps the route it had.
+      route: unsure ? waiting[0].unsureRoute : this.o.route?.(),
+    };
+    let r: WakeResult;
     try {
-      // The heartbeat's prompt is ours (OpenClaw spreads the requested
-      // heartbeat over the configured one): its default tells the model to
-      // leave earlier requests alone (framing.ts, WAKE_PROMPT).
-      r = await host.run(() => host.runHeartbeatOnce({ reason: "hook:wakeshift", ...this.opts(), heartbeat: { target: this.o.target ?? "last", prompt: WAKE_PROMPT } }));
+      r = await host.wake(req);
+      if (r.kind === "route") {
+        // The channel it last spoke on was refused (nothing ran): the reply
+        // stays in the session instead, a new request without the route.
+        host.log.info(`wakeshift (${this.o.sessionKey}): the reply's route was refused (${r.why}); waking without it`);
+        this.o.routeRefused?.();
+        req = { ...req, route: undefined, idempotencyKey: idempotencyKey(this.o.conversation, waiting.map((w) => w.id), attempt, "noroute") };
+        r = await host.wake(req);
+        if (r.kind === "route") r = { kind: "broken", why: `OpenClaw refused the wake (400: ${r.why})` };
+      }
     } catch (e) {
-      r = { status: "failed", reason: (e as Error).message };
+      r = { kind: "retry", fresh: false, why: (e as Error).message };
     }
-    if (r?.status === "ran") {
-      // The turn took everything queued before it.
+    if (r.kind === "ran") {
       const now = this.now();
-      for (const w of waiting) this.o.ledger.put({ ...w, state: "turn-started", turnAt: now });
+      for (const w of waiting) this.o.ledger.put({ ...w, state: "turn-started", turnAt: now, unsure: undefined, unsureRoute: undefined });
       this.turnDelay = 0;
+      this.o.problem?.("");
       return;
     }
-    host.log.info(`wakeshift (${this.o.sessionKey}): couldn't start a turn (${r?.status}: ${r?.reason ?? ""})`);
+    if (r.kind === "broken") this.o.problem?.(r.why);
+    // A known outcome (a run that ended without ok, a refused request) needs
+    // a new key; an unknown one keeps it, with these records, so a run
+    // OpenClaw admitted is replayed, not run again.
+    const known = r.kind !== "retry" || r.fresh;
+    for (const w of waiting) {
+      this.o.ledger.put(
+        known ? { ...w, attempt: attempt + 1, unsure: undefined, unsureRoute: undefined } : { ...w, unsure: req.idempotencyKey, unsureRoute: req.route },
+      );
+    }
+    host.log.info(`wakeshift (${this.o.sessionKey}): the wake didn't run (${r.why})`);
     this.retryTurn(Math.min(...waiting.map((w) => w.windowFrom ?? w.takenAt)));
   }
 

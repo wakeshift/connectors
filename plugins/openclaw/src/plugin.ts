@@ -14,18 +14,20 @@
 // Waking: per connected conversation, a transport reads the stream
 // (transport.ts: Server-Sent Events, falling back to long polling) and a
 // Conversation (deliveries.ts) owns every delivery from there: a durable
-// record each, queued once as a system event (a "System:" line in the
-// next turn's context, never a user message, framed as outside data by
-// framing.ts), a turn started as OpenClaw's /hooks/wake does (an
-// immediate, session-targeted heartbeat), and an ack only once that turn
-// has run.
+// record each, framed as outside data (framing.ts), handed to a turn with
+// OpenClaw's /hooks/agent (wake.ts: persistent, in the conversation's own
+// session, which OpenClaw safety-wraps as outside content), and an ack only
+// once that turn has finished. The hooks it needs are set up and scoped by
+// control.ts (hooks.ts says what changes).
 
 import { join } from "node:path";
 import { beaconIn, BeaconError, jwkKey, mcpServer, verifyBound, type Claims } from "./beacon.js";
 import { Conversation, Ledger, type Host } from "./deliveries.js";
+import { agentOf } from "./hooks.js";
 import { PINS_UNREADABLE, Store, type SavedLink } from "./store.js";
 import { Transport, type Stopped, type TransportOptions } from "./transport.js";
 import { CLIENT_HEADER, clientHeader } from "./version.js";
+import type { Route } from "./wake.js";
 
 /** The connected note's start (harnesses.Connected): agents look for it. */
 export const CONNECTED = "Wakeshift: connected";
@@ -33,6 +35,10 @@ export const NOTE_CONNECTED =
   CONNECTED + ". New messages for this conversation will reach it as soon as they arrive, even while it's idle, as long as the OpenClaw gateway runs.";
 export const noteFailed = (why: string) =>
   `Wakeshift: couldn't connect this conversation (${why}), so new messages won't reach it yet. To retry, call the app's tool that started watching again.`;
+/** Connected, but OpenClaw's hooks can't wake it yet (why). */
+export const noteNoWake = (why: string) => `${CONNECTED}, but new messages can't wake this conversation yet: ${why}. Until then they wait in Wakeshift.`;
+/** A wake that OpenClaw's hooks refused (why), said on the conversation's next tool result. */
+export const noteWakeFailed = (why: string) => `Wakeshift: couldn't wake this conversation: ${why}. New messages wait in Wakeshift until it can.`;
 /** Wakeshift refused this version (426 update_required): its message asks for the update. */
 export const noteOutdated = (message: string) => `Wakeshift: couldn't connect this conversation. ${message}`;
 
@@ -88,20 +94,24 @@ export type { Host };
 /** How often delivery records are pruned while the gateway runs. */
 export const PRUNE_EVERY = 3600 * 1000;
 
+/** Keeps OpenClaw's hooks letting connected conversations be woken (control.ts). */
+export interface Hooks {
+  /** "" once hooks let this session be woken, else why not. */
+  allow(sessionKey: string, agentId?: string): Promise<string>;
+  release(inUse: { sessionKeys: string[]; agentIds: string[] }): Promise<void>;
+}
+
 export interface Options {
   issuer: string; // the pinned Wakeshift
   store: Store;
   host: Host;
+  hooks: Hooks;
   fetch?: typeof fetch;
-  /** Heartbeat target for the woken turn's reply (default "last"). */
-  target?: string;
   /** Delivery timing (deliveries.ts). */
   wakeFor?: number;
   wakeRetry?: number;
   ackRetry?: number;
   redeliverAfter?: number;
-  /** This gateway process, for tests (deliveries.BOOT). */
-  boot?: string;
   stream?: Partial<TransportOptions>;
 }
 
@@ -132,6 +142,10 @@ export class Wakeshift {
   private keysFetchedAt = 0;
   private started = false;
   private pruneTimer?: ReturnType<typeof setInterval>;
+  // Each session's last channel route (message_received), for the reply.
+  private readonly routes = new Map<string, Route>();
+  // A wake problem per session, and whether it was said, so it's said once.
+  private readonly problems = new Map<string, { why: string; said: boolean }>();
 
   constructor(private readonly o: Options) {
     this.f = o.fetch ?? fetch;
@@ -160,7 +174,34 @@ export class Wakeshift {
         continue;
       }
       this.listen(l);
+      void this.o.hooks.allow(l.sessionKey, l.agentId || agentOf(l.sessionKey)).then((why) => this.setProblem(l.sessionKey, why));
     }
+  }
+
+  /** The channel a session last spoke on (OpenClaw's message_received), for a woken turn's reply. */
+  onMessage(sessionKey: string, route: Route | undefined) {
+    // A message on OpenClaw's own surface (the TUI, the web chat) means the
+    // reply belongs in the session, not on the channel it spoke on before.
+    if (route) this.routes.set(sessionKey, route);
+    else this.routes.delete(sessionKey);
+  }
+
+  private setProblem(sessionKey: string, why: string) {
+    if (!why) {
+      this.problems.delete(sessionKey);
+      return;
+    }
+    if (this.problems.get(sessionKey)?.why === why) return;
+    this.o.host.log.warn(`wakeshift (${sessionKey}): ${why}`);
+    this.problems.set(sessionKey, { why, said: false });
+  }
+
+  /** A wake problem not yet told to this session's model, once ("" for none). */
+  takeNote(sessionKey: string): string {
+    const p = this.problems.get(sessionKey);
+    if (!p || p.said) return "";
+    p.said = true;
+    return noteWakeFailed(p.why);
   }
 
   private prune() {
@@ -213,7 +254,7 @@ export class Wakeshift {
       .then((n) => {
         // Kept only while it connected: a failure is tried again when the
         // beacon shows up again.
-        if (n !== NOTE_CONNECTED && this.beacons.get(sessionKey)?.note === note) this.beacons.delete(sessionKey);
+        if (!n.startsWith(CONNECTED) && this.beacons.get(sessionKey)?.note === note) this.beacons.delete(sessionKey);
         return n;
       });
     this.beacons.set(sessionKey, { token, note });
@@ -249,6 +290,13 @@ export class Wakeshift {
     const saved = { conversation, sessionKey, agentId: call.agentId ?? "", link, issuer: this.o.issuer };
     this.o.store.saveLink(saved);
     this.listen({ ...saved, saved_at: new Date().toISOString() });
+    const why = await this.o.hooks.allow(sessionKey, call.agentId || agentOf(sessionKey));
+    if (why) {
+      // Said now, in the note: not again on the next result.
+      this.problems.set(sessionKey, { why, said: true });
+      return noteNoWake(why);
+    }
+    this.problems.delete(sessionKey);
     return NOTE_CONNECTED;
   }
 
@@ -356,8 +404,9 @@ export class Wakeshift {
       host: this.o.host,
       ack: (ids) => t.ack(ids),
       redeliver: () => t.reconnect(),
-      boot: this.o.boot,
-      target: this.o.target,
+      route: () => this.routes.get(l.sessionKey),
+      routeRefused: () => this.routes.delete(l.sessionKey),
+      problem: (why) => this.setProblem(l.sessionKey, why),
       wakeFor: this.o.wakeFor,
       wakeRetry: this.o.wakeRetry,
       ackRetry: this.o.ackRetry,
@@ -383,6 +432,11 @@ export class Wakeshift {
           this.beacons.delete(l.sessionKey); // its next beacon connects again
           log(`the stream ended (${why.reason}); forgetting its link`);
           if (this.o.store.loadLink(l.conversation)?.link === t.currentLink) this.o.store.forgetLink(l.conversation);
+          this.problems.delete(l.sessionKey);
+          // Its session and agent are no longer allowed in OpenClaw's hooks
+          // (unless another connected conversation still needs them).
+          const rest = this.o.store.links();
+          void this.o.hooks.release({ sessionKeys: rest.map((x) => x.sessionKey), agentIds: rest.map((x) => x.agentId || agentOf(x.sessionKey) || "").filter(Boolean) });
         }
       },
     });

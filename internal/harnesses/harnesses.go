@@ -305,11 +305,11 @@ var all = []Harness{
 		// and marks the thread as OpenClaw's.
 		ID: "openclaw", Name: "OpenClaw", Claim: "openclaw", ClaimHint: "even when it runs your turns in Codex", Aliases: []string{"open-claw"}, Clients: []string{"openclaw-bundle-mcp"},
 		Embeds: &Embedding{Meta: "x-codex-turn-metadata.thread_source", Value: "openclaw"},
-		Wake:   Plugin, Ack: "at least once, acknowledged once the turn it wakes has run",
+		Wake:   Plugin, Ack: "at least once, acknowledged once the turn it wakes has finished",
 		Binding: Unbound, Carrier: Text, StripsText: true, Installable: true, Plugin: true,
-		Changes:     "installs the Wakeshift plugin with openclaw plugins install and sets its one setting, the Wakeshift it trusts",
+		Changes:     "installs the Wakeshift plugin with openclaw plugins install and sets the Wakeshift it trusts. When it connects a conversation, the plugin turns on OpenClaw's hooks endpoint with a token of its own (hooks.enabled, hooks.token, hooks.allowRequestSessionKey, hooks.defaultSessionKey), allowing it to start turns only in the sessions and for the agents that connect through Wakeshift (hooks.allowedSessionKeyPrefixes, hooks.allowedAgentIds); OpenClaw's own hooks settings, if it has any, are only added to. Its uninstaller undoes this",
 		Run:         "Run it with your exec tool, on the machine (or in the container) where the OpenClaw gateway runs.",
-		Trust:       "There's nothing to approve in OpenClaw, and no restart. The plugin starts with your next turn, so ask them to send any reply first.",
+		Trust:       "There's nothing to approve in OpenClaw, and no restart. The plugin starts with your next turn, so ask them to send any reply first. If the gateway listens beyond this computer, the installer stops before changing anything and says to ask them first, because OpenClaw's hooks endpoint shares the gateway's listener.",
 		AfterUpdate: "There's nothing to approve again, and no restart. The new plugin starts with your next turn, so ask them to send any reply first.",
 		When:        "as soon as they arrive, even while the session is idle, as long as the OpenClaw gateway runs",
 		NoteAt:      "right after this result (or, when OpenClaw runs the turn in Codex, at the start of your next turn)",
@@ -334,14 +334,15 @@ var all = []Harness{
 		// "openai-mcp" 1.0.0 and User-Agent openai-mcp/1.0.0, per OpenAI's
 		// developer forum (not captured here: no ChatGPT sign-in), and
 		// _meta openai/session (an anonymized conversation ID; the Apps SDK
-		// reference). It's woken by MCP Events in Work chats and dots: the
-		// conversation subscribes to the app's wakeshift.message event
-		// (pkg/appkit Events) and ChatGPT starts a run for each delivery.
-		// openai/session only recognises it: the conversation is named by
-		// its session handle, which events/subscribe carries too.
+		// reference). It's woken by MCP Events in Work chats and dots, for
+		// the app's own event types (pkg/appkit ServeEvents, the TypeScript
+		// SDK's serveEvents): ChatGPT subscribes natively and starts a run
+		// for each occurrence. What a conversation subscribes to with the
+		// app's topic tools waits for its next tool call (appapi
+		// chatgptResult). openai/session only recognises it.
 		ID: "chatgpt", Name: "ChatGPT", Claim: "chatgpt", Clients: []string{"openai-mcp"}, UserAgents: []string{"openai-mcp"}, Fingerprint: "openai/session",
 		Wake: Events, Ack: "at least once, acknowledged when ChatGPT accepts the webhook (not when the run reads it)",
-		When: "as soon as they arrive, as a new run in the chat (Work chats and dots), once it subscribes to the event",
+		When: "as soon as they arrive, as a new run in the chat (Work chats and dots), for the app's own events it subscribes to",
 	},
 	// Retired: recognised only to tell its agent what replaced it.
 	{
