@@ -1,0 +1,26 @@
+{
+  "id": "wakeshift",
+  "name": "Wakeshift",
+  "description": "Wakes OpenClaw sessions when an app they watch through Wakeshift sends something. Messages arrive as outside information, never as the user.",
+  "categories": ["integrations"],
+  "contracts": {
+    "agentToolResultMiddleware": ["openclaw", "codex"]
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "issuer": {
+        "type": "string",
+        "description": "The Wakeshift whose beacons the plugin trusts, e.g. https://app.wakeshift.ai (the installer sets it)."
+      },
+      "heartbeatTarget": {
+        "type": "string",
+        "description": "Where a woken turn's reply goes, as heartbeat.target (default: last)."
+      }
+    }
+  }
+}

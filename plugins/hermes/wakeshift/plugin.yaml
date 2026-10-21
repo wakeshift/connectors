@@ -1,0 +1,8 @@
+name: wakeshift
+version: "1.0.0"
+description: "Wakeshift's plugin for Hermes Agent: lets Wakeshift messages wake your Hermes conversations (API server and CLI ones), framed as outside information, never as you."
+author: "Wakeshift"
+provides_hooks:
+  - transform_tool_result
+  - pre_llm_call
+  - on_session_end

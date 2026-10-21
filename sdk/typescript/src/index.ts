@@ -1,0 +1,27 @@
+export {
+  Wakeshift,
+  DEFAULT_CORE,
+  SESSION_ARG,
+  HARNESS_ARG,
+  CONVERSATION_ARG,
+  UNKNOWN_CLIENT_WARNING,
+  type WakeshiftOptions,
+  type Call,
+  type CallOptions,
+  type ClientInfoSource,
+  type Duration,
+  type SubscribeOptions,
+  type Subscription,
+  type Addition,
+  type Recognised,
+  type TopicEvent,
+  type Published,
+  type SendStatus,
+  type Via,
+  type TopicStatus,
+  type SubscriptionStatus,
+  type PublishUrl,
+  type ToolExtra,
+} from "./wakeshift.js";
+export { WakeshiftError, isCode } from "./errors.js";
+export { parseKey, signAssertion, type AppKey } from "./key.js";

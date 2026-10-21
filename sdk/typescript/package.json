@@ -1,0 +1,41 @@
+{
+  "name": "@wakeshift/sdk",
+  "version": "0.1.0",
+  "description": "Let agents subscribe to things in your app: Wakeshift wakes them when you publish.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "test": "tsc -p tsconfig.test.json && node --test 'build-test/test/*.test.js' && npm run examples",
+    "examples": "node scripts/check-examples.mjs",
+    "e2e": "sh scripts/e2e.sh",
+    "prepack": "npm run build",
+    "pack-check": "sh scripts/pack-check.sh"
+  },
+  "peerDependencies": {
+    "@modelcontextprotocol/sdk": "^1.23.0",
+    "zod": "^3.25.0 || ^4.0.0"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.3",
+    "zod": "^4.6.7"
+  }
+}
