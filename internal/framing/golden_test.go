@@ -2,7 +2,9 @@ package framing
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
+	"io/fs"
 	"os"
 	"strings"
 	"testing"
@@ -73,6 +75,11 @@ func TestTypeScriptGolden(t *testing.T) {
 		return
 	}
 	have, err := os.ReadFile(golden)
+	if errors.Is(err, fs.ErrNotExist) {
+		// The published Go SDK (opensource/export.sh) has no OpenClaw
+		// plugin; this repository always does, so the check runs here.
+		t.Skip("the OpenClaw plugin isn't in this tree")
+	}
 	if err != nil {
 		t.Fatalf("%v (go test ./internal/framing -run TestTypeScriptGolden -update writes it)", err)
 	}

@@ -27,7 +27,7 @@ The Hermes plugin's end-to-end test needs a running Wakeshift, so it runs in Wak
 
 ## Where changes happen
 
-This repository is published from Wakeshift's main repository, where this code is developed and tested together with the server it talks to. Each commit here says which commit it came from (`.source-commit`). Issues and pull requests are welcome; accepted changes are made upstream and arrive here with the next publish.
+This repository is generated from Wakeshift's main repository. Pull requests are welcome: we apply them there and publish the result. Each commit here says which commit it came from (`.source-commit`); see [CONTRIBUTING](CONTRIBUTING.md).
 
 ## License
 

@@ -41,7 +41,8 @@ const (
 	// Background: the agent starts a command in the background that prints
 	// or exits when a message arrives, and the harness wakes it for that,
 	// even while idle (Cursor's Shell with notify_on_output, Antigravity's
-	// run_command). Nothing to install; BackgroundNote says how.
+	// run_command, Copilot CLI's async bash). Nothing to install;
+	// BackgroundNote says how.
 	Background Wake = "background"
 	// Foreground: the agent waits for messages with a command it runs in
 	// the foreground (the stream's one-shot wait), blocked on it until a
@@ -265,14 +266,15 @@ var all = []Harness{
 	},
 	{
 		ID: "copilot", Name: "GitHub Copilot CLI", Claim: "copilot-cli", Aliases: []string{"copilot", "github-copilot"}, Clients: []string{"copilot-cli"}, UserAgents: []string{"copilot-cli"},
-		Wake: StopHook, Ack: "at least once, acknowledged when the stop hook hands the message over",
+		Wake: StopHook, ZeroInstall: Background, Ack: "at least once, acknowledged when the stop hook hands the message over",
 		Binding: ByConversation, Carrier: Text, StripsText: true, ConversationMeta: "wakeshift/conversation", Fingerprint: "wakeshift/conversation", Installable: true,
-		Changes:     "writes one hooks file, ~/.copilot/hooks/wakeshift.json",
-		Trust:       "There's nothing to approve for hooks in your home folder. Restart copilot to load them (/env lists them).",
+		Changes: "writes one hooks file, ~/.copilot/hooks/wakeshift.json",
+		Trust: "There's nothing to approve for hooks in your home folder. Restart copilot to load them (/env lists them). " +
+			"The background command that wakes the agent while it's idle still needs one \"Yes\" each time it starts (once per wake), unless copilot runs with --allow-all-tools (which approves every tool, not just this one).",
 		AfterUpdate: "There's nothing to approve or restart: the hooks run the new version from their next call.",
 		When:        "when the agent finishes a turn; while it's idle, they wait for the next one",
 		NoteAt:      "right after this result",
-		Verified:    "1.0.98",
+		Verified:    "1.0.101",
 	},
 	{
 		ID: "opencode", Name: "opencode", Claim: "opencode", Aliases: []string{"open-code"}, Clients: []string{"opencode"}, UserAgents: []string{"opencode"},

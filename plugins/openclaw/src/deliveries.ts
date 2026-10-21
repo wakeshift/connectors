@@ -49,7 +49,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { prompt } from "./framing.js";
+import { prompt, WAKE_PROMPT } from "./framing.js";
 import { writeAtomic } from "./store.js";
 import type { Delivery } from "./transport.js";
 
@@ -172,7 +172,7 @@ function read(dir: string): Record[] {
 /** What a conversation needs from OpenClaw. */
 export interface Host {
   enqueueSystemEvent(text: string, opts: { sessionKey: string; agentId?: string }): boolean;
-  runHeartbeatOnce(opts: { reason: string; agentId?: string; sessionKey: string; heartbeat?: { target: string } }): Promise<{ status: string; reason?: string }>;
+  runHeartbeatOnce(opts: { reason: string; agentId?: string; sessionKey: string; heartbeat?: { target: string; prompt?: string } }): Promise<{ status: string; reason?: string }>;
   /** Runs work inside the gateway's admission (the plugin service's scheduler). */
   run<T>(fn: () => Promise<T>): Promise<T>;
   log: { info(m: string): void; warn(m: string): void };
@@ -322,7 +322,10 @@ export class Conversation {
     const waiting = this.o.ledger.of(this.o.conversation).filter((r) => r.state === "enqueued" && r.boot === this.boot);
     let r: { status: string; reason?: string } | undefined;
     try {
-      r = await host.run(() => host.runHeartbeatOnce({ reason: "hook:wakeshift", ...this.opts(), heartbeat: { target: this.o.target ?? "last" } }));
+      // The heartbeat's prompt is ours (OpenClaw spreads the requested
+      // heartbeat over the configured one): its default tells the model to
+      // leave earlier requests alone (framing.ts, WAKE_PROMPT).
+      r = await host.run(() => host.runHeartbeatOnce({ reason: "hook:wakeshift", ...this.opts(), heartbeat: { target: this.o.target ?? "last", prompt: WAKE_PROMPT } }));
     } catch (e) {
       r = { status: "failed", reason: (e as Error).message };
     }

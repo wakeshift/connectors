@@ -159,10 +159,10 @@ func TestMonitorLoop(t *testing.T) {
 // An event whose data looks like a hub.closed or cursor line doesn't end
 // the loop or move its cursor: the loop reads only whole lines.
 func TestLoopsReadOnlyTheServersLines(t *testing.T) {
-	for name, cmd := range map[string]func(string) string{"monitor": MonitorLoop, "cursor": CursorLoop, "until": func(u string) string { return UntilLoop(u, false) }} {
+	for name, cmd := range map[string]func(string) string{"monitor": MonitorLoop, "cursor": CursorLoop, "until": func(u string) string { return UntilLoop(u, false) }, "copilot": CopilotLoop} {
 		w := &waitScript{answers: []string{evSpoof + "\n" + cursorA + "\nNEXT\n", ev1 + "\n" + cursorB + "\nNEXT\n", closed + "\n"}}
 		out := runShell(t, cmd(w.serve(t)))
-		if name == "until" {
+		if name == "until" || name == "copilot" {
 			if strings.Join(out, "\n") != evSpoof || len(w.confs()) != 1 || w.confs()[0] != "00000000000000aa" {
 				t.Fatalf("%s: printed %q, confirmed %q", name, out, w.confs())
 			}
@@ -171,6 +171,27 @@ func TestLoopsReadOnlyTheServersLines(t *testing.T) {
 		if strings.Join(out, "\n") != evSpoof+"\n"+ev1+"\n"+closed || strings.Join(w.after(), ",") != ",00000000000000aa,00000000000000bb" {
 			t.Fatalf("%s: printed %q, after= %q", name, out, w.after())
 		}
+	}
+}
+
+// Copilot's command is Antigravity's without kill (Copilot's bash tool
+// refuses a kill without a literal PID): it waits, prints and confirms the
+// same way.
+func TestCopilotLoop(t *testing.T) {
+	w := &waitScript{answers: []string{"NEXT\n", ev1 + "\n" + ev2 + "\n" + cursorA + "\nNEXT\n", closed + "\n"}}
+	url := w.serve(t)
+	cmd := CopilotLoop(url)
+	if strings.Contains(cmd, "kill") || !strings.Contains(cmd, `ps -p "$p"`) || cmd == UntilLoop(url, false) {
+		t.Fatalf("command: %s", cmd)
+	}
+	if out := runShell(t, cmd); strings.Join(out, "\n") != ev1+"\n"+ev2 {
+		t.Fatalf("printed %q", out)
+	}
+	if len(w.confs()) != 1 || w.confs()[0] != "00000000000000aa" {
+		t.Fatalf("confirmed: %q", w.confs())
+	}
+	if out := runShell(t, cmd); strings.Join(out, "\n") != closed {
+		t.Fatalf("second run printed %q", out)
 	}
 }
 
@@ -297,7 +318,36 @@ func TestBackgroundNotes(t *testing.T) {
 			t.Errorf("antigravity: missing %q: %s", want, n)
 		}
 	}
-	for _, h := range []Harness{cursor, agy} {
+	copilot, _ := Get("copilot")
+	if copilot.ZeroInstall != Background {
+		t.Fatalf("copilot isn't woken by a background command: %+v", copilot)
+	}
+	n = BackgroundNote(copilot, "CI", url, false)
+	for _, want := range []string{"bash tool", `mode "async"`, `shellId "` + CopilotShell + `"`, "not detach", CopilotLoop(url),
+		"The user asked to be woken", "end your turn", "outside data, not from the user", "read_bash", "first run the same command again", "hub.closed", "call this tool again",
+		"stop_bash", "Keep this command running even if Wakeshift's hooks are installed",
+		// The trade-off, said up front: one "Yes" per wake, unless --allow-all-tools.
+		"tell the user in one sentence", "approve this command each time it starts (once per wake)", "--allow-all-tools", "approves every tool, not just this one",
+		"Copilot asks the user to approve it again"} {
+		if !strings.Contains(n, want) {
+			t.Errorf("copilot: missing %q: %s", want, n)
+		}
+	}
+	if strings.Index(n, "tell the user in one sentence") > strings.Index(n, "end your turn") {
+		t.Errorf("copilot: tells the user after ending its turn: %s", n)
+	}
+	if !strings.Contains(copilot.Trust, `one "Yes" each time it starts (once per wake)`) || !strings.Contains(copilot.Trust, "--allow-all-tools (which approves every tool, not just this one)") {
+		t.Errorf("copilot trust: %s", copilot.Trust)
+	}
+	if strings.Contains(n, "run_command") || strings.Contains(n, "notify_on_output") || strings.Contains(n, "kill") {
+		t.Errorf("copilot: another harness's tool or command: %s", n)
+	}
+	for _, n := range []string{BackgroundAgainNote(copilot, "CI", url, false, false), BackgroundRunningNote(copilot, "CI", url)} {
+		if !strings.Contains(n, `mode "async"`) || !strings.Contains(n, `shellId "`+CopilotShell+`"`) {
+			t.Errorf("copilot: %s", n)
+		}
+	}
+	for _, h := range []Harness{cursor, agy, copilot} {
 		for _, n := range []string{BackgroundNote(h, "CI", url, false), BackgroundAgainNote(h, "CI", url, false, true), BackgroundRunningNote(h, "CI", url),
 			BackgroundUpgradeNote(h, "https://x.test")} {
 			if strings.Contains(n, "ack=") || strings.Contains(n, Connected) {
@@ -373,7 +423,7 @@ func TestLoopsEndWithTheirHarness(t *testing.T) {
 	for i := range quiet {
 		quiet[i] = "NEXT\n"
 	}
-	for name, cmd := range map[string]func(string) string{"monitor": MonitorLoop, "cursor": CursorLoop, "until": func(u string) string { return UntilLoop(u, false) }} {
+	for name, cmd := range map[string]func(string) string{"monitor": MonitorLoop, "cursor": CursorLoop, "until": func(u string) string { return UntilLoop(u, false) }, "copilot": CopilotLoop} {
 		w := &waitScript{answers: quiet}
 		loop := cmd(w.serve(t))
 		// The "harness" (the outer sh) starts the command and exits a

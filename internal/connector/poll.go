@@ -52,7 +52,8 @@ type Batch struct {
 	Deliveries []Delivery
 	Link       string // the rotated stream link to use from now on, if any
 	// Background: the agent's own wait command (Cursor's Shell,
-	// Antigravity's run_command, Claude Code's Monitor) holds the stream
+	// Antigravity's run_command, Copilot CLI's async bash, Claude Code's
+	// Monitor) holds the stream
 	// and wakes the conversation itself, so a stop hook needn't listen.
 	Background bool
 }
