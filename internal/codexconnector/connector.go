@@ -33,9 +33,9 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/clawvisor/wakeshift-plugins/internal/connector"
-	"github.com/clawvisor/wakeshift-plugins/internal/connectorversion"
-	"github.com/clawvisor/wakeshift-plugins/internal/framing"
+	"github.com/wakeshift/connectors/internal/connector"
+	"github.com/wakeshift/connectors/internal/connectorversion"
+	"github.com/wakeshift/connectors/internal/framing"
 )
 
 // Why Run returned.

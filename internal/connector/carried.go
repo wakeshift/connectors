@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/clawvisor/wakeshift-plugins/internal/beacon"
+	"github.com/wakeshift/connectors/internal/beacon"
 )
 
 // Carried is where in a tool result a beacon was found. It matters for a

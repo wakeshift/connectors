@@ -14,6 +14,6 @@
 // docs/harnesses.md.
 package main
 
-import "github.com/clawvisor/wakeshift-plugins/internal/connectcli"
+import "github.com/wakeshift/connectors/internal/connectcli"
 
 func main() { connectcli.Main() }

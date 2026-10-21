@@ -1,4 +1,4 @@
-module github.com/clawvisor/wakeshift-plugins
+module github.com/wakeshift/connectors
 
 go 1.27.0
 

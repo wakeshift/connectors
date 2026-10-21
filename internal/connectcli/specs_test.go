@@ -3,8 +3,8 @@ package connectcli
 import (
 	"testing"
 
-	"github.com/clawvisor/wakeshift-plugins/internal/connector"
-	"github.com/clawvisor/wakeshift-plugins/internal/harnesses"
+	"github.com/wakeshift/connectors/internal/connector"
+	"github.com/wakeshift/connectors/internal/harnesses"
 )
 
 // What the core tells agents (internal/harnesses) and what the binary can

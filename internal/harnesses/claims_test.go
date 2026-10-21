@@ -1,6 +1,8 @@
 package harnesses
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"strings"
 	"testing"
@@ -85,6 +87,11 @@ func TestArgDescriptions(t *testing.T) {
 		t.Fatalf("%q", d)
 	}
 	ts, err := os.ReadFile("../../sdk/typescript/src/wakeshift.ts")
+	if errors.Is(err, fs.ErrNotExist) {
+		// The published connectors (opensource/export.sh) have no SDK; this
+		// repository always does, so the check runs here.
+		t.Skip("the TypeScript SDK isn't in this tree")
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -26,7 +26,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/clawvisor/wakeshift-plugins/internal/jws"
+	"github.com/wakeshift/connectors/internal/jws"
 )
 
 const (

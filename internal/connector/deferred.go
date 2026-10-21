@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/clawvisor/wakeshift-plugins/internal/beacon"
+	"github.com/wakeshift/connectors/internal/beacon"
 )
 
 // connect redeems a beacon for the conversation and keeps its link,

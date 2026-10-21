@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/clawvisor/wakeshift-plugins/internal/connector"
+	"github.com/wakeshift/connectors/internal/connector"
 )
 
 // Codex says nothing to other clients when a TUI stops showing a thread on

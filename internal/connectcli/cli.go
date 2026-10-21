@@ -29,10 +29,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/clawvisor/wakeshift-plugins/internal/codexconnector"
-	"github.com/clawvisor/wakeshift-plugins/internal/connector"
-	"github.com/clawvisor/wakeshift-plugins/internal/harnesses"
-	"github.com/clawvisor/wakeshift-plugins/internal/version"
+	"github.com/wakeshift/connectors/internal/codexconnector"
+	"github.com/wakeshift/connectors/internal/connector"
+	"github.com/wakeshift/connectors/internal/harnesses"
+	"github.com/wakeshift/connectors/internal/version"
 )
 
 // lease: a Codex connector whose thread nobody but it has used for this

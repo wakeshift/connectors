@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/clawvisor/wakeshift-plugins/internal/version"
-	"github.com/clawvisor/wakeshift-plugins/plugins/hermes"
+	"github.com/wakeshift/connectors/internal/version"
+	"github.com/wakeshift/connectors/plugins/hermes"
 )
 
 // Hermes Agent (0.22.2, verified; docs/harnesses.md) loads Python plugins

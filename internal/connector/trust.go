@@ -34,8 +34,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/clawvisor/wakeshift-plugins/internal/beacon"
-	"github.com/clawvisor/wakeshift-plugins/internal/connectorversion"
+	"github.com/wakeshift/connectors/internal/beacon"
+	"github.com/wakeshift/connectors/internal/connectorversion"
 )
 
 // Home is Wakeshift's own directory on this machine (WAKESHIFT_HOME,

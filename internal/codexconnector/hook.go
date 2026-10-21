@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/clawvisor/wakeshift-plugins/internal/beacon"
-	"github.com/clawvisor/wakeshift-plugins/internal/connector"
+	"github.com/wakeshift/connectors/internal/beacon"
+	"github.com/wakeshift/connectors/internal/connector"
 )
 
 // The hook: Codex runs it after MCP tool calls (PostToolUse) with the call

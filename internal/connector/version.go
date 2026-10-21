@@ -5,8 +5,8 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/clawvisor/wakeshift-plugins/internal/connectorversion"
-	"github.com/clawvisor/wakeshift-plugins/internal/version"
+	"github.com/wakeshift/connectors/internal/connectorversion"
+	"github.com/wakeshift/connectors/internal/version"
 )
 
 // ClientHeader is the X-Wakeshift-Connector value this binary sends for a

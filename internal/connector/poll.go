@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/clawvisor/wakeshift-plugins/internal/connectorversion"
+	"github.com/wakeshift/connectors/internal/connectorversion"
 )
 
 // Long polling a session's stream link, for hooks that can't hold a

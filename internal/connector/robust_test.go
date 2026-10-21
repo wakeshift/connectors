@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/clawvisor/wakeshift-plugins/internal/beacon"
-	"github.com/clawvisor/wakeshift-plugins/internal/jws"
+	"github.com/wakeshift/connectors/internal/beacon"
+	"github.com/wakeshift/connectors/internal/jws"
 )
 
 // A listener whose harness has gone hands nothing over and acknowledges

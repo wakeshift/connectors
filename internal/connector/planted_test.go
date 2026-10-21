@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/clawvisor/wakeshift-plugins/internal/beacon"
-	"github.com/clawvisor/wakeshift-plugins/internal/jws"
+	"github.com/wakeshift/connectors/internal/beacon"
+	"github.com/wakeshift/connectors/internal/jws"
 )
 
 // signedFor is a beacon the fake Wakeshift signed for app, bound to

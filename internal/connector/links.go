@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/clawvisor/wakeshift-plugins/internal/framing"
+	"github.com/wakeshift/connectors/internal/framing"
 )
 
 // Links keeps each conversation's stream link (a secret: 0600 files in a

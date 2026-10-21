@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/clawvisor/wakeshift-plugins/internal/beacon"
-	"github.com/clawvisor/wakeshift-plugins/internal/connectorversion"
-	"github.com/clawvisor/wakeshift-plugins/internal/version"
+	"github.com/wakeshift/connectors/internal/beacon"
+	"github.com/wakeshift/connectors/internal/connectorversion"
+	"github.com/wakeshift/connectors/internal/version"
 )
 
 // Every request the hooks make names the binary, its version and the

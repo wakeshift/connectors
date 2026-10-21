@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/clawvisor/wakeshift-plugins/internal/connector"
+	"github.com/wakeshift/connectors/internal/connector"
 )
 
 // Home is Wakeshift's directory on this machine (WAKESHIFT_HOME, default

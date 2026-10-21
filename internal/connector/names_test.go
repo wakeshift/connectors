@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/clawvisor/wakeshift-plugins/internal/harnesses"
+	"github.com/wakeshift/connectors/internal/harnesses"
 )
 
 // What the hook's "connected" note says about when messages arrive agrees

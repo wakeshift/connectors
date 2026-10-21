@@ -12,8 +12,8 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/clawvisor/wakeshift-plugins/internal/connectorversion"
-	"github.com/clawvisor/wakeshift-plugins/internal/version"
+	"github.com/wakeshift/connectors/internal/connectorversion"
+	"github.com/wakeshift/connectors/internal/version"
 )
 
 // The connector's stream names it (X-Wakeshift-Connector), and a 426

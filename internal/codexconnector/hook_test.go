@@ -21,8 +21,8 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/clawvisor/wakeshift-plugins/internal/beacon"
-	"github.com/clawvisor/wakeshift-plugins/internal/jws"
+	"github.com/wakeshift/connectors/internal/beacon"
+	"github.com/wakeshift/connectors/internal/jws"
 )
 
 // fakeAppServer answers initialize and thread/read (for known threads) on a

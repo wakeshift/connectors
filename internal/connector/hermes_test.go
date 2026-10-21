@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/clawvisor/wakeshift-plugins/internal/version"
-	"github.com/clawvisor/wakeshift-plugins/plugins/hermes"
+	"github.com/wakeshift/connectors/internal/version"
+	"github.com/wakeshift/connectors/plugins/hermes"
 )
 
 // Installing for Hermes writes Wakeshift's plugin into $HERMES_HOME/plugins,

@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/clawvisor/wakeshift-plugins/internal/beacon"
-	"github.com/clawvisor/wakeshift-plugins/internal/jws"
+	"github.com/wakeshift/connectors/internal/beacon"
+	"github.com/wakeshift/connectors/internal/jws"
 )
 
 // fakeWakeshift serves JWKS and the redeem endpoint, as the core does.

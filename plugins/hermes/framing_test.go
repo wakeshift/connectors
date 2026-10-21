@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/clawvisor/wakeshift-plugins/internal/connector"
+	"github.com/wakeshift/connectors/internal/connector"
 )
 
 var update = flag.Bool("update", false, "rewrite testdata/framing.json from the Go framing")
