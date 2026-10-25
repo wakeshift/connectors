@@ -34,6 +34,9 @@ const (
 	// PreCall: before an MCP tool call, where the hook can tell the server
 	// the conversation (Copilot's preMcpToolCall).
 	PreCall
+	// Resolve: a resolver the tool-result hook started (ResolveSoon) reads
+	// the conversation's deferred results as soon as they're written.
+	Resolve
 )
 
 // PreCallFormat is a Format that answers PreCall.
@@ -64,6 +67,10 @@ type Input struct {
 	// hooks say ("" for the others): beacons from it are checked against
 	// the app it's pinned to (Pins).
 	Server string
+	// ServerConversation is Server's own name for the conversation, for
+	// harnesses whose servers the hook tells (AliasFormat): what beacons
+	// from that server are bound to, and what redeems them.
+	ServerConversation string
 	// Continued: the harness says this stop already follows a stop hook's
 	// continuation (stop_hook_active, loop_count > 0).
 	Continued bool
@@ -125,6 +132,10 @@ type Hook struct {
 	Unbound bool
 	// Repoll is the longest single poll (the server may cap a wait).
 	Repoll time.Duration
+	// OnTransient, if set, is called when a beacon couldn't be redeemed
+	// only because Wakeshift was unreachable (ErrUnreachable): redeeming
+	// the same beacon again later may work.
+	OnTransient func()
 
 	// EventName is the event the command line names (--event), for
 	// formats whose input doesn't.
@@ -143,6 +154,11 @@ type Hook struct {
 	// Pins: which app's beacons each MCP server carries (default: in the
 	// harness's settings directory).
 	Pins Pins
+	// ResolveSoon, if set, starts a resolver for the conversation (a
+	// detached `hook --event resolve`) when a tool result is deferred, so
+	// its beacon is redeemed the moment the harness writes the result, not
+	// at the next turn: by the time the model could repeat it, it's used.
+	ResolveSoon func(conversation string)
 
 	// patient: this call listens as a waiter (Rewake), so its polls wait
 	// out the agent's own wait command rather than stopping for it.
@@ -179,6 +195,20 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout, stderr io.Write
 	if err != nil || in.Conversation == "" {
 		return 0
 	}
+	if h.aliased() {
+		switch in.Event {
+		case PreCall:
+			// Each server is told its own name for the conversation, and
+			// only a server the harness names is told anything.
+			if in.ServerConversation = h.serverConversation(in.Server, in.Conversation); in.ServerConversation == "" {
+				return 0
+			}
+			h.recordCall(in)
+		case ToolResult:
+			in.Server = h.serverOf(in)
+			in.ServerConversation = h.serverConversation(in.Server, in.Conversation)
+		}
+	}
 	if in.Event == TurnStart || in.Event == Stop || in.Event == Rewake {
 		h.resolveDeferred(ctx, in)
 	}
@@ -193,6 +223,8 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout, stderr io.Write
 		if pf, is := h.Format.(PreCallFormat); is {
 			out, ok = pf.PreCall(in)
 		}
+	case Resolve:
+		h.resolveSoon(ctx, in)
 	case Stop, Rewake:
 		if h.Rewake || in.Event == Rewake {
 			started := time.Now()
@@ -229,6 +261,9 @@ func (h *Hook) toolResult(ctx context.Context, in Input) (Output, bool) {
 		// The result isn't readable yet (Antigravity writes it after this
 		// hook returns): the conversation's next hook reads it.
 		h.deferResult(in)
+		if h.ResolveSoon != nil {
+			h.ResolveSoon(in.Conversation)
+		}
 		return Output{}, false
 	}
 	var notes []string
@@ -428,7 +463,7 @@ func (h *Hook) take(ctx context.Context, conversation string, wait time.Duration
 			// tool hook); take the stream back after a pause, so the
 			// conversation isn't left with nothing listening.
 		}
-		if b.Link != "" && b.Link != link && sameOrigin(b.Link, link) {
+		if b.Link != "" && b.Link != link && SameOrigin(b.Link, link) {
 			link = b.Link
 			h.Links.Save(conversation, link)
 		}
@@ -502,7 +537,9 @@ const minPoll = 100 * time.Millisecond
 // arrive after the server stops waiting (a fifth of it, for a short one).
 const answerReserve = 2 * time.Second
 
-func sameOrigin(a, b string) bool {
+// SameOrigin says whether two links are on the same server (scheme and
+// host): a link is only ever swapped for another on its own server.
+func SameOrigin(a, b string) bool {
 	ua, err1 := url.Parse(a)
 	ub, err2 := url.Parse(b)
 	return err1 == nil && err2 == nil && ua.Scheme == ub.Scheme && ua.Host == ub.Host

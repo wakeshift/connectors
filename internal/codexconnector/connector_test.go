@@ -140,6 +140,76 @@ func pacedStream(t *testing.T, n int, next <-chan struct{}, acks chan<- string) 
 	return "ws" + strings.TrimPrefix(srv.URL, "http")
 }
 
+// A rotation follows a link on the same server, never one on another host:
+// the stream's next link must not move the thread's deliveries elsewhere.
+func TestRotationStaysOnTheServer(t *testing.T) {
+	var elsewhere sync.Mutex
+	called := false
+	other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		elsewhere.Lock()
+		called = true
+		elsewhere.Unlock()
+	}))
+	defer other.Close()
+	var mu sync.Mutex
+	var paths []string
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.RawQuery)
+		n := len(paths)
+		mu.Unlock()
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+		var to string
+		switch n {
+		case 1:
+			to = "ws" + strings.TrimPrefix(other.URL, "http") + "/v1/stream?link=stolen"
+		case 2:
+			to = "ws" + strings.TrimPrefix(srv.URL, "http") + "/v1/stream?link=next"
+		default:
+			c.Read(r.Context())
+			return
+		}
+		b, _ := json.Marshal(map[string]any{"type": "hub.rotate", "url": to})
+		c.Write(r.Context(), websocket.MessageText, b)
+		c.Close(websocket.StatusNormalClosure, "rotate")
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	c := &conn{cfg: Config{Stream: "ws" + strings.TrimPrefix(srv.URL, "http") + "/v1/stream?link=first", Log: slog.New(slog.DiscardHandler)}, cancel: cancel,
+		seen: map[string]bool{}, unconfirmed: map[string]bool{}}
+	done := make(chan struct{})
+	go func() { c.stream(ctx); close(done) }()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		mu.Lock()
+		n := len(paths)
+		mu.Unlock()
+		if n >= 3 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel(nil)
+	<-done
+	mu.Lock()
+	defer mu.Unlock()
+	elsewhere.Lock()
+	defer elsewhere.Unlock()
+	if called {
+		t.Fatal("the connector followed a rotation to another server")
+	}
+	// First link, then (the foreign rotation ignored) the first again, then
+	// the same-server rotation's.
+	if len(paths) < 3 || paths[0] != "link=first" || paths[1] != "link=first" || paths[2] != "link=next" {
+		t.Fatalf("connected with %v", paths)
+	}
+}
+
 // A stream refused at capacity reconnects after its Retry-After, not the
 // shorter backoff.
 func TestStreamHonoursRetryAfter(t *testing.T) {

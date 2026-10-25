@@ -330,7 +330,14 @@ func (c *conn) streamOnce(ctx context.Context, link string) (next string, err er
 			delete(c.unconfirmed, m.DeliveryID)
 			c.mu.Unlock()
 		case "hub.rotate":
-			next = m.URL // the server closes next; reconnect there
+			// The server closes next; reconnect there, but only on the same
+			// server, as the hooks do: a link never moves the stream (and the
+			// thread's deliveries) to another host.
+			if connector.SameOrigin(m.URL, link) {
+				next = m.URL
+			} else {
+				c.cfg.Log.Warn("stream: ignored a rotation to another server")
+			}
 		}
 	}
 }

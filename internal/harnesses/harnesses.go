@@ -407,6 +407,34 @@ func ForClient(name string) (Harness, bool) {
 	return Harness{}, false
 }
 
+// ExactClient is the harness a client name names exactly: one of its
+// client names, its name or its ID, ignoring case and a trailing tag in
+// parentheses. A stateless server sees only the name a client registered
+// with, which isn't always its clientInfo name and often carries a tag
+// ("OpenCode", "opencode (wakebench)", "Claude Code (wakeshift)"). A
+// variant ("cursor-nightly") isn't exact: it may be another product.
+func ExactClient(name string) (Harness, bool) {
+	if h, ok := ForClient(name); ok {
+		return h, true
+	}
+	base := strings.TrimSpace(name)
+	if i := strings.Index(base, "("); i > 0 && strings.HasSuffix(base, ")") {
+		base = strings.TrimSpace(base[:i])
+	}
+	if base == "" {
+		return Harness{}, false
+	}
+	if h, ok := ForClient(base); ok && h.Unsure == "" { // a generic name others send too doesn't count tagged
+		return h, true
+	}
+	for _, h := range all {
+		if h.Unsure == "" && (strings.EqualFold(base, h.Name) || strings.EqualFold(base, h.ID)) {
+			return h, true
+		}
+	}
+	return Harness{}, false
+}
+
 // Via is the signal a call's harness was recognised by.
 type Via string
 
@@ -558,6 +586,15 @@ const Connected = "Wakeshift: connected"
 // unwoken is what a conversation nothing delivers to is told.
 const unwoken = "Wakeshift can't wake this conversation yet: new messages are held until you call this tool again."
 
+// InstallAgree is the agreement line for the wakeshift program and its
+// connectors (Connector Terms Section 3.1): every offer to install or update
+// them has the agent show it to the user, word for word, as it asks
+// (ShowAgree). It is written once, here.
+const InstallAgree = "By installing, you agree to Wakeshift's Connector Terms (https://wakeshift.ai/connector-terms) and Privacy Policy (https://wakeshift.ai/privacy)."
+
+// ShowAgree tells the agent to show InstallAgree when it asks.
+const ShowAgree = "When you ask, show them this line, word for word: \"" + InstallAgree + "\""
+
 // InstallNote is what an agent in this harness should tell its user
 // while nothing delivers Wakeshift's messages to its conversation: whether
 // and how to install Wakeshift's hooks and the harness's trust step, or that
@@ -599,7 +636,7 @@ func installNote(h Harness, install string) string {
 		return "You can be woken now, within seconds even while idle, by a command you start in the background (subscribing gives it). " + backgroundUpgrade(h, install)
 	}
 	ask := unwoken + " Ask the user now whether to install Wakeshift's hooks for " + h.Name + " (it " + h.Changes + "), so new messages reach this conversation " + h.When + ". " +
-		"Only if they agree, run `" + install + "`. "
+		ShowAgree + " Only if they agree, run `" + install + "`. "
 	if h.AskTool != "" {
 		ask = unwoken + " Wakeshift's hooks for " + h.Name + " deliver new messages to this conversation " + h.When + ". " + askWith(h, install) + " "
 	}
@@ -659,6 +696,7 @@ func askWith(h Harness, install string) string {
 	}
 	n := "Ask them with your " + h.AskTool + " tool, with two options: \"" + AskYes(h) + "\" (description: runs `" + install + "`, " + h.Changes + ") " +
 		"and \"" + AskNo + "\" (description: " + no + "). " +
+		"Put this line in the question, word for word: \"" + InstallAgree + "\" " +
 		"Run `" + install + "` only if they pick yes"
 	if h.UserShell != "" {
 		n += "; if running it is refused (auto mode or a permission denial), ask them to run it themselves by typing `" + h.UserShell + " " + install + "` (the " + h.UserShell + " prefix runs it as the user)"
@@ -679,7 +717,7 @@ func upgradeNote(h Harness, install string) string {
 		n = "For delivery without a Monitor, the user can install Wakeshift's hooks for " + h.Name + ". " + askWith(h, install)
 	} else {
 		n = "For delivery without a Monitor, the user can install Wakeshift's hooks for " + h.Name + " (it " + h.Changes + "). " +
-			"Ask them first; only if they agree, run `" + install + "`."
+			"Ask them first. " + ShowAgree + " Only if they agree, run `" + install + "`."
 	}
 	if h.Trust != "" {
 		n += " Then tell them: " + h.Trust
@@ -715,7 +753,7 @@ func RepeatNoteFor(h Harness, install string) string {
 	if !h.Installable {
 		return unsure(h, installNote(h, install))
 	}
-	ask := "If you haven't asked the user yet whether to install them (it " + h.Changes + "), ask now; if they agreed and it hasn't run, run `" + install + "`." + sep(h.Run)
+	ask := "If you haven't asked the user yet whether to install them (it " + h.Changes + "), ask now. " + ShowAgree + " If they agreed and it hasn't run, run `" + install + "`." + sep(h.Run)
 	if h.AskTool != "" {
 		ask = "If you haven't asked the user yet whether to install them, ask now. " + askWith(h, install)
 	}

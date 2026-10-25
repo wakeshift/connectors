@@ -37,6 +37,30 @@ func TestAgentID(t *testing.T) {
 
 // Each harness is found by the clientInfo name it really sends (verified
 // against the binaries; docs/harnesses.md), and only by that.
+// A stateless server sees the name a client registered with; with a tag in
+// parentheses, or the harness's own name, it's still that harness exactly.
+func TestExactClient(t *testing.T) {
+	for name, id := range map[string]string{
+		"opencode":                "opencode",
+		"OpenCode":                "opencode", // what opencode registers as
+		"opencode (wakebench)":    "opencode",
+		"Claude Code (wakeshift)": "claude-code",
+		"Codex":                   "codex",
+		"Cursor (wakebench)":      "cursor",
+		"codex-mcp-client":        "codex",
+	} {
+		h, ok := ExactClient(name)
+		if !ok || h.ID != id {
+			t.Fatalf("%q: %q %v", name, h.ID, ok)
+		}
+	}
+	for _, name := range []string{"cursor-nightly", "cursor-nightly (beta)", "My Client", "(opencode)", "", "mcp (x)"} {
+		if h, ok := ExactClient(name); ok {
+			t.Fatalf("%q isn't exact, got %q", name, h.ID)
+		}
+	}
+}
+
 func TestForClient(t *testing.T) {
 	for name, id := range map[string]string{
 		"codex-mcp-client":      "codex",

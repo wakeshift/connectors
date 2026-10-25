@@ -30,13 +30,19 @@ import (
 // that exits with opencode, speaking JSON lines:
 //
 //	plugin → bridge, first line: {"hook_event_name": "PostToolUse" | "SessionIdle", "session_id", "call_id", "tool_name", "tool_response"}
-//	bridge → plugin, first line: {"additionalContext": "…", "keep_alive": bool}
+//	bridge → plugin, first line: {"additionalContext": "…", "keep_alive": bool, "retry"?: true}
 //	bridge → plugin: {"wake": {"id", "text"}}      a message for the session
 //	plugin → bridge: {"ack": "<id>"}               once opencode stored it (message.part.updated)
 //
 // The bridge acknowledges to Wakeshift on the plugin's ack, so delivery is
 // at least once up to opencode storing the message. The bridge's errors go
 // to ~/.wakeshift/opencode/logs/bridge.log.
+//
+// Retries: the plugin starts a session's bridge again, after a backoff, when
+// one couldn't start (no first line), answered "retry" (Wakeshift was
+// unreachable redeeming the beacon), or exited 1 after connecting (stopped
+// listening with its link still saved). Exit 0 (its link was removed or
+// ended) and keep_alive false without "retry" are final.
 
 const opencodeName = "opencode"
 
@@ -96,8 +102,11 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) err
 	}
 	in, err := b.Hook.Format.Parse(bytes.TrimSpace(first))
 	var note string
+	transient := false
+	run := *b.Hook // this run's own copy: the shared Hook isn't changed
+	run.OnTransient = func() { transient = true }
 	if err == nil && in.Conversation != "" && in.Event == ToolResult {
-		if out, ok := b.Hook.toolResult(ctx, in); ok {
+		if out, ok := run.toolResult(ctx, in); ok {
 			var c struct {
 				AdditionalContext string `json:"additionalContext"`
 			}
@@ -114,7 +123,11 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) err
 		_, err := stdout.Write(append(line, '\n'))
 		return err
 	}
-	if err := write(map[string]any{"additionalContext": note, "keep_alive": keep}); err != nil || !keep {
+	answer := map[string]any{"additionalContext": note, "keep_alive": keep}
+	if !keep && transient {
+		answer["retry"] = true // Wakeshift was unreachable: the plugin may try this beacon again
+	}
+	if err := write(answer); err != nil || !keep {
 		return nil
 	}
 
@@ -234,6 +247,10 @@ import { join } from "node:path"
 const BIN = __WAKESHIFT_BIN__
 const KEY = "wakeshift/connector"
 const FIRST_LINE_MS = 15000
+// A bridge that can't start, or stops while its link is still saved, is
+// started again after a backoff: 2s, doubling to 2 minutes, with jitter.
+const RETRY_MIN_MS = Number(process.env.WAKESHIFT_OPENCODE_RETRY_MIN_MS) || 2000
+const RETRY_MAX_MS = Number(process.env.WAKESHIFT_OPENCODE_RETRY_MAX_MS) || 120000
 
 export default {
   id: "wakeshift",
@@ -243,6 +260,37 @@ export default {
     const busy = new Set()
     const queue = new Map() // session ID -> [{id, text}]
     const acks = new Map() // wake ID -> send ack
+    const retries = new Map() // session ID -> {timer, delay, input}
+    const starting = new Map() // session ID -> bridge still starting
+    const gone = new Set() // deleted sessions: never started again
+    const stopped = new WeakSet() // bridges this plugin ended on purpose
+    let disposed = false
+
+    // Starts the session's bridge again after a backoff; one timer per session.
+    const retry = (sid, input) => {
+      if (disposed || gone.has(sid)) return
+      const r = retries.get(sid) ?? { delay: RETRY_MIN_MS }
+      r.input = input
+      retries.set(sid, r)
+      if (r.timer) return
+      const wait = Math.min(RETRY_MAX_MS, Math.round(r.delay * (0.5 + Math.random())))
+      r.delay = Math.min(r.delay * 2, RETRY_MAX_MS)
+      r.timer = setTimeout(() => {
+        r.timer = undefined
+        if (!children.has(sid) && !starting.has(sid)) void start(sid, r.input)
+      }, wait)
+      r.timer.unref?.()
+    }
+    // Connected, or told there's nothing to listen to: the backoff starts over.
+    const settle = (sid) => {
+      const r = retries.get(sid)
+      if (r?.timer) clearTimeout(r.timer)
+      retries.delete(sid)
+    }
+    const stop = (child) => {
+      stopped.add(child)
+      try { child.kill() } catch {}
+    }
 
     // Subagents' tool calls report their own session: wake the root one.
     const root = async (id) => {
@@ -283,29 +331,46 @@ export default {
       }
     }
 
+    // Starts the session's bridge; resolves with its note for the model. A
+    // bridge that can't start, or stops while its link is still saved (exit
+    // code 1), is retried; one with nothing to listen to, or whose link was
+    // removed or ended (exit code 0), isn't.
     const start = (sid, input) =>
       new Promise((resolve) => {
+        if (disposed || gone.has(sid)) return resolve(undefined)
         let child
         const errs = log()
         try {
           child = spawn(BIN, ["bridge", "--harness", "opencode"], { stdio: ["pipe", "pipe", errs] })
         } catch {
+          retry(sid, input)
           return resolve(undefined)
         } finally {
           if (typeof errs === "number") { try { closeSync(errs) } catch {} } // the child has its own
         }
+        starting.set(sid, child)
         let first = true
+        let connected = false
         const done = (text) => {
           if (!first) return
           first = false
+          if (starting.get(sid) === child) starting.delete(sid)
           clearTimeout(timer)
           resolve(text)
         }
-        const timer = setTimeout(() => { try { child.kill() } catch {} ; done(undefined) }, FIRST_LINE_MS)
-        child.on("error", () => done(undefined))
-        child.on("exit", () => {
+        const failed = () => { // no first line; one this plugin stopped isn't retried
+          if (!first) return
           done(undefined)
+          if (!stopped.has(child)) retry(sid, input)
+        }
+        const timer = setTimeout(() => { failed(); stop(child) }, FIRST_LINE_MS)
+        child.on("error", failed)
+        child.on("exit", (code) => {
+          failed()
           if (children.get(sid) === child) children.delete(sid)
+          if (connected && code !== 0 && !stopped.has(child)) {
+            retry(sid, { hook_event_name: "SessionIdle", session_id: sid }) // its link is saved by now
+          }
         })
         child.stdin.on("error", () => {})
         child.stdin.write(JSON.stringify(input) + "\n")
@@ -313,9 +378,13 @@ export default {
           let m
           try { m = JSON.parse(line) } catch { return }
           if (first) {
+            if (stopped.has(child)) return done(undefined) // replaced while starting
+            if (m.retry && !m.keep_alive) retry(sid, input) // Wakeshift was unreachable: try the same beacon again
+            else settle(sid)
             if (m.keep_alive) {
+              connected = true
               const old = children.get(sid)
-              if (old && old !== child) { try { old.kill() } catch {} }
+              if (old && old !== child) stop(old)
               children.set(sid, child)
             } else {
               try { child.stdin.end() } catch {}
@@ -339,6 +408,10 @@ export default {
           if (typeof beacon !== "string" || !Array.isArray(output.content)) return
           const sid = await root(input.sessionID)
           tried.add(sid)
+          // A fresh beacon replaces a pending retry, and one still starting.
+          settle(sid)
+          const pending = starting.get(sid)
+          if (pending) stop(pending)
           const text = await start(sid, { hook_event_name: "PostToolUse", session_id: sid, call_id: input.callID,
             tool_name: input.tool, tool_response: output })
           if (text) output.content.push({ type: "text", text })
@@ -350,7 +423,7 @@ export default {
           if (event.type === "session.status" && p.status?.type === "busy") busy.add(p.sessionID)
           if (event.type === "session.idle" && p.sessionID) {
             busy.delete(p.sessionID)
-            if (!children.has(p.sessionID) && !tried.has(p.sessionID)) {
+            if (!children.has(p.sessionID) && !starting.has(p.sessionID) && !tried.has(p.sessionID)) {
               tried.add(p.sessionID) // after a restart: listen again if it was connected
               void start(p.sessionID, { hook_event_name: "SessionIdle", session_id: p.sessionID })
             }
@@ -365,13 +438,21 @@ export default {
           }
           if (event.type === "session.deleted") {
             const sid = p.info?.id ?? p.sessionID
-            try { children.get(sid)?.kill() } catch {}
+            gone.add(sid)
+            settle(sid)
+            for (const c of [starting.get(sid), children.get(sid)]) if (c) stop(c)
+            starting.delete(sid)
             children.delete(sid)
           }
         } catch {}
       },
       dispose: async () => {
-        for (const c of children.values()) { try { c.kill() } catch {} }
+        disposed = true
+        for (const r of retries.values()) if (r.timer) clearTimeout(r.timer)
+        retries.clear()
+        for (const c of starting.values()) stop(c)
+        starting.clear()
+        for (const c of children.values()) stop(c)
         children.clear()
       },
     }

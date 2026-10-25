@@ -3,7 +3,7 @@
 // lets Wakeshift messages wake their agents' conversations in local
 // harnesses (Codex, Claude Code, Cursor, Copilot CLI, opencode, Antigravity).
 //
-//	wakeshift install --harness NAME --issuer URL   trust a Wakeshift and add the harness's hooks
+//	wakeshift install --harness NAME --issuer URL [--yes]   trust a Wakeshift and add the harness's hooks
 //	wakeshift uninstall --harness NAME              remove them
 //	wakeshift hook --harness NAME [--event E] [--rewake]   what the harness runs
 //	wakeshift bridge --harness opencode             the opencode plugin's child

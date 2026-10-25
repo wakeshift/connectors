@@ -57,10 +57,21 @@ func newFakeWakeshift(t *testing.T) *fakeWakeshift {
 
 func (f *fakeWakeshift) beacon(t *testing.T, conversation string, key ed25519.PrivateKey) string {
 	t.Helper()
+	return f.sign(t, conversation, "chat", key)
+}
+
+// beaconFor is a beacon for another app.
+func (f *fakeWakeshift) beaconFor(t *testing.T, conversation, app string) string {
+	t.Helper()
+	return f.sign(t, conversation, app, nil)
+}
+
+func (f *fakeWakeshift) sign(t *testing.T, conversation, app string, key ed25519.PrivateKey) string {
+	t.Helper()
 	if key == nil {
 		key = f.key
 	}
-	tok, err := jws.Sign(key, "k1", beacon.Type, beacon.Claims{Issuer: f.URL, Audience: beacon.Audience, Thread: conversation, App: "chat",
+	tok, err := jws.Sign(key, "k1", beacon.Type, beacon.Claims{Issuer: f.URL, Audience: beacon.Audience, Thread: conversation, App: app,
 		Redeem: f.URL + "/v1/connector/redeem", Ticket: "wst_t", IssuedAt: time.Now().Unix(), Expires: time.Now().Add(time.Minute).Unix()})
 	if err != nil {
 		t.Fatal(err)
@@ -77,14 +88,13 @@ func (f *fakeWakeshift) redemptions() []string {
 // fakePoller is the long-poll contract in memory: queued deliveries per
 // link, handed out until acked.
 type fakePoller struct {
-	mu      sync.Mutex
-	queue   map[string][]Delivery // link → pending
-	acked   []string
-	polls   []time.Duration
-	err     error
-	rotate  string
-	arrive  chan struct{} // closed to release a waiting poll
-	ackFail bool
+	mu     sync.Mutex
+	queue  map[string][]Delivery // link → pending
+	acked  []string
+	polls  []time.Duration
+	err    error
+	rotate string
+	arrive chan struct{} // closed to release a waiting poll
 }
 
 func newFakePoller() *fakePoller { return &fakePoller{queue: map[string][]Delivery{}} }

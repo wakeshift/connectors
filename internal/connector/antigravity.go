@@ -20,8 +20,13 @@ import (
 // the conversation (_meta["antigravity.google/conversation_id"]). So a
 // beacon in the result's text, naming the conversation, reaches the hook.
 //
-//   - PostToolUse (call_mcp_tool): read the step's text from the
-//     transcript, verify the beacon there, redeem. PostToolUse output
+//   - PostToolUse (call_mcp_tool): agy writes the step's text to the
+//     transcript only after the hook returns, and its model sees the text,
+//     beacon and all (no hook output can change it). So the hook starts a
+//     resolver (`--event resolve`, detached) that reads the step the moment
+//     it's written, verifies the beacon there and redeems it: used up
+//     before the model could repeat it. (The next PreInvocation or Stop
+//     reads it too, if the resolver couldn't run.) PostToolUse output
 //     can't add context, so the "connected" note waits for the next
 //     PreInvocation, which can (injectSteps).
 //   - Stop: listen for a while; on messages, {"decision":"continue",
@@ -79,6 +84,8 @@ func (antigravityFormat) ParseEvent(event string, b []byte) (Input, error) {
 		in.Event = TurnStart
 	case "stop":
 		in.Event = Stop
+	case "resolve":
+		in.Event = Resolve
 	}
 	return in, nil
 }

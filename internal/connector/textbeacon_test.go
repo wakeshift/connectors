@@ -39,16 +39,21 @@ func TestCopilot(t *testing.T) {
 	p := newFakePoller()
 	h := specHook(t, "copilot", ws, p)
 	conv := "1b47c0de-2f6e-4a8e-9c1d-6a1e2b3c4d5e"
-	// The session goes to the server in _meta, keeping earlier hooks' keys.
+	// The server's own name for the session goes to it in _meta, keeping
+	// earlier hooks' keys; never the session ID itself.
 	var pre struct {
 		MetaToUse map[string]any `json:"metaToUse"`
 	}
-	if json.Unmarshal([]byte(runAs(h, "preMcpToolCall", copilotPreCall)), &pre) != nil || pre.MetaToUse[CopilotConversationMeta] != conv || pre.MetaToUse["other/key"] != 1.0 {
+	if json.Unmarshal([]byte(runAs(h, "preMcpToolCall", copilotPreCall)), &pre) != nil || pre.MetaToUse["other/key"] != 1.0 {
 		t.Fatalf("pre: %+v", pre)
+	}
+	name, _ := pre.MetaToUse[CopilotConversationMeta].(string)
+	if name == "" || strings.Contains(name, conv) {
+		t.Fatalf("the server was told %q", name)
 	}
 	post := func(text string) string { return strings.Replace(copilotPostTool, "TEXT", jsonText(text), 1) }
 	// The beacon connects, and leaves the text the model sees.
-	out := runAs(h, "postToolUse", post("probe ok\n\n"+BeaconText(ws.beacon(t, conv, nil))))
+	out := runAs(h, "postToolUse", post("probe ok\n\n"+BeaconText(ws.beacon(t, name, nil))))
 	var r struct {
 		AdditionalContext string `json:"additionalContext"`
 		ModifiedResult    struct {
@@ -59,6 +64,9 @@ func TestCopilot(t *testing.T) {
 	if json.Unmarshal([]byte(out), &r) != nil || !strings.Contains(r.AdditionalContext, "connected") ||
 		r.ModifiedResult.TextResultForLlm != "probe ok" || r.ModifiedResult.ResultType != "success" || h.Links.Load(conv) == "" {
 		t.Fatalf("post: %s", out)
+	}
+	if red := ws.redemptions(); len(red) != 1 || red[0] != "wst_t@"+name {
+		t.Fatalf("redeemed %v", red)
 	}
 	// Another conversation's beacon: not acted on, but still out of the model's view.
 	r.AdditionalContext = ""
@@ -73,6 +81,70 @@ func TestCopilot(t *testing.T) {
 	var stop struct{ Decision, Reason string }
 	if json.Unmarshal([]byte(runAs(h, "agentStop", copilotStop)), &stop) != nil || stop.Decision != "block" || !strings.Contains(stop.Reason, "hi copilot") {
 		t.Fatalf("stop: %+v", stop)
+	}
+}
+
+// copilotCall is a preMcpToolCall to server's tool, returning the name the
+// server was told for the session.
+func copilotCall(t *testing.T, h *Hook, server, tool string) string {
+	t.Helper()
+	in := strings.NewReplacer(`"serverName":"probe"`, `"serverName":"`+server+`"`, `"toolName":"probe"`, `"toolName":"`+tool+`"`).Replace(copilotPreCall)
+	var pre struct {
+		MetaToUse map[string]any `json:"metaToUse"`
+	}
+	json.Unmarshal([]byte(runAs(h, "preMcpToolCall", in)), &pre)
+	name, _ := pre.MetaToUse[CopilotConversationMeta].(string)
+	return name
+}
+
+func copilotResult(tool, text string) string {
+	return strings.Replace(strings.Replace(copilotPostTool, "TEXT", jsonText(text), 1), `"toolName":"probe-probe"`, `"toolName":"`+tool+`"`, 1)
+}
+
+// No MCP server learns the Copilot session ID, and a beacon is acted on only
+// from the result of the server it names, pinned to its app: a server can't
+// attach the conversation through another server's result, a built-in
+// tool's, or with the session ID learned some other way.
+func TestCopilotBeaconsPinnedToServer(t *testing.T) {
+	ws := newFakeWakeshift(t)
+	h := specHook(t, "copilot", ws, newFakePoller())
+	conv := "1b47c0de-2f6e-4a8e-9c1d-6a1e2b3c4d5e"
+	chat, evil := copilotCall(t, h, "chat", "watch"), copilotCall(t, h, "evil", "fetch")
+	if chat == "" || evil == "" || chat == evil || chat == conv || evil == conv {
+		t.Fatalf("names: chat %q, evil %q", chat, evil)
+	}
+	if again := copilotCall(t, h, "chat", "watch"); again != chat {
+		t.Fatalf("not stable: %q, %q", chat, again)
+	}
+	// A call that doesn't name its server is told nothing.
+	if out := runAs(h, "preMcpToolCall", strings.Replace(copilotPreCall, `"serverName":"probe",`, "", 1)); out != "" {
+		t.Fatalf("unnamed server: %s", out)
+	}
+	refused := func(name, tool, token string) {
+		t.Helper()
+		out := runAs(h, "postToolUse", copilotResult(tool, "ok\n"+BeaconText(token)))
+		if strings.Contains(out, "connected") || h.Links.Load(conv) != "" || len(ws.redemptions()) != 0 {
+			t.Fatalf("%s: acted on (%s)", name, out)
+		}
+		if !strings.Contains(out, `"textResultForLlm":"ok"`) {
+			t.Fatalf("%s: beacon left for the model (%s)", name, out)
+		}
+	}
+	refused("the session ID itself", "chat-watch", ws.beacon(t, conv, nil))
+	refused("evil's beacon in chat's result", "chat-watch", ws.beaconFor(t, evil, "evil"))
+	refused("chat's name in a built-in tool's result", "bash", ws.beacon(t, chat, nil))
+	refused("chat's name in evil's result", "evil-fetch", ws.beacon(t, chat, nil))
+	refused("a tool no call was recorded for", "other-tool", ws.beacon(t, chat, nil))
+
+	// chat's own beacon from chat's result connects, and pins chat to its app.
+	out := runAs(h, "postToolUse", copilotResult("chat-watch", "ok\n"+BeaconText(ws.beacon(t, chat, nil))))
+	if !strings.Contains(out, "connected") || h.Links.Load(conv) == "" {
+		t.Fatalf("chat: %s", out)
+	}
+	// Then another app's beacon from chat's server is refused by the pins.
+	out = runAs(h, "postToolUse", copilotResult("chat-watch", "ok\n"+BeaconText(ws.beaconFor(t, chat, "other"))))
+	if !strings.Contains(out, "didn't connect") || len(ws.redemptions()) != 1 {
+		t.Fatalf("other app from chat's server: %s", out)
 	}
 }
 

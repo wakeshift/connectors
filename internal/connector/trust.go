@@ -206,6 +206,10 @@ func client(c *http.Client) *http.Client {
 	return &http.Client{Timeout: 10 * time.Second, CheckRedirect: noRedirects}
 }
 
+// ErrUnreachable: Wakeshift couldn't be reached or answered with a server
+// error or 429; the same beacon may be redeemed again later.
+var ErrUnreachable = errors.New("Wakeshift couldn't be reached")
+
 // Redeem exchanges a verified beacon's ticket for its conversation's stream
 // link (POST <redeem> {"ticket", "thread"}), for harness's hooks
 // (ClientHeader). An *UpdateRequired error: Wakeshift no longer serves
@@ -230,9 +234,12 @@ func RedeemCall(ctx context.Context, hc *http.Client, harness string, c beacon.C
 	req.Header.Set(connectorversion.Header, ClientHeader(harness))
 	resp, err := client(hc).Do(req)
 	if err != nil {
-		return "", errors.New("Wakeshift couldn't be reached")
+		return "", ErrUnreachable
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+		return "", fmt.Errorf("%w (it answered %d)", ErrUnreachable, resp.StatusCode)
+	}
 	if resp.StatusCode == http.StatusUpgradeRequired {
 		return "", updateRequired(resp)
 	}

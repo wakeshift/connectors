@@ -2,7 +2,8 @@
 // cmd/wakeshift-connector, installed as ~/.wakeshift/bin/wakeshift by
 // /install/<harness>.sh):
 //
-//	wakeshift install --harness NAME --issuer URL   trust a Wakeshift and add the harness's hooks
+//	wakeshift install --harness NAME --issuer URL [--yes]   trust a Wakeshift and add the harness's hooks
+//	                                                (asks first for an issuer not yet trusted, unless --yes)
 //	wakeshift uninstall --harness NAME              remove them
 //	wakeshift hook --harness NAME [--rewake]        what the harness runs (its own hook input on stdin)
 //	wakeshift bridge --harness opencode             the opencode plugin's child (JSON lines)
@@ -25,6 +26,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -34,6 +36,24 @@ import (
 	"github.com/wakeshift/connectors/internal/harnesses"
 	"github.com/wakeshift/connectors/internal/version"
 )
+
+// Confirm asks the person at the terminal a yes/no question (on /dev/tty:
+// stdin is the install script itself when it's piped to sh). Tests replace
+// it.
+var Confirm = func(question string) (bool, error) {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return false, errors.New("no terminal")
+	}
+	defer tty.Close()
+	fmt.Fprint(tty, question)
+	answer, err := bufio.NewReader(tty).ReadString('\n')
+	if err != nil && answer == "" {
+		return false, err
+	}
+	a := strings.ToLower(strings.TrimSpace(answer))
+	return a == "y" || a == "yes", nil
+}
 
 // lease: a Codex connector whose thread nobody but it has used for this
 // long stops (the app's next result for the thread starts it again).
@@ -51,7 +71,7 @@ func Main() {
 func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	prog := filepath.Base(args[0])
 	usage := func() int {
-		fmt.Fprintf(stderr, "usage: %s install --harness NAME --issuer URL | uninstall --harness NAME | hook --harness NAME [--rewake] | bridge --harness opencode | harnesses | version\n", prog)
+		fmt.Fprintf(stderr, "usage: %s install --harness NAME --issuer URL [--yes] | uninstall --harness NAME | hook --harness NAME [--rewake] | bridge --harness opencode | harnesses | version\n", prog)
 		fmt.Fprintf(stderr, "harnesses: %s\n", strings.Join(connector.Names(), ", "))
 		return 2
 	}
@@ -75,6 +95,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	thread := fs.String("thread", "", "run: the Codex thread")
 	event := fs.String("event", "", "hook: the event, for harnesses whose hook input doesn't say (antigravity)")
 	wait := fs.Duration("wait", 0, "hook: how long a stop hook listens (default: the harness's)")
+	yes := fs.Bool("yes", false, "install: trust --issuer without asking (the install script from that Wakeshift passes it)")
 	switch cmd {
 	case "install", "uninstall", "hook", "bridge", "run":
 		if fs.Parse(rest) != nil {
@@ -98,7 +119,23 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		if !ok {
 			return fail(unknown(*harness))
 		}
-		if err := spec.Install(bin, *issuer, stdout); err != nil {
+		iss, err := connector.CheckIssuer(*issuer)
+		if err != nil {
+			return fail(err)
+		}
+		// A new issuer can wake this harness's conversations and have them
+		// act on its messages: ask, so a command someone else wrote (or an
+		// agent was told to run) doesn't add one silently.
+		if !*yes && !slices.Contains(connector.LoadSettings(*harness).Issuers, iss) {
+			ok, err := Confirm(fmt.Sprintf("Trust %s to wake your %s conversations on this machine? Only say yes if you're installing Wakeshift from that address. [y/N] ", iss, *harness))
+			if err != nil {
+				return fail(fmt.Errorf("trusting %s needs your confirmation: run this in a terminal (or pass --yes): %w", iss, err))
+			}
+			if !ok {
+				return fail(errors.New("not installed: " + iss + " wasn't trusted"))
+			}
+		}
+		if err := spec.Install(bin, iss, stdout); err != nil {
 			return fail(err)
 		}
 		if h, ok := harnesses.Get(*harness); ok && h.Trust != "" {
@@ -124,6 +161,11 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		}
 		h := spec.NewHook(nil, nil)
 		h.Rewake, h.EventName, h.Alive = *rewake, *event, connector.HarnessWatch()
+		if _, deferred := spec.Format.(connector.DeferredFormat); deferred {
+			// A result written after its hook returns (Antigravity): a
+			// resolver redeems its beacon as soon as it's there.
+			h.ResolveSoon = func(conversation string) { connector.StartResolver(bin, *harness, conversation) }
+		}
 		if *wait > 0 {
 			h.StopWait = *wait
 		}

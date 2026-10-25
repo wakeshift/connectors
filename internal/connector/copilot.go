@@ -17,12 +17,17 @@ import (
 // which). Copilot drops an MCP result's _meta, but its preMcpToolCall hook
 // sets the outgoing _meta, so:
 //
-//   - preMcpToolCall: add _meta["wakeshift/conversation"] = sessionId
-//     (merged into what earlier hooks set), so an app knows the session and
-//     its beacon can name it.
+//   - preMcpToolCall: add _meta["wakeshift/conversation"] = the server's
+//     own name for the session (servernames.go: never the session ID
+//     itself), merged into what earlier hooks set, so an app knows the
+//     session and its beacon can name it; and record which server the call
+//     went to.
 //   - postToolUse: the beacon comes in the result's text (BeaconText);
-//     verify and redeem it, take it out of the text the model sees
-//     (modifiedResult), and say "connected" (additionalContext).
+//     acted on only if the result is a recorded call's (its server known),
+//     bound to that server's name for the session, and the server is
+//     pinned to the beacon's app (Pins); verify and redeem it, take it out
+//     of the text the model sees (modifiedResult), and say "connected"
+//     (additionalContext).
 //   - agentStop: if messages are waiting, {"decision":"block","reason":…}
 //     continues the session (at most 8 in a row). It waits only briefly:
 //     what the user types queues behind a waiting stop hook.
@@ -43,6 +48,7 @@ type copilotFormat struct{}
 
 type copilotInput struct {
 	SessionID      string          `json:"sessionId"`
+	ServerName     string          `json:"serverName"`
 	ToolCallID     string          `json:"toolCallId"`
 	ToolName       string          `json:"toolName"`
 	Meta           json.RawMessage `json:"_meta"`
@@ -63,9 +69,9 @@ func (copilotFormat) ParseEvent(event string, b []byte) (Input, error) {
 	in := Input{Conversation: c.SessionID, Continued: c.StopHookActive, raw: b}
 	switch event {
 	case "preMcpToolCall":
-		in.Event = PreCall
+		in.Event, in.Server, in.ToolName, in.ToolCallID = PreCall, c.ServerName, c.ToolName, c.ToolCallID
 	case "postToolUse":
-		in.Event, in.ToolName = ToolResult, c.ToolName
+		in.Event, in.ToolName, in.ToolCallID = ToolResult, c.ToolName, c.ToolCallID
 		in.ToolResult, _ = json.Marshal(c.ToolResult.TextResultForLlm)
 	case "agentStop":
 		in.Event = Stop
@@ -73,14 +79,30 @@ func (copilotFormat) ParseEvent(event string, b []byte) (Input, error) {
 	return in, nil
 }
 
-// PreCall adds the session to the call's outgoing _meta, keeping what
-// earlier hooks set (Copilot takes the last hook's answer whole).
+// Aliased: each MCP server is told its own name for the session.
+func (copilotFormat) Aliased() bool { return true }
+
+// ResultOf: a result answers the recorded call with its ID, or (Copilot's
+// postToolUse input has none) whose server and tool make its tool name.
+func (copilotFormat) ResultOf(in Input, c mcpCall) bool {
+	if in.ToolCallID != "" && c.Call != "" {
+		return in.ToolCallID == c.Call
+	}
+	return c.Server != "" && in.ToolName == c.Server+"-"+c.Tool
+}
+
+// PreCall adds the server's name for the session to the call's outgoing
+// _meta, keeping what earlier hooks set (Copilot takes the last hook's
+// answer whole).
 func (copilotFormat) PreCall(in Input) (Output, bool) {
+	if in.ServerConversation == "" {
+		return Output{}, false
+	}
 	var c copilotInput
 	json.Unmarshal(in.raw, &c)
 	meta := map[string]any{}
 	json.Unmarshal(c.Meta, &meta)
-	meta[CopilotConversationMeta] = in.Conversation
+	meta[CopilotConversationMeta] = in.ServerConversation
 	b, _ := json.Marshal(map[string]any{"metaToUse": meta})
 	return Output{Stdout: append(b, '\n')}, true
 }

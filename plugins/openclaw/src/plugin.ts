@@ -174,7 +174,11 @@ export class Wakeshift {
         continue;
       }
       this.listen(l);
-      void this.o.hooks.allow(l.sessionKey, l.agentId || agentOf(l.sessionKey)).then((why) => this.setProblem(l.sessionKey, why));
+      // Never left to reject: an unhandled rejection would take the gateway down.
+      void this.o.hooks.allow(l.sessionKey, l.agentId || agentOf(l.sessionKey)).then(
+        (why) => this.setProblem(l.sessionKey, why),
+        (e) => this.o.host.log.warn(`wakeshift (${l.sessionKey}): couldn't check OpenClaw's hooks settings: ${(e as Error)?.message ?? e}`),
+      );
     }
   }
 
@@ -436,7 +440,9 @@ export class Wakeshift {
           // Its session and agent are no longer allowed in OpenClaw's hooks
           // (unless another connected conversation still needs them).
           const rest = this.o.store.links();
-          void this.o.hooks.release({ sessionKeys: rest.map((x) => x.sessionKey), agentIds: rest.map((x) => x.agentId || agentOf(x.sessionKey) || "").filter(Boolean) });
+          void this.o.hooks
+            .release({ sessionKeys: rest.map((x) => x.sessionKey), agentIds: rest.map((x) => x.agentId || agentOf(x.sessionKey) || "").filter(Boolean) })
+            .catch((e) => log(`couldn't update OpenClaw's hooks settings: ${(e as Error)?.message ?? e}`));
         }
       },
     });

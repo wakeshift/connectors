@@ -29,7 +29,17 @@ func (h *Hook) connect(ctx context.Context, in Input, token string, carried Carr
 	if token == "" {
 		return ""
 	}
-	bind := beacon.Binding{Conversation: in.Conversation, Call: in.ToolCallID, Unbound: h.Unbound}
+	conv := in.Conversation
+	if h.aliased() {
+		// Only a result from a server the hook told, bound to that
+		// server's name for the conversation: a beacon planted in another
+		// server's result, or in a built-in tool's, names another.
+		if in.Server == "" || in.ServerConversation == "" {
+			return ""
+		}
+		conv = in.ServerConversation
+	}
+	bind := beacon.Binding{Conversation: conv, Call: in.ToolCallID, Unbound: h.Unbound}
 	claims, err := h.Verifier.VerifyBound(ctx, token, bind)
 	if err != nil || !acceptable(claims, carried) {
 		return ""
@@ -51,12 +61,15 @@ func (h *Hook) connect(ctx context.Context, in Input, token string, carried Carr
 	if claims.Thread == "" { // bound to the call or to nothing: Wakeshift binds the conversation
 		call = in.ToolCallID
 	}
-	link, err := RedeemCall(ctx, h.HTTP, h.Harness, claims, in.Conversation, call)
+	link, err := RedeemCall(ctx, h.HTTP, h.Harness, claims, conv, call)
 	var outdated *UpdateRequired
 	if errors.As(err, &outdated) {
 		return fmt.Sprintf(NoteOutdated, outdated.Message)
 	}
 	if err != nil {
+		if errors.Is(err, ErrUnreachable) && h.OnTransient != nil {
+			h.OnTransient()
+		}
 		return fmt.Sprintf(NoteFailed, err)
 	}
 	if err := h.Links.SaveFor(in.Conversation, link, claims.App); err != nil {
@@ -109,14 +122,30 @@ func (h *Hook) deferResult(in Input) {
 // readable now and connects it from a beacon in them; the note waits for
 // the next place the harness can show it (saveNote).
 func (h *Hook) resolveDeferred(ctx context.Context, in Input) {
+	h.resolvePending(ctx, in)
+}
+
+// resolvePending is resolveDeferred, saying whether results are still
+// waiting to be written. A resolver and the conversation's next hook can
+// run at once: the lock keeps a result from being read, and its beacon
+// redeemed, twice.
+func (h *Hook) resolvePending(ctx context.Context, in Input) (waiting bool) {
 	df, ok := h.Format.(DeferredFormat)
 	if !ok {
-		return
+		return false
 	}
 	p := h.pendingPath(in.Conversation)
+	if _, err := os.Stat(p); err != nil {
+		return false
+	}
+	unlock, err := lockFile(p + ".lock")
+	if err != nil {
+		return false
+	}
+	defer unlock()
 	b, err := os.ReadFile(p)
 	if err != nil {
-		return
+		return false
 	}
 	var list, kept []deferredResult
 	json.Unmarshal(b, &list)
@@ -139,8 +168,28 @@ func (h *Hook) resolveDeferred(ctx context.Context, in Input) {
 	}
 	if len(kept) == 0 {
 		os.Remove(p)
-		return
+		return false
 	}
 	b, _ = json.Marshal(kept)
 	os.WriteFile(p, b, 0o600)
+	return true
+}
+
+// resolveWait bounds a resolver: the harness writes a result within
+// moments of its hook returning.
+const resolveWait = 15 * time.Second
+
+// resolveSoon is a resolver (ResolveSoon): it reads the conversation's
+// deferred results as soon as they're written, redeeming their beacons,
+// for up to resolveWait.
+func (h *Hook) resolveSoon(ctx context.Context, in Input) {
+	ctx, cancel := context.WithTimeout(ctx, resolveWait)
+	defer cancel()
+	for h.resolvePending(ctx, in) {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
 }

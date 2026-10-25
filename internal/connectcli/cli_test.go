@@ -3,14 +3,21 @@ package connectcli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/wakeshift/connectors/internal/connector"
 )
 
 func homes(t *testing.T) string {
 	t.Helper()
+	// No terminal in tests: an install that would ask is refused.
+	confirm := Confirm
+	Confirm = func(string) (bool, error) { return false, errors.New("no terminal") }
+	t.Cleanup(func() { Confirm = confirm })
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("WAKESHIFT_HOME", filepath.Join(home, ".wakeshift"))
@@ -44,7 +51,7 @@ func TestCodexReinstall(t *testing.T) {
 	if out, code := run("wakeshift-codex", "hook"); code != 0 || out != "" {
 		t.Fatalf("old hook: %d %q", code, out)
 	}
-	out, code := run("wakeshift", "install", "--harness", "codex", "--issuer", "https://app.wakeshift.ai")
+	out, code := run("wakeshift", "install", "--harness", "codex", "--issuer", "https://app.wakeshift.ai", "--yes")
 	if code != 0 || !strings.Contains(out, "/hooks and press t") || !strings.Contains(out, "Removed the earlier connector binary") {
 		t.Fatalf("%d %s", code, out)
 	}
@@ -57,7 +64,7 @@ func TestCodexReinstall(t *testing.T) {
 	if _, err := os.Stat(oldBin); !os.IsNotExist(err) {
 		t.Fatal("old binary left")
 	}
-	if out, code := run("wakeshift", "install", "--harness", "codex", "--issuer", "https://app.wakeshift.ai"); code != 0 || !strings.Contains(out, "already") {
+	if out, code := run("wakeshift", "install", "--harness", "codex", "--issuer", "https://app.wakeshift.ai", "--yes"); code != 0 || !strings.Contains(out, "already") {
 		t.Fatalf("twice: %d %s", code, out)
 	}
 	if out, code := run("wakeshift", "uninstall", "--harness", "codex"); code != 0 || !strings.Contains(out, "Removed") {
@@ -79,7 +86,7 @@ func TestInstallEach(t *testing.T) {
 		"copilot":     ".copilot/hooks/wakeshift.json",
 		"antigravity": ".gemini/config/hooks.json",
 	} {
-		out, code := run("wakeshift", "install", "--harness", harness, "--issuer", "https://app.wakeshift.ai")
+		out, code := run("wakeshift", "install", "--harness", harness, "--issuer", "https://app.wakeshift.ai", "--yes")
 		if code != 0 || !strings.Contains(out, "Next: ") {
 			t.Fatalf("%s: %d %s", harness, code, out)
 		}
@@ -94,17 +101,17 @@ func TestInstallEach(t *testing.T) {
 			t.Fatalf("%s uninstall: %s", harness, out)
 		}
 	}
-	if out, code := run("wakeshift", "install", "--harness", "notepad", "--issuer", "https://app.wakeshift.ai"); code != 1 || !strings.Contains(out, "unknown harness") {
+	if out, code := run("wakeshift", "install", "--harness", "notepad", "--issuer", "https://app.wakeshift.ai", "--yes"); code != 1 || !strings.Contains(out, "unknown harness") {
 		t.Fatalf("unknown: %d %s", code, out)
 	}
-	if out, code := run("wakeshift", "install", "--issuer", "https://app.wakeshift.ai"); code != 1 || !strings.Contains(out, "--harness is required") {
+	if out, code := run("wakeshift", "install", "--issuer", "https://app.wakeshift.ai", "--yes"); code != 1 || !strings.Contains(out, "--harness is required") {
 		t.Fatalf("no harness: %d %s", code, out)
 	}
 	if _, code := run("wakeshift", "install", "--harness", "claude-code"); code != 1 {
 		t.Fatal("no issuer")
 	}
 	// Gemini CLI is retired: nothing to install, and the list says why.
-	if out, code := run("wakeshift", "install", "--harness", "gemini", "--issuer", "https://app.wakeshift.ai"); code != 1 || !strings.Contains(out, "unknown harness") {
+	if out, code := run("wakeshift", "install", "--harness", "gemini", "--issuer", "https://app.wakeshift.ai", "--yes"); code != 1 || !strings.Contains(out, "unknown harness") {
 		t.Fatalf("gemini: %d %s", code, out)
 	}
 	if out, _ := run("wakeshift", "harnesses"); !strings.Contains(out, "retired: Google replaced Gemini CLI with Antigravity CLI (agy)") {
@@ -125,5 +132,37 @@ func TestClaudeWaiterUnattended(t *testing.T) {
 		strings.NewReader(`{"session_id":"s","hook_event_name":"Stop"}`), &out, &out)
 	if code != 0 || out.Len() != 0 {
 		t.Fatalf("%d %q", code, out.String())
+	}
+}
+
+// Trusting a new issuer asks first (unless --yes, which the install script
+// from that Wakeshift passes); an issuer already trusted doesn't ask again.
+func TestInstallAsksBeforeTrustingAnIssuer(t *testing.T) {
+	homes(t)
+	var asked []string
+	answer := false
+	Confirm = func(q string) (bool, error) { asked = append(asked, q); return answer, nil }
+	out, code := run("wakeshift", "install", "--harness", "claude-code", "--issuer", "https://evil.example")
+	if code != 1 || !strings.Contains(out, "wasn't trusted") || len(asked) != 1 || !strings.Contains(asked[0], "https://evil.example") {
+		t.Fatalf("declined: %d %s %q", code, out, asked)
+	}
+	if got := connector.LoadSettings("claude-code").Issuers; len(got) != 0 {
+		t.Fatalf("trusted after declining: %v", got)
+	}
+	answer = true
+	if out, code := run("wakeshift", "install", "--harness", "claude-code", "--issuer", "https://app.wakeshift.ai"); code != 0 || len(asked) != 2 {
+		t.Fatalf("accepted: %d %s", code, out)
+	}
+	// Already trusted: reinstalling doesn't ask.
+	if out, code := run("wakeshift", "install", "--harness", "claude-code", "--issuer", "https://app.wakeshift.ai/"); code != 0 || len(asked) != 2 {
+		t.Fatalf("reinstall: %d %s %d", code, out, len(asked))
+	}
+	// No terminal to ask on: refused, saying how.
+	Confirm = func(string) (bool, error) { return false, errors.New("no terminal") }
+	if out, code := run("wakeshift", "install", "--harness", "claude-code", "--issuer", "https://other.example"); code != 1 || !strings.Contains(out, "--yes") {
+		t.Fatalf("no terminal: %d %s", code, out)
+	}
+	if out, code := run("wakeshift", "install", "--harness", "claude-code", "--issuer", "https://other.example", "--yes"); code != 0 {
+		t.Fatalf("--yes: %d %s", code, out)
 	}
 }
