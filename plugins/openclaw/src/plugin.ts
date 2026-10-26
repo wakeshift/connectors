@@ -20,7 +20,7 @@
 // control.ts (hooks.ts says what changes).
 
 import { join } from "node:path";
-import { beaconIn, BeaconError, jwkKey, mcpServer, verifyBound, type Claims } from "./beacon.js";
+import { acceptable, BeaconError, beaconIn, findBeacon, jwkKey, mcpServer, mcpTool, verifyBound, type Carried, type Claims } from "./beacon.js";
 import { Conversation, Ledger, type Host } from "./deliveries.js";
 import { agentOf } from "./hooks.js";
 import { PINS_UNREADABLE, Store, type SavedLink } from "./store.js";
@@ -43,6 +43,13 @@ export const noteOutdated = (message: string) => `Wakeshift: couldn't connect th
 
 /** Wakeshift no longer serves this version of the plugin (426 update_required). */
 class OutdatedError extends Error {}
+
+/** Wakeshift refused to move the conversation to another workspace's session (409 conversation_taken). */
+class TakenError extends Error {}
+
+/** The note when Wakeshift refused to move a connected conversation (its link stays). */
+export const NOTE_TAKEN =
+  "Wakeshift: this conversation stays connected where it was: a result asked to connect it to a session of another account or workspace, and Wakeshift doesn't move a connected conversation. To connect it there, stop it being woken where it is first (the app's unwatch tool), or start a new conversation.";
 
 // The text beacon line (beacon.Text), with the newlines before it, also as
 // they appear inside JSON text, escaped once or more (OpenClaw's code mode
@@ -236,10 +243,17 @@ export class Wakeshift {
    * that isn't trusted, which it says nothing about).
    */
   onResult(result: unknown, call: Call): Promise<string> {
-    const token = beaconIn(result);
-    if (!token || !call.sessionKey) return Promise.resolve("");
+    // Only the result's own _meta, or the last line of its text: a beacon
+    // line inside what the app wrote (a chat message a read tool relays)
+    // can be anyone's.
+    const { token, carried } = findBeacon(result);
+    if (!call.sessionKey) return Promise.resolve("");
     const seen = this.beacons.get(call.sessionKey);
-    if (seen?.token === token) return seen.note;
+    // Code mode's exec result shows the MCP call's result again, as JSON
+    // in its text: the note of the beacon that call connected with (and
+    // only that) comes with it. Nothing is connected from it.
+    if (seen && (seen.token === token || (!token && seen.token === beaconIn(result)))) return seen.note;
+    if (!token) return Promise.resolve("");
     // A beacon proves Wakeshift minted it, not that this result is its
     // app's: OpenClaw tells servers nothing, so it's bound to no
     // conversation, and one an attacker minted could sit in a page a tool
@@ -249,7 +263,7 @@ export class Wakeshift {
     const server = mcpServer(call.toolName);
     if (!server) return Promise.resolve("");
     const sessionKey = call.sessionKey;
-    const note = this.connect(token, call, server)
+    const note = this.connect(token, carried, call, server)
       .catch((e) => {
         this.o.host.log.warn(`wakeshift: connecting failed: ${(e as Error).message}`);
         return "";
@@ -264,7 +278,7 @@ export class Wakeshift {
     return note;
   }
 
-  private async connect(token: string, call: Call, server: string): Promise<string> {
+  private async connect(token: string, carried: Carried, call: Call, server: string): Promise<string> {
     const sessionKey = call.sessionKey!;
     const conversation = this.conversation(sessionKey);
     let claims: Claims;
@@ -274,6 +288,9 @@ export class Wakeshift {
       if (e instanceof BeaconError) return ""; // not for us: say nothing
       throw e;
     }
+    // From the tool it names (one minted for another tool's result, relayed
+    // here, isn't), and one naming none only from the result's own _meta.
+    if (!acceptable(claims, carried, mcpTool(call.toolName))) return "";
     const pinned = this.o.store.pin(server, claims.app);
     if (pinned) return notePinned(pinned, this.o.store.pinsPath());
     // The link this conversation had until now, if any: after a gateway
@@ -287,6 +304,7 @@ export class Wakeshift {
       link = await this.redeem(claims, conversation, call.toolCallId ?? "", supersedes);
     } catch (e) {
       if (e instanceof OutdatedError) return noteOutdated(e.message);
+      if (e instanceof TakenError) return NOTE_TAKEN; // the link it had stays
       return noteFailed((e as Error).message);
     }
     if (!linkOnIssuer(link, this.o.issuer)) return noteFailed("Wakeshift gave a stream link on another host");
@@ -386,6 +404,8 @@ export class Wakeshift {
         throw new Error("the app isn't allowed for this agent any more");
       case "wrong_thread":
         throw new Error("the ticket was for another conversation");
+      case "conversation_taken":
+        throw new TakenError("this conversation is connected to another workspace's session");
     }
     throw new Error(`Wakeshift answered ${r.status}`);
   }

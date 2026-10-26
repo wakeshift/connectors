@@ -41,7 +41,7 @@ func (h *Hook) connect(ctx context.Context, in Input, token string, carried Carr
 	}
 	bind := beacon.Binding{Conversation: conv, Call: in.ToolCallID, Unbound: h.Unbound}
 	claims, err := h.Verifier.VerifyBound(ctx, token, bind)
-	if err != nil || !acceptable(claims, carried) {
+	if err != nil || !acceptable(claims, carried, in) {
 		return ""
 	}
 	if in.Server != "" {
@@ -61,10 +61,15 @@ func (h *Hook) connect(ctx context.Context, in Input, token string, carried Carr
 	if claims.Thread == "" { // bound to the call or to nothing: Wakeshift binds the conversation
 		call = in.ToolCallID
 	}
-	link, err := RedeemCall(ctx, h.HTTP, h.Harness, claims, conv, call)
+	// The link the conversation has now goes along: Wakeshift won't move a
+	// connected conversation to another workspace's session.
+	link, err := RedeemHeld(ctx, h.HTTP, h.Harness, claims, conv, call, h.Links.Load(in.Conversation))
 	var outdated *UpdateRequired
 	if errors.As(err, &outdated) {
 		return fmt.Sprintf(NoteOutdated, outdated.Message)
+	}
+	if errors.Is(err, ErrTaken) {
+		return NoteTaken
 	}
 	if err != nil {
 		if errors.Is(err, ErrUnreachable) && h.OnTransient != nil {
@@ -94,6 +99,7 @@ type deferredResult struct {
 	At       time.Time       `json:"at"`
 	Call     string          `json:"call,omitempty"`
 	Server   string          `json:"server,omitempty"`
+	Tool     string          `json:"tool,omitempty"` // Input.MCPTool
 	Deferred json.RawMessage `json:"deferred"`
 }
 
@@ -108,7 +114,7 @@ func (h *Hook) deferResult(in Input) {
 	if b, err := os.ReadFile(p); err == nil {
 		json.Unmarshal(b, &list)
 	}
-	list = append(list, deferredResult{At: time.Now(), Call: in.ToolCallID, Server: in.Server, Deferred: in.deferred})
+	list = append(list, deferredResult{At: time.Now(), Call: in.ToolCallID, Server: in.Server, Tool: in.MCPTool, Deferred: in.deferred})
 	if len(list) > 20 {
 		list = list[len(list)-20:]
 	}
@@ -161,6 +167,7 @@ func (h *Hook) resolvePending(ctx context.Context, in Input) (waiting bool) {
 		at := in
 		at.ToolCallID = d.Call
 		at.Server = d.Server
+		at.MCPTool, at.ToolName, at.ToolSep = d.Tool, "", ""
 		tok, carried := FindBeacon(res)
 		if n := h.connect(ctx, at, tok, carried); n != "" {
 			h.saveNote(in.Conversation, n)

@@ -11,7 +11,17 @@
 // issuer pinned at install, names the hook's own thread (or, where the
 // harness tells servers nothing, came in _meta), names the app it was
 // minted for (which the hook checks against the MCP server the result came
-// from), and redeems on the issuer's own origin.
+// from) and the tool whose result carries it (which the hook checks against
+// the tool that produced the result: ToolMatches), and redeems on the
+// issuer's own origin.
+//
+// A signature says Wakeshift minted a beacon, not that the result it sits in
+// is the one it was minted for: anyone can have an app mint a beacon naming
+// a conversation whose ID they know, and post its text where that
+// conversation reads it (a chat message the app relays in a read tool's
+// result). So a beacon in text counts only as the last line of the result's
+// text (Trailer), where the SDKs put it after everything the app wrote, and
+// only from the tool it names.
 package beacon
 
 import (
@@ -48,7 +58,14 @@ type Claims struct {
 	// App is the app whose tool result carries it. A hook acts on a beacon
 	// only from that app's MCP server (connector.Pins): the signature says
 	// Wakeshift minted it, not that the result it came in was the app's.
-	App      string `json:"app"`
+	App string `json:"app"`
+	// Tool is the MCP tool (its name as the app's server lists it) whose
+	// result carries the beacon: the app said so when it asked for it (the
+	// SDKs stamp it from the tool call). A hook acts on a beacon only from
+	// that tool's result (ToolMatches), so one relayed into another tool's
+	// result (a chat history) isn't. "" from apps on SDKs from before it,
+	// which hooks accept only from the result's own _meta.
+	Tool     string `json:"tool,omitempty"`
 	Redeem   string `json:"redeem"` // where to redeem the ticket
 	Ticket   string `json:"ticket"`
 	IssuedAt int64  `json:"iat"`
@@ -149,14 +166,50 @@ func Text(token string) string {
 var (
 	textRE     = regexp.MustCompile(`wakeshift-beacon: ?([A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})`)
 	textLineRE = regexp.MustCompile(`\n*\(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: [A-Za-z0-9_.-]+\)`)
+	trailerRE  = regexp.MustCompile(`(?:^|\n)\(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: ([A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\)$`)
 )
 
-// InText finds a beacon in text (Text's line), "" if there's none.
+// InText finds a beacon anywhere in text (Text's line), "" if there's none.
+// Only for taking beacon lines out of what the model sees: a beacon a hook
+// acts on is the result's Trailer.
 func InText(s string) string {
 	if m := textRE.FindStringSubmatch(s); m != nil {
 		return m[1]
 	}
 	return ""
+}
+
+// Trailer is the beacon on the last line of a result's text (Text's line,
+// a line of its own, with nothing but whitespace after it), "" if there's
+// none. The SDKs add Wakeshift's text after the app's own, so a beacon the
+// result was given ends it; one inside what the app wrote (a message it
+// relays, JSON it returns) doesn't.
+func Trailer(s string) string {
+	if m := trailerRE.FindStringSubmatch(strings.TrimRight(s, " \t\r\n")); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// ToolMatches says whether a beacon's Tool claim names tool, the MCP tool a
+// hook saw produce the result (its bare name, as the app's server lists
+// it). Harnesses rewrite characters MCP tool names may have but their own
+// tool names can't (Claude Code turns anything but letters, digits, _ and -
+// into _), so both are compared that way. An empty name never matches.
+func ToolMatches(claim, tool string) bool {
+	return claim != "" && tool != "" && NormalTool(claim) == NormalTool(tool)
+}
+
+// NormalTool is a tool name with every character but ASCII letters, digits,
+// _ and - turned into _.
+func NormalTool(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-') {
+			b[i] = '_'
+		}
+	}
+	return string(b)
 }
 
 // StripText takes Text lines out of a result's text.

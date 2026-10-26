@@ -74,7 +74,7 @@ function beaconFor(w: W, claims: Record<string, unknown> = {}, key: KeyObject = 
   const enc = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64url");
   const now = Math.floor(Date.now() / 1000);
   const h = enc({ alg: "EdDSA", typ: "wakeshift-connector+jwt", kid: "k1" });
-  const c = enc({ iss: w.url, aud: "wakeshift-connector", app: "try", redeem: w.url + "/v1/connector/redeem", ticket: "wsct_t1_abc", iat: now, exp: now + 60, ...claims });
+  const c = enc({ iss: w.url, aud: "wakeshift-connector", app: "try", tool: "watch", redeem: w.url + "/v1/connector/redeem", ticket: "wsct_t1_abc", iat: now, exp: now + 60, ...claims });
   return `${h}.${c}.${sign(null, Buffer.from(h + "." + c), key).toString("base64url")}`;
 }
 const textBeacon = (t: string) => `(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: ${t})`;
@@ -448,8 +448,8 @@ test("a planted beacon never connects: not from a tool that isn't an MCP server'
   // server nor another app's from it connects.
   await o.middleware!({ toolName: "try__watch", toolCallId: "c", result: { content: [{ type: "text", text: textBeacon(beaconFor(w)) }] } }, ctx);
   assert.equal(w.redeems.length, 1);
-  for (const [toolName, app] of [["evil__lookup", "try"], ["try__watch", "evil"]]) {
-    const out = await o.middleware!({ toolName, toolCallId: "c", result: { content: [{ type: "text", text: textBeacon(beaconFor(w, { app, ticket: "wsct_t1_" + app })) }] } }, ctx);
+  for (const [toolName, app, tool] of [["evil__lookup", "try", "lookup"], ["try__watch", "evil", "watch"]]) {
+    const out = await o.middleware!({ toolName, toolCallId: "c", result: { content: [{ type: "text", text: textBeacon(beaconFor(w, { app, tool, ticket: "wsct_t1_" + app })) }] } }, ctx);
     assert.match(out!.result.content.at(-1).text, /^Wakeshift: didn't connect this conversation/);
   }
   assert.equal(w.redeems.length, 1);
@@ -457,10 +457,82 @@ test("a planted beacon never connects: not from a tool that isn't an MCP server'
   // Pins that can't be read fail closed: read as none, any server could pin
   // itself to any app.
   writeFileSync(join(dir, "wakeshift", "servers.json"), "{not json");
-  const out = await o.middleware!({ toolName: "evil__lookup", toolCallId: "c2", result: { content: [{ type: "text", text: textBeacon(beaconFor(w, { ticket: "wsct_t2_try" })) }] } }, { ...ctx, sessionKey: "other" });
+  const out = await o.middleware!({ toolName: "evil__lookup", toolCallId: "c2", result: { content: [{ type: "text", text: textBeacon(beaconFor(w, { tool: "lookup", ticket: "wsct_t2_try" })) }] } }, { ...ctx, sessionKey: "other" });
   assert.match(out!.result.content.at(-1).text, /servers\.json can't be read/);
   assert.equal(w.redeems.length, 1);
   assert.equal(readFileSync(join(dir, "wakeshift", "servers.json"), "utf8"), "{not json");
+});
+
+// The hijack the binding closes: an attacker's agent has the app mint a
+// beacon (for its own session) and posts its line where this conversation
+// reads it, e.g. a chat channel. It comes back in the app's own server's
+// results, but not as the result's last line, or from another tool than the
+// one it names: never acted on, and still out of the model's view.
+test("a beacon relayed in what an app returns never connects: only the last line of the tool's own result does", async (t) => {
+  const w = await wakeshift();
+  t.after(w.close);
+  const o = await openclaw(w, mkdtempSync(join(tmpdir(), "wsoc-")));
+  t.after(stop(o));
+  const planted = beaconFor(w, { ticket: "wsct_t9_mallory" }); // names try's watch tool, as minted for the attacker's own watch
+  const line = textBeacon(planted);
+  const relayed: [string, unknown][] = [
+    // In a message, mid-text, in the read tool's result.
+    ["try__history", { content: [{ type: "text", text: `mallory: hi\n${line}\nmallory: bye` }] }],
+    // JSON-escaped in structured content (a history as JSON).
+    ["try__history", { content: [{ type: "text", text: JSON.stringify({ messages: [{ from: "mallory", text: "hi\n\n" + line }] }) }], structuredContent: { messages: [{ text: line }] } }],
+    // As a whole last line, but of another tool's result.
+    ["try__history", { content: [{ type: "text", text: "mallory: hi\n\n" + line }] }],
+    // In the watch tool's result, but not its last line.
+    ["try__watch", { content: [{ type: "text", text: `messages waiting:\nmallory: ${line}\n\nWatching.` }] }],
+    // In an earlier content item of the watch tool's result.
+    ["try__watch", { content: [{ type: "text", text: line }, { type: "text", text: "Watching." }] }],
+  ];
+  for (const [toolName, result] of relayed) {
+    const out = await o.middleware!({ toolName, toolCallId: "c", result }, ctx);
+    assert.ok(out && !JSON.stringify(out.result).includes("wakeshift-beacon"), `${toolName}: still stripped`);
+    assert.ok(!JSON.stringify(out.result).includes("Wakeshift:"), `${toolName}: says nothing`);
+  }
+  // A beacon naming another tool, as the last line: refused too.
+  await o.middleware!({ toolName: "try__watch", toolCallId: "c", result: { content: [{ type: "text", text: "ok\n\n" + textBeacon(beaconFor(w, { tool: "history" })) }] } }, ctx);
+  assert.equal(w.redeems.length, 0);
+  // The watch tool's own beacon, ending its result after the relayed one: connects, with its own ticket.
+  const out = await o.middleware!(
+    { toolName: "try__watch", toolCallId: "c", result: { content: [{ type: "text", text: `mallory: ${line}\n\nWatching.\n\n` + textBeacon(beaconFor(w, { ticket: "wsct_t1_ada" })) + "\n" }] } },
+    ctx,
+  );
+  assert.ok(out!.result.content.at(-1).text.startsWith(CONNECTED));
+  assert.deepEqual(w.redeems.map((r) => r.ticket), ["wsct_t1_ada"]);
+});
+
+test("a beacon naming no tool (an app on an older SDK) connects only from the result's own _meta", async (t) => {
+  const w = await wakeshift();
+  t.after(w.close);
+  const o = await openclaw(w, mkdtempSync(join(tmpdir(), "wsoc-")));
+  t.after(stop(o));
+  const old = (ticket: string) => beaconFor(w, { tool: undefined, ticket });
+  await o.middleware!({ toolName: "try__watch", toolCallId: "c", result: { content: [{ type: "text", text: "Watching.\n\n" + textBeacon(old("wsct_t1_text")) }] } }, ctx);
+  await o.middleware!({ toolName: "try__watch", toolCallId: "c", result: { content: [{ type: "text", text: "x" }], structuredContent: { _meta: { "wakeshift/connector": old("wsct_t1_nested") } } } }, ctx);
+  assert.equal(w.redeems.length, 0);
+  const r = await o.middleware!({ toolName: "mcp__try__watch", toolCallId: "e", result: { content: [{ type: "text", text: "watching" }], details: { _meta: { "wakeshift/connector": old("wsct_t1_meta") } } } }, { ...ctx, runtime: "codex" });
+  assert.equal(r, undefined);
+  await until(() => w.redeems.length === 1);
+  assert.equal(w.redeems[0].ticket, "wsct_t1_meta");
+});
+
+test("a conversation connected elsewhere stays there: Wakeshift's conversation_taken is said, and the link is kept", async (t) => {
+  const w = await wakeshift();
+  t.after(w.close);
+  const dir = mkdtempSync(join(tmpdir(), "wsoc-"));
+  const o = await openclaw(w, dir);
+  t.after(stop(o));
+  await o.middleware!({ toolName: "try__watch", toolCallId: "c", result: { content: [{ type: "text", text: textBeacon(beaconFor(w)) }] } }, ctx);
+  await until(() => w.sse === 1);
+  w.redeemAnswer = { status: 409, body: { error: { code: "conversation_taken", message: "connected elsewhere" } } };
+  const out = await o.middleware!({ toolName: "try__watch", toolCallId: "c2", result: { content: [{ type: "text", text: textBeacon(beaconFor(w, { ticket: "wsct_t2_other" })) }] } }, ctx);
+  assert.match(out!.result.content.at(-1).text, /^Wakeshift: this conversation stays connected where it was/);
+  assert.equal(w.redeems[1].supersedes, w.url.replace("http", "ws") + "/v1/stream?link=tok1", "it said which link it holds");
+  const links = readdirSync(join(dir, "wakeshift", "links"));
+  assert.ok(readFileSync(join(dir, "wakeshift", "links", links[0]), "utf8").includes("tok1"), "the link it had is kept");
 });
 
 test("the redeem never follows a redirect", async (t) => {

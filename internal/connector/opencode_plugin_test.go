@@ -55,19 +55,28 @@ const dir = process.env.FAKE_BRIDGE_DIR
 const client = { session: { get: async () => ({ data: {} }), promptAsync: async () => ({ response: { status: 204 } }) } }
 const hooks = await plugin.server({ client, directory: "/tmp" })
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+// Waits (up to 10s) until a bridge has started: a fixed sleep raced it on a
+// loaded machine.
+const started = async () => {
+  for (let i = 0; i < 500; i++) {
+    if (readFileSync(dir + "/log", "utf8").includes("start ")) return
+    await sleep(20)
+  }
+  throw new Error("no bridge started within 10s")
+}
 const scenario = process.argv[2]
 let note
 if (scenario === "race") {
   // A bridge still starting (from an idle check) is replaced by a fresh beacon's.
   await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_1" } } })
-  await sleep(500) // booted and waiting to answer
+  await started() // booted and waiting to answer
   const output = { _meta: { "wakeshift/connector": "a.b.c" }, content: [] }
   await hooks["tool.execute.after"]({ sessionID: "ses_1", callID: "c1", tool: "join" }, output)
   note = output.content.map((c) => c.text).join("")
 } else if (scenario === "dispose") {
   // Disposed while a bridge is still starting: it's stopped and never connects.
   await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_1" } } })
-  await sleep(500)
+  await started()
   await hooks.dispose()
 } else if (scenario === "beacon") {
   const output = { _meta: { "wakeshift/connector": "a.b.c" }, content: [] }

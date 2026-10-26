@@ -107,6 +107,7 @@ func copilotResult(tool, text string) string {
 // tool's, or with the session ID learned some other way.
 func TestCopilotBeaconsPinnedToServer(t *testing.T) {
 	ws := newFakeWakeshift(t)
+	ws.tool = "watch" // chat's tool below
 	h := specHook(t, "copilot", ws, newFakePoller())
 	conv := "1b47c0de-2f6e-4a8e-9c1d-6a1e2b3c4d5e"
 	chat, evil := copilotCall(t, h, "chat", "watch"), copilotCall(t, h, "evil", "fetch")

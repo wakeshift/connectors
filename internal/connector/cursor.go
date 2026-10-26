@@ -57,7 +57,8 @@ func (cursorFormat) Parse(b []byte) (Input, error) {
 		if !strings.HasPrefix(c.ToolName, "MCP:") {
 			return in, nil
 		}
-		in.Event, in.ToolName, in.ToolCallID = ToolResult, c.ToolName, c.ToolUseID
+		// MCP:<tool>: Cursor names the tool, not its server.
+		in.Event, in.ToolName, in.MCPTool, in.ToolCallID = ToolResult, c.ToolName, strings.TrimPrefix(c.ToolName, "MCP:"), c.ToolUseID
 		in.ToolResult = json.RawMessage(c.ToolOutput) // the result as JSON text
 		if !json.Valid(in.ToolResult) {
 			in.ToolResult, _ = json.Marshal(c.ToolOutput)

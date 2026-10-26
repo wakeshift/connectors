@@ -78,21 +78,19 @@ func loopStart(url, query, vars string) string {
 	return `u='` + url + query + `&timeout=` + WaitTimeout + `'; c=; p=$PPID; kill -0 "$p" 2>/dev/null || p=; ` + vars
 }
 
-// Loop is a command that keeps looping on the session's wait (url:
+// loop is a command that keeps looping on the session's wait (url:
 // streams.WaitURL), printing each round's messages, until a hub.closed
 // line (the link no longer works, there's nothing left to wait for, or,
 // with until=hooks, Wakeshift's hooks took over).
-func Loop(url string) string { return loop(url, "") }
-
 func loop(url, query string) string {
 	return loopStart(url, query, "") + loopRound + loopPrint + loopCursor + `if ` + loopClosed + `; then ` + loopConfirm + `break; fi; ` + loopNext
 }
 
-// MonitorLoop is Loop for Claude Code's Monitor, which ends when
+// MonitorLoop is loop for Claude Code's Monitor, which ends when
 // Wakeshift's hooks take over (until=hooks).
 func MonitorLoop(url string) string { return loop(url, "&until=hooks") }
 
-// CursorLoop is Loop for Cursor, which also ends after CursorMax messages
+// CursorLoop is loop for Cursor, which also ends after CursorMax messages
 // with a hub.restart line saying to start it again.
 func CursorLoop(url string) string {
 	return loopStart(url, "", "k=0; ") + loopRound + loopPrint + loopCursor + `if ` + loopClosed + `; then ` + loopConfirm + `break; fi; ` +

@@ -59,10 +59,19 @@ type EventFormat interface {
 // Input is a hook call, read from the harness's own format.
 type Input struct {
 	Event        Event
-	Conversation string          // the harness's conversation (session) ID
-	ToolName     string          // for ToolResult
-	ToolCallID   string          // for ToolResult, if the harness gives one
-	ToolResult   json.RawMessage // the tool's result, as the harness passes it
+	Conversation string // the harness's conversation (session) ID
+	ToolName     string // for ToolResult
+	// MCPTool is the MCP tool that produced the result, by its bare name as
+	// the app's server lists it (ToolName without the harness's server
+	// prefix), "" if the harness doesn't say: a beacon is acted on only
+	// from the result of the tool it names (beacon.Claims.Tool; ToolOf).
+	MCPTool string
+	// ToolSep: for a harness whose tool names join server and tool with a
+	// separator either may contain (opencode: "_"), the separator; MCPTool
+	// is then "" and ToolOf matches ToolName's end.
+	ToolSep    string
+	ToolCallID string          // for ToolResult, if the harness gives one
+	ToolResult json.RawMessage // the tool's result, as the harness passes it
 	// Server is the MCP server the result came from, for harnesses whose
 	// hooks say ("" for the others): beacons from it are checked against
 	// the app it's pinned to (Pins).
@@ -108,6 +117,9 @@ const (
 	// connected the conversation, where the hook can't tell which server
 	// a result came from (it's never replaced without the user).
 	NoteOtherApp = "Wakeshift: this conversation stays connected to %q; a result asked to connect it to %q instead, and Wakeshift's hooks here don't switch apps by themselves. To switch, start a new conversation for it."
+	// NoteTaken: Wakeshift refused to move the conversation to another
+	// workspace's session (ErrTaken); its link stays.
+	NoteTaken = "Wakeshift: this conversation stays connected where it was: a result asked to connect it to a session of another account or workspace, and Wakeshift doesn't move a connected conversation. To connect it there, stop it being woken where it is first (the app's unwatch tool), or start a new conversation."
 )
 
 // Hook is one harness's hook entry point.
@@ -205,7 +217,7 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout, stderr io.Write
 			}
 			h.recordCall(in)
 		case ToolResult:
-			in.Server = h.serverOf(in)
+			in.Server, in.MCPTool = h.serverOf(in)
 			in.ServerConversation = h.serverConversation(in.Server, in.Conversation)
 		}
 	}
@@ -287,7 +299,9 @@ func (h *Hook) toolResult(ctx context.Context, in Input) (Output, bool) {
 		}
 	}
 	if len(notes) == 0 {
-		if sf, is := h.Format.(StripFormat); is && token != "" {
+		// Every beacon line goes from what the model sees, the one acted on
+		// and any other (relayed text, a beacon not for here).
+		if sf, is := h.Format.(StripFormat); is && (token != "" || HasBeaconText(in.ToolResult)) {
 			return sf.Strip(in)
 		}
 		return Output{}, false

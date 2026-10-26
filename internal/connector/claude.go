@@ -62,7 +62,11 @@ func (claudeFormat) Parse(b []byte) (Input, error) {
 		if in.Server == "" {
 			in.Server = MCPServerOf(c.ToolName)
 		}
-		if BeaconIn(c.ToolResponse) == "" && c.ToolUseID != "" {
+		in.MCPTool = MCPToolOf(c.ToolName)
+		// The result's own _meta is in the transcript, unless the response
+		// has it (a beacon line in its text, which anyone's words can be,
+		// doesn't stand in for it).
+		if _, at := FindBeacon(c.ToolResponse); at != InResultMeta && c.ToolUseID != "" {
 			if meta := claudeTranscriptMeta(c.TranscriptPath, c.SessionID, c.ToolUseID, 3*time.Second); meta != nil {
 				in.ToolResult = meta
 			}

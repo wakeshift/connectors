@@ -25,22 +25,28 @@ type fakeWakeshift struct {
 	redeemed []string
 	status   int
 	code     string
+	// tool is the tool its beacons name (beacon.Claims.Tool): "probe", the
+	// tool in the recorded hook inputs.
+	tool string
+	// held is the link each redeem said the hook held ("" for none).
+	held []string
 }
 
 func newFakeWakeshift(t *testing.T) *fakeWakeshift {
 	t.Helper()
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	f := &fakeWakeshift{key: priv, status: 200}
+	f := &fakeWakeshift{key: priv, status: 200, tool: "probe"}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /oauth/jwks", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"keys": []any{map[string]string{"kty": "OKP", "crv": "Ed25519", "kid": "k1",
 			"x": base64.RawURLEncoding.EncodeToString(pub)}}})
 	})
 	mux.HandleFunc("POST /v1/connector/redeem", func(w http.ResponseWriter, r *http.Request) {
-		var in struct{ Ticket, Thread string }
+		var in struct{ Ticket, Thread, Held string }
 		json.NewDecoder(r.Body).Decode(&in)
 		f.mu.Lock()
 		f.redeemed = append(f.redeemed, in.Ticket+"@"+in.Thread)
+		f.held = append(f.held, in.Held)
 		status, code := f.status, f.code
 		f.mu.Unlock()
 		w.WriteHeader(status)
@@ -48,7 +54,7 @@ func newFakeWakeshift(t *testing.T) *fakeWakeshift {
 			json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": code}})
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"url": "wss://wakeshift.test/v1/stream?link=tok-" + in.Thread})
+		json.NewEncoder(w).Encode(map[string]string{"url": "ws://" + r.Host + "/v1/stream?link=tok-" + in.Thread})
 	})
 	f.Server = httptest.NewServer(mux)
 	t.Cleanup(f.Close)
@@ -71,7 +77,7 @@ func (f *fakeWakeshift) sign(t *testing.T, conversation, app string, key ed25519
 	if key == nil {
 		key = f.key
 	}
-	tok, err := jws.Sign(key, "k1", beacon.Type, beacon.Claims{Issuer: f.URL, Audience: beacon.Audience, Thread: conversation, App: app,
+	tok, err := jws.Sign(key, "k1", beacon.Type, beacon.Claims{Issuer: f.URL, Audience: beacon.Audience, Thread: conversation, App: app, Tool: f.tool,
 		Redeem: f.URL + "/v1/connector/redeem", Ticket: "wst_t", IssuedAt: time.Now().Unix(), Expires: time.Now().Add(time.Minute).Unix()})
 	if err != nil {
 		t.Fatal(err)

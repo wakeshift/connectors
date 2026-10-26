@@ -245,6 +245,67 @@ func TestHookRefusesAPlantedBeacon(t *testing.T) {
 	}
 }
 
+// A beacon line in a result's text, from the app's own server: Codex's
+// beacons come only in _meta, and an app's result can relay someone else's
+// words (a chat message carrying a beacon they minted for this thread), so
+// the hook ignores it.
+func TestHookIgnoresABeaconInText(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("WAKESHIFT_HOME", t.TempDir())
+	ws := newFakeWakeshift(t)
+	var started []string
+	h := &Hook{Settings: Settings{Dir: t.TempDir(), Issuers: []string{ws.URL}}, Socket: fakeAppServer(t, thread),
+		Start: func(th, link string) error { started = append(started, th); return nil }}
+	line := "@mallory: hi\n" + beacon.Text(ws.beacon(t, thread, nil))
+	for name, resp := range map[string]any{
+		"content":           map[string]any{"content": []any{map[string]string{"type": "text", "text": line}}},
+		"structuredContent": map[string]any{"content": []any{}, "structuredContent": map[string]any{"messages": []string{line}}},
+		// JSON with a _meta of its own, in the result or in a field around
+		// it: not the result's _meta.
+		"a wrapped _meta": map[string]any{"output": map[string]any{"_meta": map[string]any{beacon.MetaKey: ws.beacon(t, thread, nil)}}},
+		"relayed JSON":    map[string]any{"content": []any{}, "structuredContent": map[string]any{"result": map[string]any{"_meta": map[string]any{beacon.MetaKey: ws.beacon(t, thread, nil)}}}},
+		"a JSON string":   line,
+	} {
+		b, _ := json.Marshal(map[string]any{"session_id": thread, "hook_event_name": "PostToolUse", "tool_name": "mcp__chat__history", "tool_response": resp})
+		var out bytes.Buffer
+		h.Run(context.Background(), bytes.NewReader(b), &out)
+		if out.Len() != 0 || len(ws.redeemed) != 0 || len(started) != 0 {
+			t.Fatalf("%s: note %q, redeemed %v, started %v", name, out.String(), ws.redeemed, started)
+		}
+	}
+}
+
+// A beacon naming a tool connects only from that tool's result (its own
+// _meta): one minted on watch and returned in history's _meta (a relay, or
+// an app putting it in the wrong place) is ignored.
+func TestHookChecksTheBeaconsTool(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("WAKESHIFT_HOME", t.TempDir())
+	ws := newFakeWakeshift(t)
+	var started []string
+	h := &Hook{Settings: Settings{Dir: t.TempDir(), Issuers: []string{ws.URL}}, Socket: fakeAppServer(t, thread),
+		Start: func(th, link string) error { started = append(started, th); return nil }}
+	tok, err := jws.Sign(ws.key, "k1", beacon.Type, beacon.Claims{Issuer: ws.URL, Audience: beacon.Audience, Thread: thread, App: "chat", Tool: "watch",
+		Redeem: ws.URL + "/v1/connector/redeem", Ticket: "wst_t", IssuedAt: time.Now().Unix(), Expires: time.Now().Add(time.Minute).Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := func(tool string) *bytes.Reader {
+		b, _ := json.Marshal(map[string]any{"session_id": thread, "hook_event_name": "PostToolUse", "tool_name": tool,
+			"tool_response": map[string]any{"content": []any{}, "_meta": map[string]any{beacon.MetaKey: tok}}})
+		return bytes.NewReader(b)
+	}
+	var out bytes.Buffer
+	h.Run(context.Background(), in("mcp__chat__history"), &out)
+	if out.Len() != 0 || len(ws.redeemed) != 0 || len(started) != 0 {
+		t.Fatalf("history's result: %q %v", out.String(), ws.redeemed)
+	}
+	h.Run(context.Background(), in("mcp__chat__watch"), &out)
+	if !strings.Contains(noteOf(t, out.String()), "Wakeshift: connected") || len(started) != 1 {
+		t.Fatalf("watch's result: %q", out.String())
+	}
+}
+
 func TestRedact(t *testing.T) {
 	err := &url.Error{Op: "Get", URL: "ws://127.0.0.1:1/v1/stream?link=SECRET", Err: errors.New("connection refused")}
 	if got := redact(err); strings.Contains(got, "SECRET") || !strings.Contains(got, "/v1/stream?…") {

@@ -150,7 +150,7 @@ func TestConnectedNoteComesWithTheNextWake(t *testing.T) {
 	h := &Hook{Format: spec.Format, Verifier: &Verifier{Settings: set}, Poller: p, Links: LinksFor(set), When: spec.When}
 	conv := "6b1d4c1e-0f0e-4a43-9c55-0c3b7b1f2d11"
 	res, _ := json.Marshal(map[string]any{"_meta": map[string]any{"wakeshift/connector": ws.beacon(t, conv, nil)}})
-	out, ok := h.toolResult(t.Context(), Input{Event: ToolResult, Conversation: conv, ToolCallID: "toolu_1", ToolResult: res})
+	out, ok := h.toolResult(t.Context(), Input{Event: ToolResult, Conversation: conv, ToolCallID: "toolu_1", MCPTool: "probe", ToolResult: res})
 	if !ok || !strings.Contains(string(out.Stdout), "Wakeshift: connected") || h.Links.Load(conv) == "" {
 		t.Fatalf("post-tool: %q %v", out.Stdout, ok)
 	}

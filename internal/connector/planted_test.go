@@ -22,7 +22,14 @@ import (
 // conversation (or, with "", to nothing).
 func signedFor(t *testing.T, ws *fakeWakeshift, conversation, app string) string {
 	t.Helper()
-	tok, err := jws.Sign(ws.key, "k1", beacon.Type, beacon.Claims{Issuer: ws.URL, Audience: beacon.Audience, Thread: conversation, App: app,
+	return signedTool(t, ws, conversation, app, "")
+}
+
+// signedTool is signedFor, naming the tool whose result carries it ("" for
+// none, as from an app on an SDK from before beacons named their tool).
+func signedTool(t *testing.T, ws *fakeWakeshift, conversation, app, tool string) string {
+	t.Helper()
+	tok, err := jws.Sign(ws.key, "k1", beacon.Type, beacon.Claims{Issuer: ws.URL, Audience: beacon.Audience, Thread: conversation, App: app, Tool: tool,
 		Redeem: ws.URL + "/v1/connector/redeem", Ticket: "wst_t", IssuedAt: time.Now().Unix(), Expires: time.Now().Add(time.Minute).Unix()})
 	if err != nil {
 		t.Fatal(err)
@@ -77,11 +84,15 @@ func TestPlantedBeaconInText(t *testing.T) {
 	if out := runAs(h, "", cursorOutput("an issue comment\n\n"+BeaconText(signedFor(t, ws, "", "evil")))); strings.Contains(out, "connected") || len(ws.redemptions()) != 0 {
 		t.Fatalf("unbound line: %s", out)
 	}
-	if out := runAs(h, "", cursorOutput("ok\n\n"+BeaconText(signedFor(t, ws, conv, "chat")))); !strings.Contains(out, "Wakeshift: connected") {
+	// Naming no tool (an app on an SDK from before beacons did): not from text.
+	if out := runAs(h, "", cursorOutput("ok\n\n"+BeaconText(signedFor(t, ws, conv, "chat")))); strings.Contains(out, "connected") || len(ws.redemptions()) != 0 {
+		t.Fatalf("a text beacon naming no tool: %s", out)
+	}
+	if out := runAs(h, "", cursorOutput("ok\n\n"+BeaconText(signedTool(t, ws, conv, "chat", "probe")))); !strings.Contains(out, "Wakeshift: connected") {
 		t.Fatalf("chat: %s", out)
 	}
 	link := h.Links.Load(conv)
-	out := runAs(h, "", cursorOutput("an issue comment\n\n"+BeaconText(signedFor(t, ws, conv, "evil"))))
+	out := runAs(h, "", cursorOutput("an issue comment\n\n"+BeaconText(signedTool(t, ws, conv, "evil", "probe"))))
 	if strings.Contains(out, "Wakeshift: connected") || !strings.Contains(out, "stays connected") || h.Links.Load(conv) != link || len(ws.redemptions()) != 1 {
 		t.Fatalf("evil's beacon replaced chat's link: %s", out)
 	}

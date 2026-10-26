@@ -17,6 +17,7 @@ export interface Claims {
   thread?: string;
   call?: string;
   app: string; // the app it was minted for: only its pinned MCP server's results may carry it
+  tool?: string; // the MCP tool whose result carries it: only that tool's result may (absent from apps on older SDKs)
   redeem: string;
   ticket: string;
   iat: number;
@@ -169,6 +170,117 @@ export function mcpServer(tool: unknown): string {
   const rest = tool.startsWith("mcp__") ? tool.slice(5) : tool;
   const i = rest.indexOf("__");
   return i > 0 && i + 2 < rest.length ? rest.slice(0, i) : "";
+}
+
+/**
+ * The MCP tool an OpenClaw tool name names (what follows its server's
+ * "__", as mcpServer splits it), "" for a tool that isn't an MCP server's.
+ */
+export function mcpTool(tool: unknown): string {
+  const server = mcpServer(tool);
+  if (!server) return "";
+  const name = tool as string;
+  const rest = name.startsWith("mcp__") ? name.slice(5) : name;
+  return rest.slice(server.length + 2);
+}
+
+/** A tool name with every character but ASCII letters, digits, _ and - turned into _ (beacon.NormalTool). */
+export function normalTool(s: string): string {
+  return s.replace(/[^A-Za-z0-9_-]/g, "_");
+}
+
+/** Whether a beacon's tool claim names tool, the bare MCP tool that produced the result (beacon.ToolMatches). */
+export function toolMatches(claim: unknown, tool: string): boolean {
+  return typeof claim === "string" && claim !== "" && tool !== "" && normalTool(claim) === normalTool(tool);
+}
+
+/** Where a beacon was found in a result (connector.Carried). */
+export type Carried = "meta" | "nested" | "text" | "";
+
+const TRAILER_RE =
+  /(?:^|\n)\(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: ([A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\)$/;
+
+/**
+ * The beacon on the last line of a result's text (beacon.Trailer): the
+ * SDKs put Wakeshift's text after the app's own, so a beacon the result
+ * was given ends it; one inside what the app wrote (a message it relays,
+ * JSON it returns) doesn't.
+ */
+export function trailer(s: string): string {
+  return TRAILER_RE.exec(s.replace(/[ \t\r\n]+$/, ""))?.[1] ?? "";
+}
+
+/** A result's text: itself if a string, else its last text content item's (a result as JSON text too). */
+export function resultText(result: unknown, depth = 0): string {
+  if (depth > 2) return "";
+  if (typeof result === "string") {
+    const t = result.trim();
+    if (t.startsWith("{")) {
+      try {
+        const inner = resultText(JSON.parse(t), depth + 1);
+        if (inner) return inner;
+      } catch {
+        /* text */
+      }
+    }
+    return result;
+  }
+  const content = result && typeof result === "object" ? (result as Record<string, unknown>).content : undefined;
+  if (!Array.isArray(content)) return "";
+  for (let i = content.length - 1; i >= 0; i--) {
+    const c = content[i] as { type?: unknown; text?: unknown } | null;
+    if (c && c.type === "text" && typeof c.text === "string") return c.text;
+  }
+  return "";
+}
+
+function ownMeta(v: unknown): string {
+  if (!v || typeof v !== "object") return "";
+  const meta = (v as Record<string, unknown>)._meta;
+  if (meta && typeof meta === "object") {
+    const t = (meta as Record<string, unknown>)[META_KEY];
+    if (typeof t === "string" && TOKEN.test(t)) return t;
+  }
+  return "";
+}
+
+/**
+ * The beacon a result carries, and where (connector.FindBeacon): its own
+ * _meta (or, in Codex's runtime, the MCP result's _meta that OpenClaw keeps
+ * in details), a _meta further down, or the trailer of its text.
+ */
+export function findBeacon(result: unknown): { token: string; carried: Carried } {
+  let v = result;
+  if (typeof v === "string") {
+    try {
+      v = JSON.parse(v);
+    } catch {
+      /* text */
+    }
+  }
+  const own = ownMeta(v) || (v && typeof v === "object" ? ownMeta((v as Record<string, unknown>).details) : "");
+  if (own) return { token: own, carried: "meta" };
+  // The text's last line before a _meta further in: a document a tool
+  // returned can hold one, and mustn't hide the result's own beacon.
+  const t = trailer(resultText(result));
+  if (t) return { token: t, carried: "text" };
+  const nested = metaIn(v, 0);
+  return nested ? { token: nested, carried: "nested" } : { token: "", carried: "" };
+}
+
+/**
+ * Whether a verified beacon may connect from where it was found, in the
+ * result of tool (the bare MCP tool; connector.acceptable): only from the
+ * tool it names, and one naming no tool (an app on an older SDK) only from
+ * the result's own _meta, which no text a tool relays can set.
+ */
+export function acceptable(c: Claims, carried: Carried, tool: string): boolean {
+  if (!carried) return false;
+  // A _meta inside the result (a document or message a tool returned)
+  // carries only a beacon bound to a call (connector.acceptable).
+  if (carried === "nested" && !c.call) return false;
+  if (!c.tool) return carried === "meta";
+  return toolMatches(c.tool, tool);
 }
 
 const TEXT_RE =/wakeshift-beacon: ?([A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})/;

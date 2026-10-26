@@ -25,7 +25,7 @@ func (testFormat) Parse(b []byte) (Input, error) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return Input{}, err
 	}
-	in := Input{Conversation: c.Conversation, ToolCallID: c.Call, ToolResult: c.Result}
+	in := Input{Conversation: c.Conversation, ToolCallID: c.Call, ToolResult: c.Result, MCPTool: "probe"}
 	switch c.Event {
 	case "tool":
 		in.Event = ToolResult

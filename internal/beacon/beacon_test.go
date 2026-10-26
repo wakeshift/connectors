@@ -106,3 +106,50 @@ func TestText(t *testing.T) {
 		t.Fatalf("StripText %q", got)
 	}
 }
+
+// Trailer: a beacon counts in text only as the line that ends it, where the
+// SDKs put Wakeshift's text after the app's own; one inside the text (a
+// relayed message, JSON-escaped in structured content) doesn't.
+func TestTrailer(t *testing.T) {
+	const tok = "aaaaaaaaaa.bbbbbbbbbb.cccccccccc"
+	line := Text(tok)
+	for _, c := range []struct {
+		name, text string
+		want       string
+	}{
+		{"alone", line, tok},
+		{"after the app's text", "joined #general\n\n" + line, tok},
+		{"trailing whitespace", "ok\n" + line + "\n \n", tok},
+		{"text after it", "ok\n" + line + "\nmore", ""},
+		{"mid-line", "mallory said: " + line, ""},
+		{"JSON-escaped", `{"messages":[{"text":"hi\n\n` + line + `"}]}`, ""},
+		{"inside a framed message", "[message]\n" + line + "\n[/message]", ""},
+		{"none", "ok", ""},
+	} {
+		if got := Trailer(c.text); got != c.want {
+			t.Errorf("%s: %q", c.name, got)
+		}
+	}
+	if InText(`{"text":"hi\n\n`+line+`"}`) != tok {
+		t.Error("InText finds a beacon anywhere (to strip it)")
+	}
+}
+
+func TestToolMatches(t *testing.T) {
+	for _, c := range []struct {
+		claim, tool string
+		ok          bool
+	}{
+		{"watch", "watch", true},
+		{"subscribe_events", "subscribe_events", true},
+		{"chat.watch", "chat_watch", true}, // Claude Code turns . into _
+		{"watch", "history", false},
+		{"watch", "", false},
+		{"", "watch", false},
+		{"Watch", "watch", false},
+	} {
+		if ToolMatches(c.claim, c.tool) != c.ok {
+			t.Errorf("%q vs %q", c.claim, c.tool)
+		}
+	}
+}

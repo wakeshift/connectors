@@ -156,30 +156,34 @@ type ServerNamer interface {
 	ResultOf(in Input, c mcpCall) bool
 }
 
-// serverOf is the MCP server a tool result came from, from the calls the
-// conversation's PreCalls recorded: "" unless exactly one server matches
-// (a built-in tool's result, or a name two servers' tools could make, has
-// none).
-func (h *Hook) serverOf(in Input) string {
+// serverOf is the MCP server a tool result came from, and its tool, from
+// the calls the conversation's PreCalls recorded: "" unless exactly one
+// server matches (a built-in tool's result, or a name two servers' tools
+// could make, has none), and the tool "" unless one tool of it does.
+func (h *Hook) serverOf(in Input) (server, tool string) {
 	sn, ok := h.Format.(ServerNamer)
 	if !ok {
-		return ""
+		return "", ""
 	}
 	p := h.callsPath(in.Conversation)
 	unlock, err := lockFile(p + ".lock")
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	defer unlock()
-	server := ""
 	for _, c := range liveCalls(p) {
 		if !sn.ResultOf(in, c) {
 			continue
 		}
 		if server != "" && server != c.Server {
-			return ""
+			return "", ""
+		}
+		if server == "" {
+			tool = c.Tool
+		} else if tool != c.Tool {
+			tool = ""
 		}
 		server = c.Server
 	}
-	return server
+	return server, tool
 }

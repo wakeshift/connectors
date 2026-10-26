@@ -147,9 +147,9 @@ class Plugin(unittest.TestCase):
         self.assertEqual(self.ws.redeems, [])
         self.connect()  # mcp__try__watch: pins try to "try"
         self.assertEqual(len(self.ws.redeems), 1)
-        for tool, app in (("mcp__evil__lookup", "try"), ("mcp__try__watch", "evil")):
+        for tool, app, name in (("mcp__evil__lookup", "try", "lookup"), ("mcp__try__watch", "evil", "watch")):
             with self.subTest(tool + " " + app):
-                out = json.loads(self.p.transform(tool_name=tool, result=result(self.ws.beacon(app=app)), session_id="sess-1", tool_call_id="c"))
+                out = json.loads(self.p.transform(tool_name=tool, result=result(self.ws.beacon(app=app, tool=name)), session_id="sess-1", tool_call_id="c"))
                 self.assertIn("didn't connect this conversation", out["result"])
                 self.assertNotIn("_meta", out)
         self.assertEqual(len(self.ws.redeems), 1)
@@ -158,7 +158,7 @@ class Plugin(unittest.TestCase):
         # pin itself to any app.
         (self.dir / "servers.json").write_text("{not json")
         self.p.turn_started(session_id="sess-2", platform="api_server")
-        out = json.loads(self.p.transform(tool_name="mcp__evil__lookup", result=result(self.ws.beacon()), session_id="sess-2", tool_call_id="c"))
+        out = json.loads(self.p.transform(tool_name="mcp__evil__lookup", result=result(self.ws.beacon(tool="lookup")), session_id="sess-2", tool_call_id="c"))
         self.assertIn("servers.json can't be read", out["result"])
         self.assertEqual(len(self.ws.redeems), 1)
         self.assertEqual((self.dir / "servers.json").read_text(), "{not json")
@@ -176,6 +176,40 @@ class Plugin(unittest.TestCase):
         self.assertIn("Wakeshift: couldn't connect this conversation. " + msg, out["result"])
         redeem = [r for r in self.ws.requests if r[1] == "/v1/connector/redeem"][0]
         self.assertEqual(redeem[2].get("X-Wakeshift-Connector"), "wakeshift-hermes/dev hermes")
+
+    def test_a_beacon_is_acted_on_only_from_the_tool_it_names(self):
+        # Minted for the app's watch tool (an attacker's own, say) but in the
+        # result of another of its tools: refused silently, and stripped.
+        self.p.turn_started(session_id="sess-1", platform="api_server")
+        out = json.loads(self.p.transform(tool_name="mcp__try__history", result=result(self.ws.beacon(), "mallory: hi"),
+                                          session_id="sess-1", tool_call_id="c"))
+        self.assertNotIn("Wakeshift:", out["result"])
+        self.assertNotIn("_meta", out)
+        self.assertEqual(self.ws.redeems, [])
+        # Its own tool's result: connects; tool names compare as harnesses
+        # rewrite them (anything but letters, digits, _ and - is _).
+        out = json.loads(self.p.transform(tool_name="mcp__try__watch_now", result=result(self.ws.beacon(tool="watch.now")),
+                                          session_id="sess-1", tool_call_id="c"))
+        self.assertIn("Wakeshift: connected", out["result"])
+        self.assertEqual(wire.mcp_tool("mcp__try__watch"), "watch")
+        self.assertEqual(wire.mcp_tool("mcp__plugin_x__chat__watch"), "chat__watch")
+        self.assertEqual(wire.mcp_tool("terminal"), "")
+
+    def test_a_beacon_naming_no_tool_still_connects_from_the_results_own_meta(self):
+        # Apps on SDKs from before beacons named their tool: Hermes's beacons
+        # come only from a result's own _meta, which relayed text can't set.
+        self.p.turn_started(session_id="sess-1", platform="api_server")
+        out = json.loads(self.p.transform(tool_name="mcp__try__watch", result=result(self.ws.beacon(tool=None)), session_id="sess-1", tool_call_id="c"))
+        self.assertIn("Wakeshift: connected", out["result"])
+
+    def test_a_conversation_connected_elsewhere_stays_there(self):
+        self.connect()
+        had = json.loads(next((self.dir / "links").glob("*.json")).read_text())["link"]
+        self.ws.redeem_answer = (409, {"error": {"code": "conversation_taken", "message": "x"}})
+        out = json.loads(self.connect())
+        self.assertIn(plugin.NOTE_TAKEN, out["result"])
+        self.assertEqual(self.ws.redeems[1].get("supersedes"), had)  # it said which link it holds
+        self.assertEqual(json.loads(next((self.dir / "links").glob("*.json")).read_text())["link"], had)
 
     def test_client_header(self):
         from wakeshift import wire

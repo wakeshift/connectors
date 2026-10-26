@@ -18,6 +18,9 @@ import (
 //	{Each}  the same, starting a sentence ("Each post")
 //	{auth}  what to pick for a connector's authentication ("OAuth", or
 //	        "No authentication" for an app without sign-in)
+//	{hermesauth}      " --auth oauth" for `hermes mcp add` ("" without
+//	                  sign-in: Hermes's gateway can't start OAuth itself)
+//	{hermesauthyaml}  the same as a config.yaml line ("\n    auth: oauth")
 
 // PickerStep is one thing the user does to add the app to an agent.
 type PickerStep struct {
@@ -122,11 +125,12 @@ func Picker() []PickerAgent {
 		{
 			ID: "hermes", Name: "Hermes Agent", Group: "more",
 			Steps: []PickerStep{
-				{Kind: "file", Label: "Add to $HERMES_HOME/config.yaml (~/.hermes/config.yaml unless it's set)", Text: "mcp_servers:\n  {name}:\n    url: {url}"},
-				{Kind: "note", Text: "Or run hermes mcp add {name} --url {url} where Hermes runs. In a running chat, /reload-mcp picks it up."},
+				run("hermes mcp add {name} --url {url}{hermesauth}"),
+				{Kind: "note", Text: "Run it where Hermes runs (in Docker, inside its container); if it asks whether the server requires authentication, answer no. In a running chat, /reload-mcp picks it up, or start a new chat."},
+				{Kind: "file", Label: "Or add it to $HERMES_HOME/config.yaml (~/.hermes/config.yaml unless it's set)", Text: "mcp_servers:\n  {name}:\n    url: {url}{hermesauthyaml}"},
 			},
 			Wakes: []string{
-				"The agent offers a one-time install of Wakeshift's plugin for Hermes. Say yes (Hermes may ask you to approve the command once), then send any reply so the plugin starts.",
+				"The agent offers a one-time install of Wakeshift's plugin for Hermes. Say yes (Hermes may ask you to approve the command once). Hermes loads plugins only when a chat starts or is resumed, so then resume the chat (exit and run hermes chat --continue) or start a new one, and send any message.",
 				"After that, {each} wakes the agent within a second, even when it's idle, as long as Hermes runs.",
 			},
 		},

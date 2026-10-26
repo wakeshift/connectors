@@ -67,9 +67,13 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 	if json.NewDecoder(io.LimitReader(stdin, 8<<20)).Decode(&in) != nil || in.SessionID == "" {
 		return
 	}
-	token := connector.BeaconIn(in.ToolResponse)
+	// Only from the result's own _meta (tool_response._meta): Wakeshift
+	// always puts Codex's beacons there (harnesses.Meta). A beacon line in
+	// the result's text, or a _meta in JSON inside it, can be anyone's words
+	// or data the app relays (a chat message), naming this thread.
+	token, carried := connector.FindBeacon(in.ToolResponse)
 	server := connector.MCPServerOf(in.ToolName)
-	if token == "" || server == "" {
+	if token == "" || carried != connector.InResultMeta || server == "" {
 		return
 	}
 	v := &connector.Verifier{Settings: h.Settings, HTTP: h.HTTP, Now: h.now}
@@ -77,6 +81,11 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 	if err != nil {
 		// Not from a Wakeshift trusted here, or not for this thread: say
 		// nothing (its text can't be trusted to repeat).
+		return
+	}
+	// And from the tool it names (mcp__<server>__<tool>), where it names
+	// one (apps on SDKs from before beacons did name none).
+	if claims.Tool != "" && !connector.ToolOf(connector.Input{MCPTool: connector.MCPToolOf(in.ToolName)}, claims.Tool) {
 		return
 	}
 	note := func(s string) {

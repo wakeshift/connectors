@@ -58,6 +58,9 @@ NOTE_PINNED = ("Wakeshift: didn't connect this conversation: {}. If that's the s
                "(you renamed or re-added it), remove its line from {} and call the app's tool again.")
 NOTE_PIN_FILE = ("Wakeshift: didn't connect this conversation: {} can't be read, so Wakeshift can't check which MCP "
                  "server carries this app's messages. Fix the file, or remove it to start over, and call the app's tool again.")
+NOTE_TAKEN = ("Wakeshift: this conversation stays connected where it was: a result asked to connect it to a session of "
+              "another account or workspace, and Wakeshift doesn't move a connected conversation. To connect it there, stop "
+              "it being woken where it is first (the app's unwatch tool), or start a new conversation.")
 # _pin's answer when the pins exist but can't be read.
 PINS_UNREADABLE = "the pins can't be read"
 AUTHOR = {"id": "wakeshift", "name": "Wakeshift", "is_bot": True}
@@ -311,6 +314,10 @@ class Wakeshift:
         except Exception:
             log.debug("wakeshift: checking a beacon failed", exc_info=True)
             return stripped
+        # From the tool it names, where it names one (apps on SDKs from before
+        # beacons did name none; this is the result's own _meta all the same).
+        if claims.get("tool") and not wire.tool_matches(claims.get("tool"), wire.mcp_tool(tool_name)):
+            return stripped
         pinned = self._pin(server, claims.get("app", ""))
         if pinned == PINS_UNREADABLE:
             return wire.add_note(stripped, NOTE_PIN_FILE.format(self._pins_path()))
@@ -330,6 +337,8 @@ class Wakeshift:
             link = _redeem(claims, session_id, call, supersedes)
         except Outdated as e:
             return wire.add_note(stripped, NOTE_OUTDATED.format(e))
+        except Taken:
+            return wire.add_note(stripped, NOTE_TAKEN)  # the link it had stays
         except RedeemError as e:
             return wire.add_note(stripped, NOTE_FAILED.format(e))
         if not _same_origin(link, claims.get("iss", "")):
@@ -515,6 +524,11 @@ class Outdated(RedeemError):
     message says what to tell the agent (ask the user to update)."""
 
 
+class Taken(RedeemError):
+    """Wakeshift refused to move the conversation to another workspace's session
+    (409 conversation_taken): the link it has stays."""
+
+
 def _same_origin(link: str, issuer: str) -> bool:
     """A stream link (wss://host/…) is on the issuer's own scheme and host
     (wss for https, ws for http)."""
@@ -549,6 +563,8 @@ def _redeem(claims: dict, conversation: str, call: str, supersedes: str = "") ->
         if e.code == 426 or code == "update_required":
             raise Outdated(message if isinstance(message, str) and message else
                            "Wakeshift's hooks for Hermes Agent are out of date. Ask the user whether to update them; only if they agree, run the install command again.")
+        if code == "conversation_taken":
+            raise Taken("this conversation is connected to another workspace's session")
         raise RedeemError({"unknown_ticket": "the ticket expired or was used",
                            "no_grant": "the app isn't allowed for this agent any more",
                            "wrong_thread": "the ticket was for another conversation"}.get(code, f"Wakeshift answered {e.code}"))

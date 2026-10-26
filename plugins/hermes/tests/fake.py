@@ -187,7 +187,7 @@ class Wakeshift:
 
     def beacon(self, **over) -> str:
         now = int(time.time())
-        c = {"iss": self.url, "aud": "wakeshift-connector", "thread": "", "app": "try",
+        c = {"iss": self.url, "aud": "wakeshift-connector", "thread": "", "app": "try", "tool": "watch",
              "redeem": self.url + "/v1/connector/redeem", "ticket": "t-1", "iat": now, "exp": now + 60}
         c.update(over)
         return self.keys.sign(c)

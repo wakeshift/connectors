@@ -202,6 +202,28 @@ def mcp_server(tool_name: str) -> str:
     return server if sep and server else ""
 
 
+def mcp_tool(tool_name: str) -> str:
+    """The MCP tool a Hermes tool name (mcp__<server>__<tool>) names (what follows
+    its server, as mcp_server splits it), "" for a tool that isn't an MCP server's."""
+    if not mcp_server(tool_name):
+        return ""
+    return tool_name[len("mcp__"):].partition("__")[2]
+
+
+def normal_tool(s: str) -> str:
+    """A tool name with every character but ASCII letters, digits, _ and - turned
+    into _ (beacon.NormalTool)."""
+    return re.sub(r"[^A-Za-z0-9_-]", "_", s)
+
+
+def tool_matches(claim: Any, tool: str) -> bool:
+    """Whether a beacon's tool claim names tool, the bare MCP tool that produced
+    the result (beacon.ToolMatches). A beacon naming no tool (an app on an older
+    SDK) matches nothing: Hermes's beacons come from a result's own _meta, which
+    the caller checks first."""
+    return isinstance(claim, str) and bool(claim) and bool(tool) and normal_tool(claim) == normal_tool(tool)
+
+
 def add_note(result: str, note: str) -> str:
     """A Hermes tool result with a note for the model after its text."""
     try:

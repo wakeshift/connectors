@@ -72,6 +72,7 @@ func (antigravityFormat) ParseEvent(event string, b []byte) (Input, error) {
 			return in, nil
 		}
 		in.Event, in.ToolName, in.Server = ToolResult, c.ToolCall.Args.ServerName+"/"+c.ToolCall.Args.ToolName, c.ToolCall.Args.ServerName
+		in.MCPTool = c.ToolCall.Args.ToolName
 		// agy writes the result's step to the transcript after this hook
 		// returns (verified), so it's read at the conversation's next hook
 		// (PreInvocation or Stop).

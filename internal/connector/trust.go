@@ -210,6 +210,25 @@ func client(c *http.Client) *http.Client {
 // error or 429; the same beacon may be redeemed again later.
 var ErrUnreachable = errors.New("Wakeshift couldn't be reached")
 
+// ErrTaken: Wakeshift refused the ticket because the conversation is
+// connected to a session of another workspace (409 conversation_taken);
+// the link the hook holds stays.
+var ErrTaken = errors.New("this conversation is connected to another workspace's session")
+
+// linkOnOrigin says whether a stream link (wss, ws, https or http) is on
+// the same host as url (https or http, the same security), so a link's
+// token goes only to the Wakeshift that issued it.
+func linkOnOrigin(link, raw string) bool {
+	l, err1 := url.Parse(link)
+	u, err2 := url.Parse(raw)
+	if err1 != nil || err2 != nil || l.Host == "" || !strings.EqualFold(l.Host, u.Host) {
+		return false
+	}
+	scheme := map[string]string{"wss": "https", "https": "https", "ws": "http", "http": "http"}
+	s, ok := scheme[strings.ToLower(l.Scheme)]
+	return ok && s == strings.ToLower(u.Scheme)
+}
+
 // Redeem exchanges a verified beacon's ticket for its conversation's stream
 // link (POST <redeem> {"ticket", "thread"}), for harness's hooks
 // (ClientHeader). An *UpdateRequired error: Wakeshift no longer serves
@@ -222,9 +241,20 @@ func Redeem(ctx context.Context, hc *http.Client, harness string, c beacon.Claim
 // "thread", "call"}), for beacons bound to a call or to nothing, so
 // Wakeshift can bind the session to the conversation.
 func RedeemCall(ctx context.Context, hc *http.Client, harness string, c beacon.Claims, conversation, call string) (string, error) {
+	return RedeemHeld(ctx, hc, harness, c, conversation, call, "")
+}
+
+// RedeemHeld is RedeemCall saying which link the hook holds for the
+// conversation now, if any (held, sent only to its own Wakeshift): while
+// it's live, Wakeshift refuses a ticket for another workspace's session
+// (ErrTaken), so a beacon someone else minted can't move the conversation.
+func RedeemHeld(ctx context.Context, hc *http.Client, harness string, c beacon.Claims, conversation, call, held string) (string, error) {
 	in := map[string]string{"ticket": c.Ticket, "thread": conversation}
 	if call != "" {
 		in["call"] = call
+	}
+	if held != "" && linkOnOrigin(held, c.Redeem) {
+		in["held"] = held
 	}
 	b, _ := json.Marshal(in)
 	rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -257,6 +287,8 @@ func RedeemCall(ctx context.Context, hc *http.Client, harness string, c beacon.C
 		return "", errors.New("the app isn't allowed for this agent any more")
 	case out.Error.Code == "wrong_thread":
 		return "", errors.New("the ticket was for another conversation")
+	case out.Error.Code == "conversation_taken":
+		return "", ErrTaken
 	default:
 		return "", fmt.Errorf("Wakeshift answered %d", resp.StatusCode)
 	}

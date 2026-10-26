@@ -152,6 +152,20 @@ func MCPServerOf(tool string) string {
 	return server
 }
 
+// MCPToolOf is the tool a tool name like mcp__<server>__<tool> names (what
+// follows the server), "" for any other name.
+func MCPToolOf(tool string) string {
+	rest, ok := strings.CutPrefix(tool, "mcp__")
+	if !ok {
+		return ""
+	}
+	_, name, ok := strings.Cut(rest, "__")
+	if !ok {
+		return ""
+	}
+	return name
+}
+
 // noRedirects is the hooks' http.Client CheckRedirect: a redeem's ticket
 // and a poll's link token go only where the beacon or link says (the
 // issuer's origin), never where a 3xx points.

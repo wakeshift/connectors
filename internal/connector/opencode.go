@@ -67,7 +67,9 @@ func (opencodeFormat) Parse(b []byte) (Input, error) {
 	in := Input{Conversation: c.SessionID}
 	switch c.HookEventName {
 	case "PostToolUse":
+		// <server>_<tool>, either of which may contain _ (ToolOf).
 		in.Event, in.ToolName, in.ToolCallID, in.ToolResult = ToolResult, c.ToolName, c.CallID, c.ToolResponse
+		in.ToolSep = "_"
 	case "SessionIdle":
 		in.Event = Rewake
 	}
