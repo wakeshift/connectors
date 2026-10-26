@@ -11,7 +11,7 @@ import (
 )
 
 // Cursor (cursor-agent 2026.09.23, verified; the IDE reads the same file,
-// from source and docs; docs/harnesses.md). User hooks are in
+// from source and docs). User hooks are in
 // ~/.cursor/hooks.json (always under the home directory), which must say
 // "version": 1 or Cursor ignores the whole file. Cursor gives hooks an MCP
 // result's text only (no _meta) and tells MCP servers neither the

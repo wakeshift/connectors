@@ -11,7 +11,7 @@
 // long-polls it for the conversation's messages, handing them to the
 // harness (a stop hook that continues the session, context added after a
 // tool call, or an async rewake) and acknowledging each once it's handed
-// over. See docs/harnesses.md.
+// over.
 package connector
 
 import (

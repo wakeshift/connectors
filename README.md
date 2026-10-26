@@ -9,7 +9,9 @@ The open-source parts of [Wakeshift](https://wakeshift.ai) that run on your mach
 | `plugins/hermes` | Wakeshift's plugin for [Hermes Agent](https://hermes-agent.nousresearch.com) (Python). |
 | `plugins/openclaw` | Wakeshift's plugin for [OpenClaw](https://docs.openclaw.ai) (TypeScript). |
 
-The TypeScript SDK for building apps is at [wakeshift/wakeshift-node](https://github.com/wakeshift/wakeshift-node).
+You don't install this by hand: when an agent first needs it, Wakeshift's tool result asks the agent to run a one-time install, and the agent asks you first. [Agents](https://wakeshift.ai/docs/agents) says what the install changes for each agent and how to undo it.
+
+Building an app? Use the SDKs: [TypeScript](https://github.com/wakeshift/wakeshift-node), [Go](https://github.com/wakeshift/wakeshift-go) and [Python](https://github.com/wakeshift/wakeshift-python).
 
 ## Building and testing
 
@@ -25,9 +27,9 @@ To stamp a version: `go build -ldflags "-X github.com/wakeshift/connectors/inter
 
 The Hermes plugin's end-to-end test needs a running Wakeshift, so it runs in Wakeshift's own repository.
 
-## Where changes happen
+## Contributing and security
 
-This repository is generated from Wakeshift's main repository. Pull requests are welcome: we apply them there and publish the result. Each commit here says which commit it came from (`.source-commit`); see [CONTRIBUTING](CONTRIBUTING.md).
+This repository is generated from Wakeshift's main repository. Pull requests are welcome: we apply them there and publish the result. Each commit here says which commit it came from (`.source-commit`); see [CONTRIBUTING](CONTRIBUTING.md). Report a security problem privately to support@wakeshift.ai, not in an issue ([SECURITY](SECURITY.md)).
 
 ## License
 

@@ -10,8 +10,7 @@
 //	wakeshift run --thread ID | status ID           Codex's per-thread connector
 //	wakeshift harnesses | version
 //
-// See internal/connectcli, internal/connector, internal/codexconnector and
-// docs/harnesses.md.
+// See internal/connectcli, internal/connector and internal/codexconnector.
 package main
 
 import "github.com/wakeshift/connectors/internal/connectcli"

@@ -1,5 +1,4 @@
-// Wakeshift's plugin for OpenClaw (verified against 2026.10.4;
-// docs/harnesses.md, "OpenClaw").
+// Wakeshift's plugin for OpenClaw (verified against 2026.10.4).
 //
 // Connecting: an app's tool result for an OpenClaw session carries a
 // beacon (internal/beacon). OpenClaw drops a result's _meta in its own

@@ -19,8 +19,7 @@ import (
 // Long polling a session's stream link, for hooks that can't hold a
 // WebSocket (they run for one call and exit).
 //
-// The contract (built by the long-poll track, feat/longpoll; this client
-// follows its draft in internal/streams/poll.go there):
+// The contract, as Wakeshift serves it:
 //
 //	GET  <origin>/v1/stream/poll?wait=<n>ms          Authorization: Bearer <token>
 //	     200 {"deliveries": [{"type":"event", "delivery_id", "attempt", "subscription_id", "event": {…}}],

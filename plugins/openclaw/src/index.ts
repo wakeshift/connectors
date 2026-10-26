@@ -147,17 +147,17 @@ function start(api: Api, log: { info: (m: string) => void; warn: (m: string) => 
         ).then(() => {}),
     },
   });
-  const ws = new Wakeshift({ issuer, store, host, hooks, ...overrides });
+  const wake = new Wakeshift({ issuer, store, host, hooks, ...overrides });
 
   api.registerService({
     id: "wakeshift-streams",
     apiVersion: 2,
     start(ctx: { scheduler?: Scheduler }) {
       scheduler = ctx?.scheduler;
-      ws.start();
+      wake.start();
     },
     stop() {
-      ws.stop();
+      wake.stop();
       scheduler = undefined;
     },
   });
@@ -175,7 +175,7 @@ function start(api: Api, log: { info: (m: string) => void; warn: (m: string) => 
     api.on("message_received", (_event: any, ctx: any) => {
       const sessionKey = ctx?.sessionKey;
       if (typeof sessionKey !== "string" || !sessionKey) return;
-      ws.onMessage(sessionKey, routeOf(ctx));
+      wake.onMessage(sessionKey, routeOf(ctx));
     });
   } catch (e) {
     log.warn(`wakeshift: no message_received hook (${(e as Error).message}); woken turns' replies stay in their session`);
@@ -190,7 +190,7 @@ function start(api: Api, log: { info: (m: string) => void; warn: (m: string) => 
     const result = event?.result;
     const sessionKey = ctx?.sessionKey;
     if (!result || !sessionKey) return undefined;
-    const note = (await ws.onResult(result, { sessionKey, agentId: ctx?.agentId, toolCallId: event?.toolCallId, toolName: event?.toolName })) || ws.takeNote(sessionKey);
+    const note = (await wake.onResult(result, { sessionKey, agentId: ctx?.agentId, toolCallId: event?.toolCallId, toolName: event?.toolName })) || wake.takeNote(sessionKey);
     if (ctx?.runtime === "codex") {
       if (note) noteLater(note, sessionKey, ctx?.agentId);
       return undefined;
@@ -212,7 +212,7 @@ function start(api: Api, log: { info: (m: string) => void; warn: (m: string) => 
   api.on("after_tool_call", (event: any, ctx: any) => {
     const sessionKey = ctx?.sessionKey;
     if (!event?.result || !sessionKey) return;
-    void ws.onResult(event.result, { sessionKey, agentId: ctx?.agentId, toolCallId: event?.toolCallId ?? ctx?.toolCallId, toolName: event?.toolName }).then((note) => {
+    void wake.onResult(event.result, { sessionKey, agentId: ctx?.agentId, toolCallId: event?.toolCallId ?? ctx?.toolCallId, toolName: event?.toolName }).then((note) => {
       if (note && !filtering) noteLater(note, sessionKey, ctx?.agentId);
     });
   });

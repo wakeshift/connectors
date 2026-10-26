@@ -7,8 +7,7 @@ import (
 
 // What the apps' "connect your agent" pickers say about each agent
 // (apps/agentpicker renders it; `make agent-picker` regenerates the copies).
-// The commands were checked against each harness's own CLI (docs/harnesses.md
-// has the research). Public copy: what happens and what to do, never how the
+// The commands were checked against each harness's own CLI. Public copy: what happens and what to do, never how the
 // listener works.
 //
 // Text may hold placeholders the picker fills per app:

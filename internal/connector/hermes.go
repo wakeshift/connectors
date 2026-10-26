@@ -18,7 +18,7 @@ import (
 	"github.com/wakeshift/connectors/plugins/hermes"
 )
 
-// Hermes Agent (0.22.2, verified; docs/harnesses.md) loads Python plugins
+// Hermes Agent (0.22.2, verified) loads Python plugins
 // from $HERMES_HOME/plugins/<name>/ once they're enabled (plugins.enabled).
 // Its MCP client tells servers neither the session nor the call, so beacons
 // are unbound; it hands an MCP result (with _meta, which its model sees) to

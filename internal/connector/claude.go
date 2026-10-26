@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// Claude Code (2.1.280, verified; docs/harnesses.md). Its MCP client sends
+// Claude Code (2.1.280, verified). Its MCP client sends
 // servers the tool call's ID (_meta["claudecode/toolUseId"]) but not the
 // session's, and its PostToolUse hooks get the result without _meta; the
 // result's _meta is in the transcript ("mcpMeta"), written just after the

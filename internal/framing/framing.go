@@ -1,5 +1,5 @@
 // Package framing is how every Wakeshift message is put in front of a
-// model (decision 2 in docs/topics.md): a short plain preface saying it
+// model: a short plain preface saying it
 // comes from outside the conversation and isn't the user's instruction, and
 // how to answer, then each message in a tag
 //

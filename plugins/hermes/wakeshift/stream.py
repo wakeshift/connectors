@@ -23,7 +23,7 @@ from .wire import CLIENT_HEADER, client_header, link_parts
 
 log = logging.getLogger("wakeshift")
 
-# Reasons a stream ends for good (internal/streams Ending).
+# Reasons a stream ends for good.
 TERMINAL = {"revoked", "expired", "forgotten", "removed", "unsubscribed", "closed", "ttl", "once"}
 
 
@@ -48,7 +48,7 @@ class Outdated(Exception):
 # The longest Retry-After honoured.
 RETRY_AFTER_MAX = 120.0
 
-# The most delivery IDs one ack may carry (internal/streams MaxPollAcks), and
+# The most delivery IDs one ack may carry (Wakeshift refuses more), and
 # so the most handed to deliver at once.
 MAX_ACKS = 100
 MAX_BATCH = MAX_ACKS

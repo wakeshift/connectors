@@ -17,7 +17,7 @@ import (
 )
 
 // Codex says nothing to other clients when a TUI stops showing a thread on
-// its shared daemon (docs/delivery-findings.md): no notification, no hook,
+// its shared daemon: no notification, no hook,
 // and the thread stays loaded. Its own log does: the daemon writes each
 // request to ~/.codex/logs_N.sqlite with the connection it came on. So a
 // thread is open in a TUI while that TUI's connection is alive (it reads

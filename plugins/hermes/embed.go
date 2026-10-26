@@ -1,7 +1,6 @@
 // Package hermes is Wakeshift's plugin for Hermes Agent (Nous Research), in
 // Python: the files in wakeshift/ are what `wakeshift install --harness
 // hermes` writes to $HERMES_HOME/plugins/wakeshift (internal/connector).
-// docs/harnesses.md describes how it binds and wakes a conversation.
 package hermes
 
 import (

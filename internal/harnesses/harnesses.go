@@ -4,9 +4,8 @@
 // conversations are woken, how a tool result's beacon reaches its hook and
 // is bound to the conversation, and what to tell its agent about installing
 // Wakeshift's hooks (the install command and the harness's own trust step).
-// The core uses it to write each harness's install note, as
-// describeConnector does for Codex (internal/appapi/agent.go).
-// docs/harnesses.md has the research behind every entry.
+// The core uses it to write each harness's install note. Every entry was
+// checked against the harness itself, or its docs and source where noted.
 package harnesses
 
 import (
@@ -20,7 +19,7 @@ type Wake string
 const (
 	// Monitor: the agent watches its session's stream link itself (Claude
 	// Code's Monitor tool). Nothing to install; at least once, confirmed by
-	// keepalives (internal/streams).
+	// keepalives.
 	Monitor Wake = "monitor"
 	// Connector: a local process starts a turn in the conversation (Codex's
 	// app-server).
@@ -335,8 +334,8 @@ var all = []Harness{
 		// developer forum (not captured here: no ChatGPT sign-in), and
 		// _meta openai/session (an anonymized conversation ID; the Apps SDK
 		// reference). It's woken by MCP Events in Work chats and dots, for
-		// the app's own event types (pkg/appkit ServeEvents, the TypeScript
-		// SDK's serveEvents): ChatGPT subscribes natively and starts a run
+		// the app's own event types (pkg/appkit Attach, the TypeScript
+		// SDK's attach): ChatGPT subscribes natively and starts a run
 		// for each occurrence. What a conversation subscribes to with the
 		// app's topic tools waits for its next tool call (appapi
 		// chatgptResult). openai/session only recognises it.
@@ -351,7 +350,7 @@ var all = []Harness{
 		Blocker: "Google replaced Gemini CLI with Antigravity CLI (agy), which Wakeshift can wake",
 	},
 
-	// Researched from docs and source only (docs/harnesses.md).
+	// Researched from docs and source only.
 	{
 		ID: "goose", Name: "Goose", Clients: []string{"goose-cli", "goose-desktop"},
 		Wake: StopHook, Binding: ByConversation, ConversationMeta: "agent-session-id",

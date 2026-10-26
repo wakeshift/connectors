@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-// opencode (1.18.7, verified; docs/harnesses.md) has no shell hooks; it
+// opencode (1.18.7, verified) has no shell hooks; it
 // has plugins, loaded from ~/.config/opencode/plugins/ with no trust step.
 // A plugin's tool.execute.after gets an MCP tool's whole CallToolResult,
 // _meta and all, and client.session.promptAsync starts a turn in an idle

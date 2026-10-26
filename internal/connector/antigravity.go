@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// Antigravity CLI (agy 1.4.0, verified; docs/harnesses.md). Hooks live in
+// Antigravity CLI (agy 1.4.0, verified). Hooks live in
 // ~/.gemini/config/hooks.json under named keys; inputs are camelCase with
 // no event name (the command says which), and a PostToolUse hook gets no
 // result at all, but the result's text is in the conversation's transcript

@@ -1,5 +1,5 @@
-"""The plugin against a real Wakeshift (internal/coretest's TestHermesPlugin
-runs this): stdin's first line is {"issuer", "session", "result"} (an app's
+"""The plugin against a real Wakeshift (Wakeshift's own repository runs
+this): stdin's first line is {"issuer", "session", "result"} (an app's
 tool result as Hermes hands it to transform_tool_result); prints {"result"}
 (what the model would see), then {"run": text} for each turn it starts, as
 Hermes would run it. Stops when stdin closes."""

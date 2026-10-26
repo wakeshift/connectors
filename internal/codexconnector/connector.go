@@ -1,5 +1,5 @@
 // Package codexconnector delivers one Codex thread's Wakeshift events into
-// that thread (spike).
+// that thread.
 //
 // It holds the thread's session stream link (with acks) and Codex's
 // app-server control socket. When events arrive it waits until the thread

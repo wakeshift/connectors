@@ -11,7 +11,6 @@ import (
 // background itself, and its harness wakes it when the command prints a
 // matching line (Cursor: the Shell tool's notify_on_output) or exits
 // (Antigravity CLI: run_command; Copilot CLI: bash in async mode).
-// docs/harnesses.md has the research.
 //
 // Every command is the session's one-shot wait (streams.WaitURL) in a
 // loop of short waits (WaitTimeout), so a command that died stops counting

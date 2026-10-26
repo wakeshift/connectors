@@ -36,7 +36,7 @@ func TestAgentID(t *testing.T) {
 }
 
 // Each harness is found by the clientInfo name it really sends (verified
-// against the binaries; docs/harnesses.md), and only by that.
+// against the binaries), and only by that.
 // A stateless server sees the name a client registered with; with a tag in
 // parentheses, or the harness's own name, it's still that harness exactly.
 func TestExactClient(t *testing.T) {
@@ -405,7 +405,7 @@ func TestConversationAndCall(t *testing.T) {
 
 // Recognise: a stated client name wins; without one, a _meta key only one
 // harness sends; without that, a User-Agent product token only one sends
-// (the User-Agents captured from the real binaries; docs/harnesses.md).
+// (the User-Agents captured from the real binaries).
 func TestRecognise(t *testing.T) {
 	codex := map[string]any{"x-codex-turn-metadata": map[string]any{"thread_id": "t1"}}
 	claude := map[string]any{"claudecode/toolUseId": "toolu_1"}

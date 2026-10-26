@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// GitHub Copilot CLI (1.0.98, verified; docs/harnesses.md). User hooks are
+// GitHub Copilot CLI (1.0.98, verified). User hooks are
 // files in ~/.copilot/hooks/ ($COPILOT_HOME/hooks), run with no prompt;
 // camelCase inputs carry sessionId but no event name (the command says
 // which). Copilot drops an MCP result's _meta, but its preMcpToolCall hook
