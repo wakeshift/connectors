@@ -114,11 +114,13 @@ func TestWindowStopsAnswering(t *testing.T) {
 	l.at(0, threadA, span("thread/start", 7, `startup-thread-start-1`))
 	l.at(time.Second, "", request("account/rateLimits/read", 7, `String("x")`))
 	w := l.window(threadA)
-	l.now = l.now.Add(2 * time.Minute)
+	// kill -9: a reset, then nothing more from it.
+	l.at(30*time.Second, "", `WebSocket protocol error: Connection reset without closing handshake`)
+	l.now = l.now.Add(90 * time.Second)
 	if open, _ := l.open(w); !open {
 		t.Fatal("closed while its heartbeat is due")
 	}
-	l.now = l.now.Add(time.Minute) // kill -9: nothing more from it
+	l.now = l.now.Add(time.Minute)
 	if open, why := l.open(w); open || why != "the window stopped answering" {
 		t.Fatalf("after its heartbeat stopped: %v %q", open, why)
 	}
@@ -126,6 +128,67 @@ func TestWindowStopsAnswering(t *testing.T) {
 	l.at(0, "", request("account/rateLimits/read", 70, `String("x")`))
 	if open, _ := l.open(w); open {
 		t.Fatal("another connection's heartbeat counted")
+	}
+}
+
+// A TUI that's open but has nothing to do can go minutes without a request
+// on its connection. Quiet alone doesn't close the window: on staging a
+// connector stopped 150 s into such a quiet, and the thread missed its next
+// wake. Neither does a reset from before the quiet began, or from long into
+// it.
+func TestWindowQuietIsNotClosed(t *testing.T) {
+	l := newCodexLog(t)
+	l.at(0, "", `WebSocket protocol error: Connection reset without closing handshake`) // some earlier client
+	l.at(time.Minute, threadA, span("thread/start", 7, `startup-thread-start-1`))
+	l.at(time.Second, "", request("account/rateLimits/read", 7, `String("x")`))
+	w := l.window(threadA)
+	// Turns another client starts (the connector's) aren't on its connection.
+	l.at(time.Minute, threadA, `app-server request: turn/start connection_id=ConnectionId(8) request_id=Integer(3)`)
+	l.now = l.now.Add(20 * time.Minute)
+	if open, why := l.open(w); !open {
+		t.Fatalf("an idle window closed: %q", why)
+	}
+	// Another client's connection dropping well into the quiet names no
+	// connection, so it's no sign that this one went.
+	l.at(0, "", `WebSocket protocol error: Connection reset without closing handshake`)
+	if open, why := l.open(w); !open {
+		t.Fatalf("another client's reset closed an idle window: %q", why)
+	}
+}
+
+// The reset names no connection: when another client went quiet after the
+// window's last line and before the reset, it's as likely that client's,
+// so the window isn't taken for closed.
+func TestWindowOthersReset(t *testing.T) {
+	l := newCodexLog(t)
+	l.at(0, threadA, span("thread/start", 7, `startup-thread-start-1`))
+	l.at(time.Second, "", request("account/rateLimits/read", 7, `String("x")`))
+	w := l.window(threadA)
+	l.at(10*time.Second, "", request("account/rateLimits/read", 9, `String("y")`)) // another TUI, then it's killed
+	l.at(10*time.Second, "", `WebSocket protocol error: Connection reset without closing handshake`)
+	l.now = l.now.Add(5 * time.Minute)
+	if open, why := l.open(w); !open {
+		t.Fatalf("another client's reset closed an idle window: %q", why)
+	}
+	// Nor when that client went quiet just before the window's last line.
+	l1 := newCodexLog(t)
+	l1.at(0, threadA, span("thread/start", 7, `startup-thread-start-1`))
+	l1.at(time.Second, "", request("account/rateLimits/read", 9, `String("y")`))
+	l1.at(time.Second, "", request("account/rateLimits/read", 7, `String("x")`))
+	l1.at(30*time.Second, "", `WebSocket protocol error: Connection reset without closing handshake`)
+	l1.now = l1.now.Add(5 * time.Minute)
+	if open, why := l1.open(l1.window(threadA)); !open {
+		t.Fatalf("a reset as likely another's closed the window: %q", why)
+	}
+	// A client still going after the reset wasn't the one that dropped.
+	l2 := newCodexLog(t)
+	l2.at(0, threadA, span("thread/start", 7, `startup-thread-start-1`))
+	l2.at(time.Second, "", request("account/rateLimits/read", 7, `String("x")`))
+	l2.at(10*time.Second, "", `WebSocket protocol error: Connection reset without closing handshake`)
+	l2.at(time.Minute, "", request("turn/start", 8, `Integer(3)`)) // the connector
+	l2.now = l2.now.Add(3 * time.Minute)
+	if open, why := l2.open(l2.window(threadA)); open || why != "the window stopped answering" {
+		t.Fatalf("after it was killed: %v %q", open, why)
 	}
 }
 
@@ -177,5 +240,32 @@ func TestWindowBindsLate(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("the late window's /quit wasn't noticed")
+	}
+}
+
+// After Codex's app-server restarts (it updates itself), connection IDs
+// start again: the TUI that showed threadA on connection 3 resumes it on
+// connection 1, and the new daemon's connection 3 is another window, on
+// threadB. With Since, the window is found on its new connection; without
+// it, the old daemon's lines would have it on 3, now threadB's.
+func TestWindowAfterDaemonRestart(t *testing.T) {
+	l := newCodexLog(t)
+	l.at(0, threadA, span("thread/start", 3, `startup-thread-start-1`))
+	l.at(time.Minute, "", request("account/rateLimits/read", 3, `String("x")`))
+	restart := l.now.Add(10 * time.Second)
+	l.at(10*time.Second, threadA, span("thread/resume", 1, `4`))
+	l.at(time.Second, threadB, span("thread/start", 3, `startup-thread-start-1`))
+	w := l.window(threadA)
+	w.Since = restart
+	if b, ok := w.Bind(context.Background()); !ok || b.conn != 1 {
+		t.Fatalf("bound to %+v %v", b, ok)
+	}
+	if open, why := l.open(w); !open {
+		t.Fatalf("closed: %s", why)
+	}
+	// Bound before the restart, on 3: that ID is threadB's window now.
+	old := l.window(threadA)
+	if open, _, _ := old.Open(context.Background(), bound{conn: 3, at: restart.Add(-time.Minute)}); open {
+		t.Fatal("the reused connection ID still showed the thread")
 	}
 }

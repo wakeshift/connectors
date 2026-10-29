@@ -38,6 +38,8 @@ func init() {
 	register(Spec{Name: antigravityName, Format: antigravityFormat{}, Installer: antigravityInstaller{},
 		When:     "if they come within a minute after the agent finishes a turn, otherwise at the start of the next one",
 		StopWait: 60 * time.Second, // the hook's timeout is 90s
+		// No Rule (AntigravityRule says why).
+		Wait: true, RecordProcs: true,
 	})
 }
 
@@ -281,3 +283,6 @@ func jsonEqual(a, b json.RawMessage) bool {
 	ya, _ := json.Marshal(y)
 	return string(xa) == string(ya)
 }
+
+// TextOnly: its hooks read a result's text from the transcript, never _meta.
+func (antigravityFormat) TextOnly() bool { return true }

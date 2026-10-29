@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -37,7 +38,17 @@ const (
 	// Resolve: a resolver the tool-result hook started (ResolveSoon) reads
 	// the conversation's deferred results as soon as they're written.
 	Resolve
+	// CallDone: after an MCP tool call, naming its server, before the
+	// tool-result hook (Cursor's afterMCPExecution): recorded so the
+	// result's hook knows its server (CallServerFormat).
+	CallDone
 )
+
+// CallServerFormat is a Format whose tool-result hook doesn't name the MCP
+// server, but whose CallDone hook does, for the same call ID (Cursor).
+type CallServerFormat interface {
+	CallServers() bool
+}
 
 // PreCallFormat is a Format that answers PreCall.
 type PreCallFormat interface {
@@ -80,12 +91,22 @@ type Input struct {
 	// harnesses whose servers the hook tells (AliasFormat): what beacons
 	// from that server are bound to, and what redeems them.
 	ServerConversation string
+	// ServerURL is the URL the harness says the call went to, if it says
+	// (Cursor), checked against its MCP settings before a tool rule names
+	// the server (toolrules.go).
+	ServerURL string
+	// Dirs are the conversation's folders, if the harness says, for its
+	// project MCP settings.
+	Dirs []string
 	// Continued: the harness says this stop already follows a stop hook's
 	// continuation (stop_hook_active, loop_count > 0).
 	Continued bool
 
 	raw      []byte // the input as the harness sent it, for its format
 	deferred []byte // for a ToolResult that can't be read yet (DeferredFormat)
+	// transcript: the conversation's own record, for a waiter whose
+	// conversation has no link (HistoryFormat).
+	transcript string
 }
 
 // Output is what the hook hands back, in the harness's own format.
@@ -178,6 +199,21 @@ type Hook struct {
 	// why is why the last listen or take stopped, for a waiter's log
 	// (logExit).
 	why string
+	// WaitCommand, if set, is Wakeshift's wait command on this machine
+	// (connector.WaitCommand), which a redeem tells Wakeshift so its
+	// instructions can give it: harnesses woken by a command the agent
+	// starts in the background (Spec.Wait).
+	WaitCommand string
+	// RecordProcs: record the harness process each hook of a connected
+	// conversation runs under, for `wakeshift wait` (RecordProcess), where
+	// the harness doesn't tell commands their conversation.
+	RecordProcs bool
+	// Tools, if set, pre-approves an app's MCP tools the user agreed to
+	// when the hook connects a conversation to it (toolrules.go).
+	Tools *ToolRules
+	// Bin is this binary's path, for the commands notes give.
+	Bin string
+
 	// handed confirms what this call's output hands over: Run calls it
 	// once the output is written (at least once: what the harness wasn't
 	// handed comes again).
@@ -221,8 +257,26 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout, stderr io.Write
 			in.ServerConversation = h.serverConversation(in.Server, in.Conversation)
 		}
 	}
+	if cs, ok := h.Format.(CallServerFormat); ok && cs.CallServers() {
+		switch in.Event {
+		case CallDone:
+			if in.Server != "" && in.ToolCallID != "" {
+				h.recordCall(in)
+			}
+			return 0
+		case ToolResult:
+			in.Server, in.ServerURL = h.calledServer(in)
+		}
+	}
 	if in.Event == TurnStart || in.Event == Stop || in.Event == Rewake {
 		h.resolveDeferred(ctx, in)
+	}
+	if h.RecordProcs && in.Event != Resolve { // a resolver runs detached, under no harness
+		defer func() {
+			if h.Links.Load(in.Conversation) != "" {
+				RecordProcess(h.Harness, in.Conversation)
+			}
+		}()
 	}
 	var out Output
 	var ok bool
@@ -283,6 +337,9 @@ func (h *Hook) toolResult(ctx context.Context, in Input) (Output, bool) {
 	if n := h.connect(ctx, in, token, carried); n != "" {
 		notes = append(notes, n)
 	}
+	if n := h.waitNotRunning(in, token); n != "" {
+		notes = append(notes, n)
+	}
 	late, _ := h.Format.(LateContextFormat)
 	// A harness that shows this hook's context only later (Claude Code: at
 	// the next user prompt) isn't handed messages here: they'd count as
@@ -313,6 +370,22 @@ func (h *Hook) toolResult(ctx context.Context, in Input) (Output, bool) {
 		h.saveNote(in.Conversation, strings.Join(notes, "\n\n"))
 	}
 	return out, ok
+}
+
+// NoteWaitStopped: the conversation's wait command isn't running here, so
+// the result's "already running" (the core counts a wait as live for a
+// while after its last request) is about one that ended.
+const NoteWaitStopped = "Wakeshift: your wait command isn't running on this machine (it stops when the program you run in restarts, or when the command is stopped), whatever this result says about it. Start it again now in the background, the way this result says to start it: %s"
+
+// waitNotRunning is NoteWaitStopped for a Wakeshift result (it carried a
+// beacon) in a connected conversation of a harness woken by Wakeshift's
+// wait command, while no wait command holds the conversation's lock
+// (Links.WaitRunning); "" otherwise.
+func (h *Hook) waitNotRunning(in Input, token string) string {
+	if h.WaitCommand == "" || token == "" || h.Links.Load(in.Conversation) == "" || h.Links.WaitRunning(in.Conversation) {
+		return ""
+	}
+	return fmt.Sprintf(NoteWaitStopped, "`"+h.WaitCommand+"`")
 }
 
 // LateContextFormat is a Format whose tool-result hooks' context reaches
@@ -378,7 +451,13 @@ func (h *Hook) listen(ctx context.Context, in Input, wait time.Duration) (Output
 		// connects the conversation is still running): give the link a
 		// little while to appear.
 		h.why = "no link for the conversation"
-		if !h.Rewake && in.Event != Rewake || !h.waitForLink(ctx, in.Conversation) {
+		if !h.Rewake && in.Event != Rewake {
+			return Output{}, false
+		}
+		if out, ok := h.installedSince(ctx, in); ok {
+			return out, true
+		}
+		if !h.waitForLink(ctx, in.Conversation) {
 			return Output{}, false
 		}
 	}

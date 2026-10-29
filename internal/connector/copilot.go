@@ -41,6 +41,9 @@ func init() {
 	register(Spec{Name: copilotName, Format: copilotFormat{}, Installer: copilotInstaller{},
 		When:     "when the agent finishes a turn; while it's idle, they wait for the next one",
 		StopWait: 5 * time.Second,
+		// No rule: Copilot CLI has no global allowlist for commands
+		// (docs/harnesses.md, "Pre-approving Wakeshift's commands").
+		Wait: true, RecordProcs: true,
 	})
 }
 
@@ -229,3 +232,6 @@ func removeOwnFile(path, marker string, out io.Writer, what string) error {
 	fmt.Fprintf(out, "Removed Wakeshift's %s, %s.\n", what, path)
 	return nil
 }
+
+// TextOnly: its hooks get a result's text (textResultForLlm), never _meta.
+func (copilotFormat) TextOnly() bool { return true }

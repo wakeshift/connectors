@@ -30,7 +30,8 @@ import (
 // that exits with opencode, speaking JSON lines:
 //
 //	plugin → bridge, first line: {"hook_event_name": "PostToolUse" | "SessionIdle", "session_id", "call_id", "tool_name", "tool_response"}
-//	bridge → plugin, first line: {"additionalContext": "…", "keep_alive": bool, "retry"?: true}
+//	bridge → plugin, first line: {"additionalContext": "…", "keep_alive": bool, "retry"?: true, "note_id"?: "<id>"}
+//	plugin → bridge: {"ack": "<note_id>"}          once the note (messages waiting at connect) is in the tool result
 //	bridge → plugin: {"wake": {"id", "text"}}      a message for the session
 //	plugin → bridge: {"ack": "<id>"}               once opencode stored it (message.part.updated)
 //
@@ -43,6 +44,10 @@ import (
 // unreachable redeeming the beacon), or exited 1 after connecting (stopped
 // listening with its link still saved). Exit 0 (its link was removed or
 // ended) and keep_alive false without "retry" are final.
+//
+// At load (opencode started or restarted), the plugin starts a bridge for
+// each of the project's sessions that has a saved link, so a connected
+// session is woken again without waiting for a turn.
 
 const opencodeName = "opencode"
 
@@ -90,6 +95,9 @@ func (opencodeFormat) Continue(in Input, text string) (Output, bool) {
 type Bridge struct {
 	Hook       *Hook
 	AckTimeout time.Duration // how long to wait for the plugin's ack (default 10 minutes)
+	// NoteTimeout: how long to wait for the plugin's ack of the first
+	// answer's note (default 30 seconds; the plugin adds it at once).
+	NoteTimeout time.Duration
 }
 
 // Run reads the first line, answers it, and while the session has a link,
@@ -129,6 +137,17 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) err
 	if !keep && transient {
 		answer["retry"] = true // Wakeshift was unreachable: the plugin may try this beacon again
 	}
+	// The note can hand over messages that were waiting when it connected.
+	// The plugin acks them by note_id once it has added the note to the
+	// tool result, and only then are they acknowledged to Wakeshift: before
+	// October 28 they never were, so the link's next poll handed them out
+	// again and the plugin woke the session with them a second time
+	// (wakebench S8: "GOT … (duplicate)").
+	noteID := ""
+	if run.handed != nil && keep {
+		noteID = newID()
+		answer["note_id"] = noteID
+	}
 	if err := write(answer); err != nil || !keep {
 		return nil
 	}
@@ -155,6 +174,31 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) err
 	wait := b.AckTimeout
 	if wait <= 0 {
 		wait = 10 * time.Minute
+	}
+	if noteID != "" {
+		// Unacknowledged (a plugin from before note_id, or the note never
+		// reached the result), they come again with the first poll, as a wake.
+		noteWait := b.NoteTimeout
+		if noteWait <= 0 {
+			noteWait = 30 * time.Second
+		}
+		timer := time.NewTimer(noteWait)
+	waitNote:
+		for {
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil
+			case <-timer.C:
+				break waitNote
+			case got := <-acks:
+				if got == noteID {
+					run.handed()
+					break waitNote
+				}
+			}
+		}
+		timer.Stop()
 	}
 	for ctx.Err() == nil {
 		text, ack := b.Hook.take(ctx, in.Conversation, 0, false)
@@ -242,7 +286,8 @@ const opencodePlugin = `// Wakeshift's plugin for opencode: lets Wakeshift messa
 // ` + "`wakeshift uninstall --harness opencode`" + ` (or delete this file) and restart opencode.
 import { spawn } from "node:child_process"
 import { createInterface } from "node:readline"
-import { closeSync, mkdirSync, openSync } from "node:fs"
+import { createHash } from "node:crypto"
+import { closeSync, existsSync, mkdirSync, openSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
@@ -253,6 +298,14 @@ const FIRST_LINE_MS = 15000
 // started again after a backoff: 2s, doubling to 2 minutes, with jitter.
 const RETRY_MIN_MS = Number(process.env.WAKESHIFT_OPENCODE_RETRY_MIN_MS) || 2000
 const RETRY_MAX_MS = Number(process.env.WAKESHIFT_OPENCODE_RETRY_MAX_MS) || 120000
+// At load, this project's sessions Wakeshift connected before listen again,
+// after this long (opencode's server answers once its plugins have loaded),
+// the most recently updated first, at most REARM_MAX of them: each is a
+// process holding a long poll, and a project's older sessions are rarely
+// still wanted. One left out listens again at its next turn
+// (session.idle), as every session did before.
+const REARM_MS = Number(process.env.WAKESHIFT_OPENCODE_REARM_MS) || 1000
+const REARM_MAX = 20
 
 export default {
   id: "wakeshift",
@@ -333,7 +386,8 @@ export default {
       }
     }
 
-    // Starts the session's bridge; resolves with its note for the model. A
+    // Starts the session's bridge; resolves with its note for the model (and
+    // a function that acks the messages it carries, once it's added). A
     // bridge that can't start, or stops while its link is still saved (exit
     // code 1), is retried; one with nothing to listen to, or whose link was
     // removed or ended (exit code 0), isn't.
@@ -353,12 +407,13 @@ export default {
         starting.set(sid, child)
         let first = true
         let connected = false
-        const done = (text) => {
+        const done = (text, noteId) => {
           if (!first) return
           first = false
           if (starting.get(sid) === child) starting.delete(sid)
           clearTimeout(timer)
-          resolve(text)
+          const ack = noteId ? () => { try { child.stdin.write(JSON.stringify({ ack: noteId }) + "\n") } catch {} } : undefined
+          resolve(text ? { text, ack } : undefined)
         }
         const failed = () => { // no first line; one this plugin stopped isn't retried
           if (!first) return
@@ -391,7 +446,7 @@ export default {
             } else {
               try { child.stdin.end() } catch {}
             }
-            return done(typeof m.additionalContext === "string" && m.additionalContext ? m.additionalContext : undefined)
+            return done(typeof m.additionalContext === "string" && m.additionalContext ? m.additionalContext : undefined, typeof m.note_id === "string" ? m.note_id : undefined)
           }
           if (m.wake && typeof m.wake.id === "string" && typeof m.wake.text === "string") {
             const q = queue.get(sid) ?? []
@@ -402,6 +457,45 @@ export default {
           }
         })
       })
+
+    // opencode started (or restarted, opencode --continue): listen again for
+    // this project's sessions that were connected, without waiting for the
+    // user's next message. Only a session with a saved link gets a bridge:
+    // the link's file (named by a hash of the session ID, as the bridge
+    // names it) is only checked for, never read here.
+    const linksDir = join(process.env.WAKESHIFT_HOME || join(homedir(), ".wakeshift"), "opencode", "links")
+    const linked = (sid) => {
+      try {
+        return existsSync(join(linksDir, createHash("sha256").update(sid).digest("hex").slice(0, 32) + ".json"))
+      } catch {
+        return false
+      }
+    }
+    const rearm = async () => {
+      for (let i = 0; i < 5 && !disposed; i++) {
+        // Every session of the project: GET /session has no limit unless
+        // one is asked for (opencode 1.19.3).
+        const r = await client.session.list({ query: { directory } }).catch(() => undefined)
+        const list = Array.isArray(r?.data) ? r.data : undefined
+        if (list) {
+          // Linked first, then the limit: older connected sessions aren't
+          // crowded out by newer ones that never connected.
+          const roots = list
+            .filter((s) => s && typeof s.id === "string" && !s.parentID && linked(s.id))
+            .sort((a, b) => (b.time?.updated ?? 0) - (a.time?.updated ?? 0))
+            .slice(0, REARM_MAX)
+          for (const s of roots) {
+            if (disposed || gone.has(s.id) || tried.has(s.id) || children.has(s.id) || starting.has(s.id)) continue
+            tried.add(s.id)
+            void start(s.id, { hook_event_name: "SessionIdle", session_id: s.id })
+          }
+          return
+        }
+        await new Promise((res) => setTimeout(res, 1000 * (i + 1)))
+      }
+    }
+    const rearmTimer = setTimeout(() => void rearm().catch(() => {}), REARM_MS)
+    rearmTimer.unref?.()
 
     return {
       "tool.execute.after": async (input, output) => {
@@ -414,9 +508,12 @@ export default {
           settle(sid)
           const pending = starting.get(sid)
           if (pending) stop(pending)
-          const text = await start(sid, { hook_event_name: "PostToolUse", session_id: sid, call_id: input.callID,
+          const note = await start(sid, { hook_event_name: "PostToolUse", session_id: sid, call_id: input.callID,
             tool_name: input.tool, tool_response: output })
-          if (text) output.content.push({ type: "text", text })
+          if (note) {
+            output.content.push({ type: "text", text: note.text })
+            note.ack?.() // the messages in it reach the model with this result
+          }
         } catch {}
       },
       event: async ({ event }) => {
@@ -450,6 +547,7 @@ export default {
       },
       dispose: async () => {
         disposed = true
+        clearTimeout(rearmTimer)
         for (const r of retries.values()) if (r.timer) clearTimeout(r.timer)
         retries.clear()
         for (const c of starting.values()) stop(c)

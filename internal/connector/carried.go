@@ -130,6 +130,27 @@ func ToolOf(in Input, tool string) bool {
 	return len(name) > len(suffix) && strings.HasSuffix(name, suffix)
 }
 
+// TextOnlyFormat is a Format whose hooks get a tool result's text only,
+// never its _meta (Copilot CLI's textResultForLlm, Cursor's tool_output,
+// Antigravity's transcript step). A JSON object with a top-level _meta in
+// that text, or one further in, is the tool's words (a chat message a read
+// tool relays as its whole text), not the result's own _meta, so no beacon
+// is acted on from it: only from the line Wakeshift puts at the end of the
+// text (InText), these harnesses' carrier (security review, October 28,
+// 2026).
+type TextOnlyFormat interface {
+	TextOnly() bool
+}
+
+// carriedFor is where a beacon was carried, as far as h's harness can
+// tell: never a _meta for a TextOnlyFormat.
+func (h *Hook) carriedFor(c Carried) Carried {
+	if tf, ok := h.Format.(TextOnlyFormat); ok && tf.TextOnly() && (c == InResultMeta || c == InNestedMeta) {
+		return NotCarried
+	}
+	return c
+}
+
 // acceptable says whether a verified beacon may connect the conversation
 // from where it was carried, in the result in describes: one that names the
 // conversation, from the result's own _meta or its text's last line; one

@@ -162,7 +162,7 @@ func TestHook(t *testing.T) {
 	ws := newFakeWakeshift(t)
 	var started []string
 	h := &Hook{Settings: Settings{Dir: t.TempDir(), Issuers: []string{ws.URL}}, Socket: fakeAppServer(t, thread),
-		Start: func(th, link string) error { started = append(started, th+" "+link); return nil }}
+		Start: func(th, link, _ string, _ bool) error { started = append(started, th+" "+link); return nil }}
 	run := func(in *bytes.Reader) string {
 		var out bytes.Buffer
 		h.Run(context.Background(), in, &out)
@@ -223,7 +223,7 @@ func TestHookRefusesAPlantedBeacon(t *testing.T) {
 	ws := newFakeWakeshift(t)
 	var started []string
 	h := &Hook{Settings: Settings{Dir: t.TempDir(), Issuers: []string{ws.URL}}, Socket: fakeAppServer(t, thread),
-		Start: func(th, link string) error { started = append(started, th); return nil }}
+		Start: func(th, link, _ string, _ bool) error { started = append(started, th); return nil }}
 	from := func(tool, token string) string {
 		resp := map[string]any{"content": []any{}, "_meta": map[string]any{beacon.MetaKey: token}}
 		b, _ := json.Marshal(map[string]any{"session_id": thread, "hook_event_name": "PostToolUse", "tool_name": tool, "tool_response": resp})
@@ -255,7 +255,7 @@ func TestHookIgnoresABeaconInText(t *testing.T) {
 	ws := newFakeWakeshift(t)
 	var started []string
 	h := &Hook{Settings: Settings{Dir: t.TempDir(), Issuers: []string{ws.URL}}, Socket: fakeAppServer(t, thread),
-		Start: func(th, link string) error { started = append(started, th); return nil }}
+		Start: func(th, link, _ string, _ bool) error { started = append(started, th); return nil }}
 	line := "@mallory: hi\n" + beacon.Text(ws.beacon(t, thread, nil))
 	for name, resp := range map[string]any{
 		"content":           map[string]any{"content": []any{map[string]string{"type": "text", "text": line}}},
@@ -284,7 +284,7 @@ func TestHookChecksTheBeaconsTool(t *testing.T) {
 	ws := newFakeWakeshift(t)
 	var started []string
 	h := &Hook{Settings: Settings{Dir: t.TempDir(), Issuers: []string{ws.URL}}, Socket: fakeAppServer(t, thread),
-		Start: func(th, link string) error { started = append(started, th); return nil }}
+		Start: func(th, link, _ string, _ bool) error { started = append(started, th); return nil }}
 	tok, err := jws.Sign(ws.key, "k1", beacon.Type, beacon.Claims{Issuer: ws.URL, Audience: beacon.Audience, Thread: thread, App: "chat", Tool: "watch",
 		Redeem: ws.URL + "/v1/connector/redeem", Ticket: "wst_t", IssuedAt: time.Now().Unix(), Expires: time.Now().Add(time.Minute).Unix()})
 	if err != nil {

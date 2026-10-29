@@ -114,7 +114,7 @@ func TestInstallNote(t *testing.T) {
 	h, _ := Get("claude-code")
 	n := InstallNote(h, "https://app.wakeshift.ai/")
 	for _, want := range []string{"Ask them with your AskUserQuestion tool, with two options",
-		`"Yes, install Wakeshift's hooks for Claude Code" (description: runs ` + "`curl -fsSL https://app.wakeshift.ai/install/claude-code.sh | sh`, adds three hooks to ~/.claude/settings.json, keeping a backup)",
+		`"Yes, install Wakeshift's hooks for Claude Code" (description: runs ` + "`curl -fsSL https://app.wakeshift.ai/install/claude-code.sh | sh`, adds three hooks to ~/.claude/settings.json and pre-approves Wakeshift's own wait command there (~/.wakeshift/bin/wakeshift wait), so Claude Code runs it without asking, keeping a backup)",
 		`"No, don't install them" (description: messages still wake this conversation through the Monitor)`,
 		"only if they pick yes", "if running it is refused (auto mode or a permission denial)",
 		"by typing `! curl -fsSL https://app.wakeshift.ai/install/claude-code.sh | sh`",
@@ -206,6 +206,42 @@ func TestInstallNote(t *testing.T) {
 	}
 }
 
+// After the install, the user is told to send a message only where the agent
+// needs a turn to connect the conversation (everywhere but Claude Code,
+// whose agent calls the tool again in the same turn), and told what to do
+// after a later restart only where nothing installed reconnects it by
+// itself: Cursor, Copilot CLI and Antigravity (the background command needs
+// the agent), Codex (its SessionStart hook runs when the resumed thread's
+// first turn starts) and Hermes's chat (its plugin can't tell which chat it
+// is until a turn). Claude Code's SessionStart hook, and opencode's and
+// OpenClaw's plugins at load, reconnect it.
+func TestTrustNoteAsksOnlyWhereNeeded(t *testing.T) {
+	restart := map[string]bool{"codex": true, "cursor": true, "copilot": true, "antigravity": true, "hermes": true}
+	for _, h := range All() {
+		if !h.Installable {
+			continue
+		}
+		if (h.Resume == "") != (h.ID == "claude-code") {
+			t.Errorf("%s: Resume %q", h.ID, h.Resume)
+		}
+		if h.Resume != "" && !strings.Contains(h.Resume, "send any") {
+			t.Errorf("%s: Resume doesn't ask for a message: %q", h.ID, h.Resume)
+		}
+		if (h.Restart != "") != restart[h.ID] {
+			t.Errorf("%s: Restart %q", h.ID, h.Restart)
+		}
+		n := InstallNote(h, "https://x.test")
+		for _, want := range []string{h.Trust, h.Resume, h.Restart} {
+			if !strings.Contains(n, want) {
+				t.Errorf("%s: install note without %q: %s", h.ID, want, n)
+			}
+		}
+	}
+	if c, _ := Get("claude-code"); TrustNote(c) != c.Trust {
+		t.Errorf("claude-code: %q", TrustNote(c))
+	}
+}
+
 // Agents are told to look for the exact text the hooks' notes start with,
 // and nothing else is mistaken for it. Harnesses woken by a background
 // command aren't told it before they install anything: a Cursor agent took
@@ -280,7 +316,7 @@ func TestRepeatNote(t *testing.T) {
 		}
 		first, again := SubscribeNote(h, "https://x.test"), RepeatNote(h, "https://x.test")
 		if len(again) >= len(first) || strings.Contains(again, "Ask the user now") || !strings.Contains(again, "If you haven't asked the user yet") || !strings.Contains(again, "Don't ask again if they said no") ||
-			!strings.Contains(again, InstallCommand(h, "https://x.test")) {
+			!strings.Contains(again, agreed(h, InstallCommand(h, "https://x.test"))) {
 			t.Errorf("%s: %d vs %d: %s", h.ID, len(again), len(first), again)
 		}
 	}

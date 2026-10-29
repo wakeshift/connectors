@@ -41,12 +41,31 @@ func TestOpenClaw(t *testing.T) {
 		t.Fatal("codex")
 	}
 	n := SubscribeNote(h, "https://x.test")
-	for _, want := range []string{"Ask the user", "Only if they agree", "`curl -fsSL https://x.test/install/openclaw.sh | sh`", "exec tool", "openclaw plugins install", `"Wakeshift: connected"`} {
+	for _, want := range []string{"Ask the user", "Only if they agree", "`curl -fsSL https://x.test/install/openclaw.sh | WAKESHIFT_OPENCLAW_NETWORK_HOOKS=1 sh`", "exec tool", "openclaw plugins install", `"Wakeshift: connected"`} {
 		if !strings.Contains(n, want) {
 			t.Fatalf("missing %q: %s", want, n)
 		}
 	}
 	if !h.Plugin || h.Binding != Unbound || !h.StripsText || h.Wake != Plugin {
 		t.Fatalf("%+v", h)
+	}
+}
+
+// A harness whose installer records an agreement from the environment gets
+// it in the command its notes give: if InstallCommand's shape changed so
+// it couldn't be added, the agent would run a command that stops to ask
+// again.
+func TestAgreed(t *testing.T) {
+	for _, h := range All() {
+		if h.AgreeEnv == "" {
+			continue
+		}
+		want := "| " + h.AgreeEnv + " sh`"
+		if n, r := SubscribeNote(h, "https://x.test"), RepeatNote(h, "https://x.test"); !strings.Contains(n, want) || !strings.Contains(r, want) || h.AskAlso == "" {
+			t.Errorf("%s: %s\n%s", h.ID, n, r)
+		}
+	}
+	if got := agreed(Harness{AgreeEnv: "X=1"}, "something else"); got != "something else" {
+		t.Fatalf("%q", got)
 	}
 }

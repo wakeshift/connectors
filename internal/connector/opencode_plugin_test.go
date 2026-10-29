@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -29,14 +30,24 @@ fs.writeFileSync(dir + "/n", String(n + 1))
 const step = (fs.readFileSync(dir + "/plan", "utf8").split("\n")[n] || "ok").trim()
 fs.appendFileSync(dir + "/log", "start " + process.pid + "\n")
 process.on("exit", () => fs.appendFileSync(dir + "/log", "exit " + process.pid + "\n"))
-process.stdin.once("data", () => {
+process.stdin.once("data", (d) => {
+  try { fs.appendFileSync(dir + "/sessions", JSON.parse(String(d).split("\n")[0]).session_id + "\n") } catch {}
   if (step === "fail") process.exit(1)
   if (step === "nolink") { process.stdout.write(JSON.stringify({ additionalContext: "", keep_alive: false }) + "\n"); process.exit(0) }
   if (step === "later") { process.stdout.write(JSON.stringify({ additionalContext: "", keep_alive: false, retry: true }) + "\n"); process.exit(0) }
   const answer = () => {
     fs.appendFileSync(dir + "/log", "answer " + process.pid + "\n")
-    process.stdout.write(JSON.stringify({ additionalContext: "Wakeshift: connected", keep_alive: true }) + "\n")
+    process.stdout.write(JSON.stringify({ additionalContext: "Wakeshift: connected", keep_alive: true, note_id: "note-" + process.pid }) + "\n")
   }
+  // The plugin's ack of the note, once it's in the tool result.
+  let rest = ""
+  process.stdin.on("data", (c) => {
+    rest += c
+    for (const l of rest.split("\n").slice(0, -1)) {
+      try { if (JSON.parse(l).ack === "note-" + process.pid) fs.appendFileSync(dir + "/noteacks", process.pid + "\n") } catch {}
+    }
+    rest = rest.split("\n").pop()
+  })
   if (step === "slow") setTimeout(answer, 1500)
   else answer()
   if (step === "drop") setTimeout(() => process.exit(1), 100)
@@ -50,9 +61,12 @@ process.stdin.once("data", () => {
 // with a fake opencode client, then prints what happened.
 const pluginDriver = `
 import plugin from "./wakeshift.mjs"
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 const dir = process.env.FAKE_BRIDGE_DIR
-const client = { session: { get: async () => ({ data: {} }), promptAsync: async () => ({ response: { status: 204 } }) } }
+// session.list: this project's sessions (a subagent's has a parentID).
+const sessions = [{ id: "ses_old", time: { updated: 1 } }, { id: "ses_1", time: { updated: 3 } }, { id: "ses_2", time: { updated: 2 } }, { id: "ses_sub", parentID: "ses_1" }]
+const client = { session: { get: async () => ({ data: {} }), promptAsync: async () => ({ response: { status: 204 } }),
+  ...(process.argv[2] === "load" ? { list: async () => ({ data: sessions }) } : {}) } }
 const hooks = await plugin.server({ client, directory: "/tmp" })
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 // Waits (up to 10s) until a bridge has started: a fixed sleep raced it on a
@@ -78,6 +92,8 @@ if (scenario === "race") {
   await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_1" } } })
   await started()
   await hooks.dispose()
+} else if (scenario === "load") {
+  // opencode (re)started: nothing else happens; linked sessions listen again.
 } else if (scenario === "beacon") {
   const output = { _meta: { "wakeshift/connector": "a.b.c" }, content: [] }
   await hooks["tool.execute.after"]({ sessionID: "ses_1", callID: "c1", tool: "join" }, output)
@@ -101,7 +117,8 @@ for (const l of log) {
   maxLive = Math.max(maxLive, live)
 }
 const count = (w) => log.filter((l) => l.startsWith(w)).length
-console.log(JSON.stringify({ starts: count("start"), answers: count("answer"), maxLive, note }))
+const bridged = existsSync(dir + "/sessions") ? readFileSync(dir + "/sessions", "utf8").trim().split("\n").filter(Boolean) : []
+console.log(JSON.stringify({ starts: count("start"), answers: count("answer"), maxLive, note, sessions: bridged.join(","), noteAcks: existsSync(dir + "/noteacks") ? readFileSync(dir + "/noteacks", "utf8").trim().split("\n").filter(Boolean).length : 0 }))
 `
 
 // The bridge asks the plugin to retry a beacon only when Wakeshift couldn't
@@ -141,6 +158,55 @@ func TestOpencodeBridgeRetryFlag(t *testing.T) {
 				t.Fatal("the bridge changed the shared hook")
 			}
 		})
+	}
+}
+
+// When opencode starts (a restart, opencode --continue), the sessions of
+// its project that have a saved link listen again at once, the newest
+// first, without waiting for a message; a subagent's session, or one with
+// no link, gets no bridge.
+func TestOpencodePluginRearmsAtLoad(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "wakeshift")
+	os.WriteFile(bin, []byte(fakeBridge), 0o755)
+	os.WriteFile(filepath.Join(dir, "plan"), []byte("ok\nok"), 0o600)
+	os.WriteFile(filepath.Join(dir, "n"), nil, 0o600)
+	os.WriteFile(filepath.Join(dir, "log"), nil, 0o600)
+	home := filepath.Join(dir, "home")
+	links := LinksFor(Settings{Dir: filepath.Join(home, "opencode")})
+	for _, s := range []string{"ses_1", "ses_old", "ses_sub"} {
+		if err := links.Save(s, "https://wakeshift.example/v1/stream?link=tok-"+s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src := strings.Replace(opencodePlugin, "__WAKESHIFT_BIN__", jsString(bin), 1)
+	os.WriteFile(filepath.Join(dir, "wakeshift.mjs"), []byte(src), 0o600)
+	os.WriteFile(filepath.Join(dir, "driver.mjs"), []byte(pluginDriver), 0o600)
+	cmd := exec.Command(node, "driver.mjs", "load", "800")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "FAKE_BRIDGE_DIR="+dir, "WAKESHIFT_HOME="+home, "WAKESHIFT_OPENCODE_REARM_MS=50")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	var got struct {
+		Starts, Answers int
+		Sessions        string
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &got); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	// The bridges start in that order, but each records itself as it reads
+	// its first line, so compare them as a set.
+	bridged := strings.Split(got.Sessions, ",")
+	slices.Sort(bridged)
+	if strings.Join(bridged, ",") != "ses_1,ses_old" || got.Answers != 2 {
+		t.Errorf("bridges for %q (%d connected), want ses_1,ses_old (2)", got.Sessions, got.Answers)
 	}
 }
 
@@ -195,6 +261,7 @@ func TestOpencodePluginRetries(t *testing.T) {
 			var got struct {
 				Starts, Answers, MaxLive int
 				Note                     string
+				NoteAcks                 int
 			}
 			lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 			if err := json.Unmarshal([]byte(lines[len(lines)-1]), &got); err != nil {
@@ -216,6 +283,11 @@ func TestOpencodePluginRetries(t *testing.T) {
 			}
 			if got.Note != tc.wantNote {
 				t.Errorf("note %q, want %q", got.Note, tc.wantNote)
+			}
+			// A note added to the result is acked to its bridge, once; with no
+			// tool result to add it to, nothing is.
+			if want := map[bool]int{true: 1, false: 0}[tc.wantNote != ""]; got.NoteAcks != want {
+				t.Errorf("note acked %d times, want %d", got.NoteAcks, want)
 			}
 		})
 	}

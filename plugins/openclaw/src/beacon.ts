@@ -258,6 +258,14 @@ export function findBeacon(result: unknown): { token: string; carried: Carried }
       /* text */
     }
   }
+  // A result that came as text is the tool's words: a _meta in it (a chat
+  // message a read tool relays as its whole text), at the top or further
+  // in, isn't the result's, so only the line ending the text counts
+  // (connector.TextOnlyFormat; security review, October 28, 2026).
+  if (typeof result === "string") {
+    const t = trailer(resultText(result));
+    return t ? { token: t, carried: "text" } : { token: "", carried: "" };
+  }
   const own = ownMeta(v) || (v && typeof v === "object" ? ownMeta((v as Record<string, unknown>).details) : "");
   if (own) return { token: own, carried: "meta" };
   // The text's last line before a _meta further in: a document a tool

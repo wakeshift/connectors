@@ -33,7 +33,7 @@ func TestStreamStopsWhenOutdated(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
 	c := &conn{cfg: Config{Stream: "ws" + strings.TrimPrefix(srv.URL, "http"), Log: slog.New(slog.DiscardHandler)}, cancel: cancel,
-		seen: map[string]bool{}, unconfirmed: map[string]bool{}}
+		seen: map[string]uint64{}, unconfirmed: map[string]bool{}}
 	done := make(chan struct{})
 	go func() { c.stream(ctx); close(done) }()
 	select {
@@ -63,7 +63,7 @@ func TestStreamClosedAsOutdated(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
 	c := &conn{cfg: Config{Stream: "ws" + strings.TrimPrefix(srv.URL, "http"), Log: slog.New(slog.DiscardHandler)}, cancel: cancel,
-		seen: map[string]bool{}, unconfirmed: map[string]bool{}}
+		seen: map[string]uint64{}, unconfirmed: map[string]bool{}}
 	done := make(chan struct{})
 	go func() { c.stream(ctx); close(done) }()
 	select {

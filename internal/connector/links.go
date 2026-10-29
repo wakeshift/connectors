@@ -5,8 +5,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/wakeshift/connectors/internal/framing"
@@ -75,6 +79,65 @@ func (l Links) load(conversation string) savedLink {
 		return savedLink{}
 	}
 	return s
+}
+
+// waitLocks is where each running `wakeshift wait` holds a file of its own
+// locked for its conversation (<harness dir>/waits/<hash>.<pid>.lock): the
+// lock ends with the process, however it ends, so the hooks can tell
+// whether one runs.
+func (l Links) waitLocks(conversation string) (dir, prefix string) {
+	return filepath.Join(filepath.Dir(l.Dir), "waits"), filepath.Base(l.path(conversation)) + "."
+}
+
+// HoldWait marks a wait command running for the conversation until the
+// returned func (or the process's end) releases it.
+func (l Links) HoldWait(conversation string) func() {
+	dir, prefix := l.waitLocks(conversation)
+	// Mkdir, not MkdirAll: uninstalled meanwhile, the harness's directory
+	// is gone, and this doesn't make it again.
+	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return func() {}
+	}
+	p := filepath.Join(dir, prefix+strconv.Itoa(os.Getpid())+".lock")
+	f, err := os.OpenFile(p, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return func() {}
+	}
+	if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		f.Close()
+		return func() {}
+	}
+	return func() {
+		os.Remove(p)
+		f.Close()
+	}
+}
+
+// WaitRunning says whether a wait command holds a lock for the
+// conversation now: a process that ended (killed, or its harness
+// restarted) doesn't. Files left by ended ones are removed.
+func (l Links) WaitRunning(conversation string) bool {
+	dir, prefix := l.waitLocks(conversation)
+	entries, _ := os.ReadDir(dir)
+	running := false
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), prefix) || !strings.HasSuffix(e.Name(), ".lock") {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		f, err := os.Open(p)
+		if err != nil {
+			continue
+		}
+		if syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB) != nil {
+			running = true
+		} else {
+			syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			os.Remove(p)
+		}
+		f.Close()
+	}
+	return running
 }
 
 // Forget removes a conversation's link.

@@ -20,12 +20,19 @@ import (
 // model (additionalContext, which Codex adds as a developer message right
 // after the result). Without a beacon it does nothing. It never fails the
 // tool call.
+//
+// It keeps the link (connector.Links), so it can start the connector again
+// without a tool call: Codex runs it at SessionStart (the thread opened or
+// resumed in a window) and UserPromptSubmit (the user's next prompt), and if
+// the thread has a link and no connector holds it (Running), it starts one.
+// Codex has no hook that fires while a thread sits idle, so a connector
+// that stops then stays stopped until one of those, or a tool call, comes.
 
 // Notes for the model. The watch result tells it what no note means, and
 // that one starting "Wakeshift: connected" (harnesses.Connected) means it's
 // connected; the others don't start that way.
 const (
-	NoteConnected = "Wakeshift: connected. New messages will wake this thread as soon as they arrive, while it's open in Codex."
+	NoteConnected = "Wakeshift: connected. New messages will wake this thread as soon as they arrive, or once its turn ends if it's busy, while it's open in Codex: so end your turn when you're done rather than waiting for them."
 	NoteInProcess = "Wakeshift: not connected. This Codex session runs without Codex's background server (it was started with --no-daemon or -c options), " +
 		"so new messages can't wake it; you'll see them when you next use the app's tools. To be woken, the user can start codex without those options."
 	NoteFailed = "Wakeshift: couldn't connect this thread (%s), so new messages won't wake it yet. To retry, call the app's tool that started watching again."
@@ -50,13 +57,25 @@ type Hook struct {
 	HTTP     *http.Client
 	Socket   string
 	// Start starts the connector for a thread with its stream link,
-	// detached from the hook.
-	Start func(thread, link string) error
-	Now   func() time.Time
+	// detached from the hook (why: for its log).
+	// rearm: started again without a beacon (Config.Exclusive).
+	Start func(thread, link, why string, rearm bool) error
+	// Running reports whether a thread's connector is running (default:
+	// its RunLock is held).
+	Running func(thread string) bool
+	Now     func() time.Time
 	// Pins: which app's beacons each MCP server carries (default: in the
 	// settings directory).
 	Pins connector.Pins
+	// Links: each thread's stream link (default: in the settings directory).
+	Links connector.Links
 }
+
+// Codex's hook events the hook re-arms on (no tool call, no beacon).
+const (
+	EventSessionStart     = "SessionStart"
+	EventUserPromptSubmit = "UserPromptSubmit"
+)
 
 // Settings is the connector's settings on this machine (~/.wakeshift/codex).
 type Settings = connector.Settings
@@ -65,6 +84,10 @@ type Settings = connector.Settings
 func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 	var in HookInput
 	if json.NewDecoder(io.LimitReader(stdin, 8<<20)).Decode(&in) != nil || in.SessionID == "" {
+		return
+	}
+	if in.HookEventName == EventSessionStart || in.HookEventName == EventUserPromptSubmit {
+		h.rearm(in.SessionID, in.HookEventName)
 		return
 	}
 	// Only from the result's own _meta (tool_response._meta): Wakeshift
@@ -121,11 +144,43 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 		note(fmt.Sprintf(NoteFailed, err))
 		return
 	}
-	if err := h.Start(in.SessionID, link); err != nil {
+	// Kept for re-arming (below); a link the hook can't keep only means
+	// the next start needs a tool call, as before.
+	h.links().SaveFor(in.SessionID, link, claims.App)
+	if err := h.Start(in.SessionID, link, "a beacon in "+in.ToolName+"'s result", false); err != nil {
 		note(fmt.Sprintf(NoteFailed, "the connector didn't start"))
 		return
 	}
 	note(NoteConnected)
+}
+
+// rearm starts the thread's connector again with its kept link, if it has
+// one and no connector is running for it. It says nothing to the model: a
+// connector the link no longer works for (unwatched, revoked, out of date)
+// stops at once and forgets the link.
+func (h *Hook) rearm(thread, event string) {
+	if !uuidRE.MatchString(thread) {
+		return
+	}
+	link := h.links().Load(thread)
+	if link == "" {
+		return
+	}
+	running := h.Running
+	if running == nil {
+		running = func(thread string) bool { return Running(RunLock(thread)) }
+	}
+	if running(thread) {
+		return
+	}
+	h.Start(thread, link, "re-armed at "+event, true)
+}
+
+func (h *Hook) links() connector.Links {
+	if h.Links.Dir != "" {
+		return h.Links
+	}
+	return connector.LinksFor(h.Settings)
 }
 
 // onDaemon: the thread is on Codex's shared daemon (the connector can reach

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wakeshift/connectors/internal/connector"
 )
@@ -57,7 +58,7 @@ func TestCodexReinstall(t *testing.T) {
 	}
 	b, _ := os.ReadFile(hooks)
 	s := string(b)
-	if strings.Contains(s, "wakeshift-codex hook") || strings.Count(s, "hook --harness codex") != 1 || !strings.Contains(s, "notify.sh") ||
+	if strings.Contains(s, "wakeshift-codex hook") || strings.Count(s, "hook --harness codex") != 3 || !strings.Contains(s, "notify.sh") ||
 		strings.Index(s, `"PostToolUse"`) > strings.Index(s, `"Stop"`) {
 		t.Fatalf("hooks.json: %s", s)
 	}
@@ -90,6 +91,10 @@ func TestInstallEach(t *testing.T) {
 		if code != 0 || !strings.Contains(out, "Next: ") {
 			t.Fatalf("%s: %d %s", harness, code, out)
 		}
+		// Last, where an agent that ran it reads it: call the tool again.
+		if !strings.HasSuffix(out, AfterInstall+"\n") {
+			t.Fatalf("%s: the install doesn't end with the call-again line: %s", harness, out)
+		}
 		if _, err := os.Stat(filepath.Join(home, file)); err != nil {
 			t.Fatalf("%s: %v", harness, err)
 		}
@@ -120,6 +125,45 @@ func TestInstallEach(t *testing.T) {
 	// An unknown harness's hook still never fails the harness.
 	if _, code := run("wakeshift", "hook", "--harness", "notepad"); code != 0 {
 		t.Fatal("hook for an unknown harness failed")
+	}
+}
+
+// After uninstall, the hooks a running session read at startup (Claude Code
+// keeps them) do nothing, and so don't make the harness's directory again.
+func TestHookAfterUninstall(t *testing.T) {
+	home := homes(t)
+	t.Setenv("CLAUDE_PID", "4242")
+	for harness, inputs := range map[string][]string{
+		"claude-code": {`{"session_id":"s","hook_event_name":"Stop"}`,
+			`{"session_id":"s","hook_event_name":"PostToolUse","tool_name":"mcp__agentchat__join","tool_response":"{}"}`},
+		"codex": {`{"session_id":"01a18699-4ee4-77e0-abdb-9ace6e215367","hook_event_name":"UserPromptSubmit"}`},
+	} {
+		if out, code := run("wakeshift", "install", "--harness", harness, "--issuer", "https://app.wakeshift.ai", "--yes"); code != 0 {
+			t.Fatalf("%s: %d %s", harness, code, out)
+		}
+		if out, code := run("wakeshift", "uninstall", "--harness", harness); code != 0 {
+			t.Fatalf("%s: %d %s", harness, code, out)
+		}
+		dir := filepath.Join(home, ".wakeshift", harness)
+		if _, err := os.Lstat(dir); err == nil {
+			t.Fatalf("%s: uninstall left %s", harness, dir)
+		}
+		for _, in := range inputs {
+			args := []string{"wakeshift", "hook", "--harness", harness}
+			if strings.Contains(in, "Stop") {
+				args = append(args, "--rewake")
+			}
+			var out bytes.Buffer
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			code := Run(ctx, args, strings.NewReader(in), &out, &out)
+			cancel()
+			if code != 0 || out.Len() != 0 {
+				t.Fatalf("%s: %d %q", harness, code, out.String())
+			}
+			if _, err := os.Lstat(dir); err == nil {
+				t.Fatalf("%s: a hook after uninstall made %s again", harness, dir)
+			}
+		}
 	}
 }
 
@@ -164,5 +208,50 @@ func TestInstallAsksBeforeTrustingAnIssuer(t *testing.T) {
 	}
 	if out, code := run("wakeshift", "install", "--harness", "claude-code", "--issuer", "https://other.example", "--yes"); code != 0 {
 		t.Fatalf("--yes: %d %s", code, out)
+	}
+}
+
+// `wakeshift wait` takes no arguments (a prefix rule's extra words change
+// nothing), won't write into a file a redirect named, and without a
+// connected conversation says so in a hub.closed line.
+func TestWaitCommandLine(t *testing.T) {
+	homes(t)
+	for _, k := range []string{"CURSOR_CONVERSATION_ID", "ANTIGRAVITY_CONVERSATION_ID", "CLAUDE_CODE_SESSION_ID"} {
+		t.Setenv(k, "")
+	}
+	for _, extra := range [][]string{{"--harness", "cursor"}, {"x"}, {"https://evil.example/v1/stream/wait?link=x"}, {"-h"}} {
+		out, code := run(append([]string{"wakeshift", "wait"}, extra...)...)
+		if code != 2 || !strings.Contains(out, connector.ErrWaitArgs.Error()) {
+			t.Fatalf("%q: %d %q", extra, code, out)
+		}
+	}
+	out, code := run("wakeshift", "wait")
+	if code != 1 || !strings.HasPrefix(out, `{"type":"hub.closed","reason":"not_connected"`) {
+		t.Fatalf("%d %q", code, out)
+	}
+
+	// Redirected into a file outside the temporary directories: refused,
+	// nothing written to it.
+	dir, err := os.MkdirTemp(".", "waitout-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	f, _ := os.Create(filepath.Join(dir, "zshrc"))
+	defer f.Close()
+	var errs bytes.Buffer
+	if code := Run(context.Background(), []string{"wakeshift", "wait"}, strings.NewReader(""), f, &errs); code != 2 ||
+		!strings.Contains(errs.String(), connector.ErrWaitRedirected.Error()) {
+		t.Fatalf("%d %q", code, errs.String())
+	}
+	if st, _ := f.Stat(); st.Size() != 0 {
+		t.Fatal("wrote into the file")
+	}
+	// stderr redirected too: refused without a word.
+	if code := Run(context.Background(), []string{"wakeshift", "wait"}, strings.NewReader(""), &errs, f); code != 2 {
+		t.Fatalf("%d", code)
+	}
+	if st, _ := f.Stat(); st.Size() != 0 {
+		t.Fatal("wrote into the file")
 	}
 }

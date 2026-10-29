@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
@@ -53,6 +54,10 @@ func Home() string {
 type Settings struct {
 	Dir     string   `json:"-"`
 	Issuers []string `json:"issuers"` // the Wakeshifts trusted to sign beacons
+	// InstalledAt is when the hooks were last installed: a waiter whose
+	// conversation's last beacon is older tells its agent to call the tool
+	// again (Hook.installedSince). Zero for installs from before it.
+	InstalledAt time.Time `json:"installed_at,omitzero"`
 }
 
 // LoadSettings reads a harness's settings (none yet: no issuers, so its hook
@@ -63,6 +68,19 @@ func LoadSettings(harness string) Settings {
 		json.Unmarshal(b, &s)
 	}
 	return s
+}
+
+// Installed: the harness's directory is here (an install makes it;
+// uninstall removes it). A harness keeps running the hooks it read at
+// startup after an uninstall (Claude Code does), and those do nothing then,
+// so they don't make the directory again. Anything but its absence (an
+// unreadable config, no issuers) counts as installed: the hook decides.
+func (s Settings) Installed() bool {
+	if s.Dir == "" {
+		return false
+	}
+	_, err := os.Stat(s.Dir)
+	return !errors.Is(err, fs.ErrNotExist)
 }
 
 // Save writes the settings.
@@ -241,17 +259,38 @@ func Redeem(ctx context.Context, hc *http.Client, harness string, c beacon.Claim
 // "thread", "call"}), for beacons bound to a call or to nothing, so
 // Wakeshift can bind the session to the conversation.
 func RedeemCall(ctx context.Context, hc *http.Client, harness string, c beacon.Claims, conversation, call string) (string, error) {
-	return RedeemHeld(ctx, hc, harness, c, conversation, call, "")
+	return RedeemHeld(ctx, hc, harness, c, conversation, call, "", "")
 }
 
 // RedeemHeld is RedeemCall saying which link the hook holds for the
 // conversation now, if any (held, sent only to its own Wakeshift): while
 // it's live, Wakeshift refuses a ticket for another workspace's session
 // (ErrTaken), so a beacon someone else minted can't move the conversation.
-func RedeemHeld(ctx context.Context, hc *http.Client, harness string, c beacon.Claims, conversation, call, held string) (string, error) {
+// wait, if set, is Wakeshift's wait command on this machine (WaitCommand),
+// which Wakeshift's instructions then give the agent instead of a loop on
+// the session's wait URL.
+func RedeemHeld(ctx context.Context, hc *http.Client, harness string, c beacon.Claims, conversation, call, held, wait string) (string, error) {
+	link, _, err := redeemHeld(ctx, hc, harness, c, conversation, call, held, wait)
+	return link, err
+}
+
+// RedeemedApp is what a redeem says about the beacon's app: its name, and
+// the tools its manifest says can be pre-approved (toolrules.go). Empty
+// from a Wakeshift from before it.
+type RedeemedApp struct {
+	ID              string   `json:"id"`
+	Name            string   `json:"name"`
+	PreapproveTools []string `json:"preapprove_tools"`
+}
+
+// redeemHeld is RedeemHeld with what the redeem said about the app.
+func redeemHeld(ctx context.Context, hc *http.Client, harness string, c beacon.Claims, conversation, call, held, wait string) (string, RedeemedApp, error) {
 	in := map[string]string{"ticket": c.Ticket, "thread": conversation}
 	if call != "" {
 		in["call"] = call
+	}
+	if wait != "" {
+		in["wait"] = wait
 	}
 	if held != "" && linkOnOrigin(held, c.Redeem) {
 		in["held"] = held
@@ -264,33 +303,39 @@ func RedeemHeld(ctx context.Context, hc *http.Client, harness string, c beacon.C
 	req.Header.Set(connectorversion.Header, ClientHeader(harness))
 	resp, err := client(hc).Do(req)
 	if err != nil {
-		return "", ErrUnreachable
+		return "", RedeemedApp{}, ErrUnreachable
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
-		return "", fmt.Errorf("%w (it answered %d)", ErrUnreachable, resp.StatusCode)
+		return "", RedeemedApp{}, fmt.Errorf("%w (it answered %d)", ErrUnreachable, resp.StatusCode)
 	}
 	if resp.StatusCode == http.StatusUpgradeRequired {
-		return "", updateRequired(resp)
+		return "", RedeemedApp{}, updateRequired(resp)
 	}
 	var out struct {
 		URL   string                `json:"url"`
+		App   *RedeemedApp          `json:"app"`
 		Error struct{ Code string } `json:"error"`
 	}
 	json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out)
 	switch {
 	case resp.StatusCode == http.StatusOK && out.URL != "":
-		return out.URL, nil
+		var app RedeemedApp
+		// Only about the beacon's own app.
+		if out.App != nil && out.App.ID == c.App {
+			app = *out.App
+		}
+		return out.URL, app, nil
 	case out.Error.Code == "unknown_ticket":
-		return "", errors.New("the ticket expired or was used")
+		return "", RedeemedApp{}, errors.New("the ticket expired or was used")
 	case out.Error.Code == "no_grant":
-		return "", errors.New("the app isn't allowed for this agent any more")
+		return "", RedeemedApp{}, errors.New("the app isn't allowed for this agent any more")
 	case out.Error.Code == "wrong_thread":
-		return "", errors.New("the ticket was for another conversation")
+		return "", RedeemedApp{}, errors.New("the ticket was for another conversation")
 	case out.Error.Code == "conversation_taken":
-		return "", ErrTaken
+		return "", RedeemedApp{}, ErrTaken
 	default:
-		return "", fmt.Errorf("Wakeshift answered %d", resp.StatusCode)
+		return "", RedeemedApp{}, fmt.Errorf("Wakeshift answered %d", resp.StatusCode)
 	}
 }
 

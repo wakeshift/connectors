@@ -44,6 +44,9 @@ type rpcError struct {
 
 func (e *rpcError) Error() string { return fmt.Sprintf("app-server: %s (%d)", e.Message, e.Code) }
 
+// errDisconnected: the app-server dropped the connection before answering.
+var errDisconnected = errors.New("app-server disconnected")
+
 func dialAppServer(ctx context.Context, socket string) (*appServer, error) {
 	hc := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
@@ -120,7 +123,12 @@ func (a *appServer) call(ctx context.Context, method string, params any) (json.R
 	a.mu.Unlock()
 	defer func() { a.mu.Lock(); delete(a.wait, id); a.mu.Unlock() }()
 	if err := a.send(ctx, map[string]any{"id": id, "method": method, "params": params}); err != nil {
-		return nil, err
+		select {
+		case <-a.done:
+			return nil, errDisconnected
+		default:
+			return nil, err
+		}
 	}
 	select {
 	case r := <-ch:
@@ -129,7 +137,7 @@ func (a *appServer) call(ctx context.Context, method string, params any) (json.R
 		}
 		return r.Result, nil
 	case <-a.done:
-		return nil, errors.New("app-server disconnected")
+		return nil, errDisconnected
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}

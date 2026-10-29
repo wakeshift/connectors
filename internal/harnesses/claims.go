@@ -24,7 +24,7 @@ const (
 )
 
 // SessionDescription is what the agent is told the session argument is.
-const SessionDescription = "The session key an earlier result gave you, if it did. It's a secret: keep it to this conversation; don't share or log it"
+const SessionDescription = "This conversation's session_key, from an earlier result (a secret token, or a handle such as claude-code#2). Keep it to this conversation; don't share or log it."
 
 // ArgDescription is what the agent is told the harness argument is: the
 // harnesses it may name (Claim, in the order of All), and that any other

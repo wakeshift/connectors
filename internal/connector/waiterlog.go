@@ -3,7 +3,9 @@ package connector
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -38,7 +40,9 @@ func (h *Hook) logExit(conversation string, started time.Time) {
 	line := fmt.Sprintf("%s pid=%d conversation=%s listened=%s exit=%q\n", time.Now().UTC().Format(time.RFC3339),
 		os.Getpid(), hex.EncodeToString(sum[:4]), time.Since(started).Round(100*time.Millisecond), why)
 	path := WaiterLog(h.Verifier.Settings.Dir)
-	if os.MkdirAll(filepath.Dir(path), 0o700) != nil {
+	// Mkdir, not MkdirAll: uninstalled while it waited, the harness's
+	// directory is gone, and this doesn't make it again.
+	if err := os.Mkdir(filepath.Dir(path), 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
 		return
 	}
 	if st, err := os.Stat(path); err == nil && st.Size() > waiterLogMax {

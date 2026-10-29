@@ -29,6 +29,7 @@ func (h *Hook) connect(ctx context.Context, in Input, token string, carried Carr
 	if token == "" {
 		return ""
 	}
+	carried = h.carriedFor(carried)
 	conv := in.Conversation
 	if h.aliased() {
 		// Only a result from a server the hook told, bound to that
@@ -63,7 +64,8 @@ func (h *Hook) connect(ctx context.Context, in Input, token string, carried Carr
 	}
 	// The link the conversation has now goes along: Wakeshift won't move a
 	// connected conversation to another workspace's session.
-	link, err := RedeemHeld(ctx, h.HTTP, h.Harness, claims, conv, call, h.Links.Load(in.Conversation))
+	held := h.Links.Load(in.Conversation)
+	link, app, err := redeemHeld(ctx, h.HTTP, h.Harness, claims, conv, call, held, h.WaitCommand)
 	var outdated *UpdateRequired
 	if errors.As(err, &outdated) {
 		return fmt.Sprintf(NoteOutdated, outdated.Message)
@@ -80,7 +82,13 @@ func (h *Hook) connect(ctx context.Context, in Input, token string, carried Carr
 	if err := h.Links.SaveFor(in.Conversation, link, claims.App); err != nil {
 		return fmt.Sprintf(NoteFailed, "its link couldn't be saved")
 	}
-	return fmt.Sprintf(NoteConnected, h.When)
+	note := fmt.Sprintf(NoteConnected, h.When)
+	// The tools are offered when the conversation is first connected, not
+	// on every reconnect.
+	if t := h.toolsOnConnect(in, app, held == ""); t != "" {
+		note += "\n\n" + t
+	}
+	return note
 }
 
 // DeferredFormat is a Format whose tool results can only be read after the

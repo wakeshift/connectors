@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const testBin = "/Users/ada/.wakeshift/bin/wakeshift"
@@ -73,6 +74,69 @@ func TestUninstallRemovesWhatInstallCreated(t *testing.T) {
 				t.Fatal("the record outlived the uninstall")
 			}
 		})
+	}
+}
+
+// Uninstall leaves nothing of the harness in Wakeshift's home (S6 found
+// .wakeshift/claude-code left, in auto and manual mode): its logs and the
+// files hooks write there go too, other harnesses' directories and the
+// binary stay, and a waiter that exits afterwards, or a hook the session
+// still runs, doesn't make it again.
+func TestUninstallRemovesTheHarnessDirectory(t *testing.T) {
+	for _, name := range []string{"claude-code", "codex", "cursor"} {
+		t.Run(name, func(t *testing.T) {
+			setHome(t)
+			spec, _ := Lookup(name)
+			other, _ := Lookup("opencode")
+			mustInstall(t, spec)
+			mustInstall(t, other)
+			dir := filepath.Join(Home(), name)
+			for _, f := range []string{"logs/waiters.log", "logs/x.log", "calls/a", "conversation-names.key", "links/c", "waiters/1", "something-newer"} {
+				os.MkdirAll(filepath.Dir(filepath.Join(dir, f)), 0o700)
+				os.WriteFile(filepath.Join(dir, f), []byte("wakeshift"), 0o600)
+			}
+			os.MkdirAll(filepath.Join(Home(), "bin"), 0o700)
+			os.WriteFile(filepath.Join(Home(), "bin", "wakeshift"), []byte("#!"), 0o700)
+			if !LoadSettings(name).Installed() {
+				t.Fatal("not installed")
+			}
+			mustUninstall(t, spec)
+			if _, err := os.Lstat(dir); err == nil {
+				var left []string
+				filepath.Walk(dir, func(p string, _ os.FileInfo, _ error) error { left = append(left, p); return nil })
+				t.Fatalf("left %v", left)
+			}
+			if LoadSettings(name).Installed() {
+				t.Fatal("still installed")
+			}
+			if !LoadSettings("opencode").Installed() {
+				t.Fatal("removed another harness's install")
+			}
+			if _, err := os.Stat(filepath.Join(Home(), "bin", "wakeshift")); err != nil {
+				t.Fatal("removed the binary")
+			}
+			// A waiter that was listening exits now.
+			h := spec.NewHook(nil, nil)
+			h.logExit("conv", time.Now())
+			if _, err := os.Lstat(dir); err == nil {
+				t.Fatal("the waiter's exit made the directory again")
+			}
+		})
+	}
+}
+
+// Uninstall never removes anything but the harness's own directory, even
+// with Wakeshift's home unset or relative.
+func TestOwnDir(t *testing.T) {
+	setHome(t)
+	if !ownDir(filepath.Join(Home(), "codex"), "codex") || ownDir(Home(), "codex") || ownDir(filepath.Join(Home(), "cursor"), "codex") ||
+		ownDir(filepath.Join(Home(), "codex"), "") || ownDir(Home(), "..") || ownDir(filepath.Join(Home(), "bin"), "bin") ||
+		ownDir(filepath.Join(Home(), "procs"), "procs") {
+		t.Fatal("ownDir")
+	}
+	t.Setenv("WAKESHIFT_HOME", ".wakeshift")
+	if ownDir(".wakeshift/codex", "codex") {
+		t.Fatal("a relative home")
 	}
 }
 

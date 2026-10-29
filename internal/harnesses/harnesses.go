@@ -9,6 +9,7 @@
 package harnesses
 
 import (
+	"regexp"
 	"slices"
 	"strings"
 )
@@ -132,6 +133,22 @@ type Harness struct {
 	Plugin      bool
 	// Changes says what the install changes, for the user.
 	Changes string
+	// AskAlso, if set, is what the agent also tells the user in the same
+	// question (OpenClaw: its hooks endpoint on a gateway that listens
+	// beyond this computer), so one yes covers the whole install; AgreeEnv
+	// is the variable the agent's install command then sets, the
+	// installer's record of that yes (without it the installer stops and
+	// says to ask, a second question).
+	AskAlso  string
+	AgreeEnv string
+	// ToolRules: the harness has exact per-tool rules for MCP tools that
+	// Wakeshift's hooks can write (Claude Code, Cursor CLI), so an install
+	// offer from an app can also offer to pre-approve the app's own tools
+	// (WithTools).
+	ToolRules bool
+	// allowTools, set by WithTools, is the variable the install command
+	// sets for the installer: the app's tools the user agreed to allow.
+	allowTools string
 	// Run, if set, is how the agent runs the install command in this
 	// harness (Codex's sandbox blocks it unless it's escalated).
 	Run string
@@ -146,6 +163,21 @@ type Harness struct {
 	// Trust is the step the user takes in the harness after installing
 	// ("" if none), as the installer prints it and the agent says it.
 	Trust string
+	// Resume is what the user does after Trust so the conversation connects
+	// the first time ("" if nothing): a message, which gives the agent the
+	// turn in which it calls the app's tool again (the hooks connect a
+	// conversation only from a result that comes after the install). Empty
+	// where the agent calls it again in the same turn (Claude Code).
+	Resume string
+	// Restart is what the user does after a later restart of the harness so
+	// the conversation is woken again ("" if nothing): where nothing
+	// installed runs when the harness starts or a conversation is resumed
+	// that can start listening again (the background command needs the
+	// agent to start it). Empty where the hooks or plugin reconnect a
+	// connected conversation by themselves (Claude Code's SessionStart,
+	// opencode's and OpenClaw's plugins at load; Codex's SessionStart runs
+	// only when a resumed thread's first turn starts).
+	Restart string
 	// AfterUpdate is what the user does in the harness after an update
 	// (the install command run again over an install): an update keeps
 	// their settings and connected conversations, so it's usually nothing.
@@ -212,11 +244,16 @@ var all = []Harness{
 		ID: "codex", Name: "Codex", Claim: "codex", Aliases: []string{"codex-cli", "openai-codex"}, Clients: []string{"codex-mcp-client"}, UserAgents: []string{"codex-mcp-client"},
 		Wake: Connector, Ack: "at least once, acknowledged when the turn starts", Binding: ByConversation, Carrier: Meta,
 		ConversationMeta: "x-codex-turn-metadata.thread_id", Fingerprint: "x-codex-turn-metadata.thread_id", Installable: true,
-		Changes:     "adds one hook to ~/.codex/hooks.json, keeping a backup",
-		Run:         "It needs network access and writes ~/.wakeshift/bin and ~/.codex/hooks.json, which the sandbox blocks: run it with escalated permissions, so the user approves it.",
-		Trust:       "In Codex, type /hooks and press t to trust the Wakeshift hook (or restart Codex and choose Trust).",
-		AfterUpdate: "Codex keeps trusting the hook, since its command stays the same; only if Codex asks (or the hook stops running), type /hooks and press t.",
-		When:        "as soon as they arrive, while the thread is open in Codex",
+		Changes: "adds Wakeshift's hook to ~/.codex/hooks.json, keeping a backup",
+		Run:     "It needs network access and writes ~/.wakeshift/bin and ~/.codex/hooks.json, which the sandbox blocks: run it with escalated permissions, so the user approves it.",
+		Trust:   "In Codex, type /hooks and press t to trust the Wakeshift hooks (or restart Codex and choose Trust).",
+		Resume:  "Then send any message here (\"done\" is enough), so I can connect this conversation.",
+		// Codex runs its SessionStart hook when the resumed thread's first turn
+		// starts, not when the window opens (wakebench S8, October 28: the
+		// connector re-armed only at the next prompt), so a restart needs one.
+		Restart:     "After a later restart, send any message in this thread once it's open again, so I can reconnect it.",
+		AfterUpdate: "Codex keeps trusting the hooks it trusted, since their command stays the same; if Codex asks (an update can add one, or a hook stops running), type /hooks and press t.",
+		When:        "as soon as they arrive, or once its turn ends if it's busy, while the thread is open in Codex",
 		NoteAt:      "right after this result",
 		Review:      true,
 		Verified:    "0.163.0",
@@ -225,8 +262,8 @@ var all = []Harness{
 		ID: "claude-code", Name: "Claude Code", Claim: "claude-code", Aliases: []string{"claude", "claude-cli"}, Clients: []string{"claude-code"}, UserAgents: []string{"claude-code"},
 		Wake: Rewake, ZeroInstall: Monitor, Ack: "at least once, acknowledged when the hook hands the message over",
 		Binding: ByCall, Carrier: Meta, CallMeta: "claudecode/toolUseId", Fingerprint: "claudecode/toolUseId", Installable: true,
-		Changes: "adds three hooks to ~/.claude/settings.json, keeping a backup",
-		AskTool: "AskUserQuestion", UserShell: "!",
+		Changes: "adds three hooks to ~/.claude/settings.json and pre-approves Wakeshift's own wait command there (~/.wakeshift/bin/wakeshift wait), so Claude Code runs it without asking, keeping a backup",
+		AskTool: "AskUserQuestion", UserShell: "!", ToolRules: true,
 		Trust:       "There's nothing to approve. Claude Code picks the hooks up in running sessions; in a folder Claude Code hasn't trusted yet, choose \"Yes, I trust this folder\" when it asks, since hooks don't run until then.",
 		AfterUpdate: "There's nothing to approve again: the hooks run the new version from their next call.",
 		When:        "as soon as they arrive, even while the session is idle (not in claude -p)",
@@ -240,8 +277,11 @@ var all = []Harness{
 		ID: "cursor", Name: "Cursor", Claim: "cursor", ClaimHint: "local CLI or IDE", Aliases: []string{"cursor-agent", "cursor-cli", "cursor-ide", "cursor-local"}, Clients: []string{"Cursor", "cursor-vscode"}, UserAgents: []string{"Cursor"},
 		Wake: StopHook, ZeroInstall: Background, Ack: "at least once, acknowledged when the stop hook hands the message over",
 		Binding: Unbound, Carrier: Text, StripsText: true, Installable: true, ConversationEnv: "CURSOR_CONVERSATION_ID",
-		Changes:     "adds two hooks to ~/.cursor/hooks.json, keeping a backup",
+		Changes:     "adds three hooks to ~/.cursor/hooks.json, keeping a backup",
+		ToolRules:   true,
 		Trust:       "Restart cursor-agent to load them (a new chat isn't enough); the Cursor app reloads them by itself. There's nothing to approve for hooks in your home folder.",
+		Resume:      "Then reopen this chat (cursor-agent --continue) and send any message (\"done\" is enough), so I can connect it and start listening again.",
+		Restart:     "After any later restart, reopen this chat and send any message, so I can start listening again.",
 		AfterUpdate: "There's nothing to approve or restart: the hooks run the new version from their next call.",
 		When:        "if they come within a minute after the agent finishes a turn, otherwise at the start of the next one (not in cursor-agent -p)",
 		NoteAt:      "right after this result",
@@ -270,6 +310,8 @@ var all = []Harness{
 		Changes: "writes one hooks file, ~/.copilot/hooks/wakeshift.json",
 		Trust: "There's nothing to approve for hooks in your home folder. Restart copilot to load them (/env lists them). " +
 			"The background command that wakes the agent while it's idle still needs one \"Yes\" each time it starts (once per wake), unless copilot runs with --allow-all-tools (which approves every tool, not just this one).",
+		Resume:      "Then reopen this session (copilot --continue) and send any message (\"done\" is enough), so I can connect it and start listening again.",
+		Restart:     "After any later restart, reopen this session and send any message, so I can start listening again.",
 		AfterUpdate: "There's nothing to approve or restart: the hooks run the new version from their next call.",
 		When:        "when the agent finishes a turn; while it's idle, they wait for the next one",
 		NoteAt:      "right after this result",
@@ -281,6 +323,7 @@ var all = []Harness{
 		Binding: Unbound, Carrier: Meta, Installable: true,
 		Changes:     "writes one plugin file, ~/.config/opencode/plugins/wakeshift.ts",
 		Trust:       "Quit and restart opencode to load the Wakeshift plugin (opencode doesn't ask to approve plugins).",
+		Resume:      "Then reopen this session (opencode --continue) and send any message (\"done\" is enough), so I can connect it. After that, opencode reconnects it by itself whenever it starts.",
 		AfterUpdate: "Quit and restart opencode so it loads the new plugin.",
 		When:        "as soon as they arrive, even while the session is idle, as long as opencode is open (not in opencode run)",
 		NoteAt:      "right after this result",
@@ -292,6 +335,8 @@ var all = []Harness{
 		Binding: ByConversation, Carrier: Text, ConversationMeta: "antigravity.google/conversation_id", Fingerprint: "antigravity.google/conversation_id", Installable: true,
 		Changes:     "adds a \"wakeshift\" entry to ~/.gemini/config/hooks.json, keeping a backup",
 		Trust:       "There's nothing to approve for hooks in your home folder. Restart agy to load them (/hooks lists them).",
+		Resume:      "Then reopen this conversation (agy --continue) and send any message (\"done\" is enough), so I can connect it and start listening again.",
+		Restart:     "After any later restart, reopen this conversation and send any message, so I can start listening again.",
 		AfterUpdate: "There's nothing to approve or restart: the hooks run the new version from their next call.",
 		When:        "if they come within a minute after the agent finishes a turn, otherwise at the start of the next one",
 		NoteAt:      "at the start of your next turn",
@@ -306,12 +351,18 @@ var all = []Harness{
 		Embeds: &Embedding{Meta: "x-codex-turn-metadata.thread_source", Value: "openclaw"},
 		Wake:   Plugin, Ack: "at least once, acknowledged once the turn it wakes has finished",
 		Binding: Unbound, Carrier: Text, StripsText: true, Installable: true, Plugin: true,
-		Changes:     "installs the Wakeshift plugin with openclaw plugins install and sets the Wakeshift it trusts. When it connects a conversation, the plugin turns on OpenClaw's hooks endpoint with a token of its own (hooks.enabled, hooks.token, hooks.allowRequestSessionKey, hooks.defaultSessionKey), allowing it to start turns only in the sessions and for the agents that connect through Wakeshift (hooks.allowedSessionKeyPrefixes, hooks.allowedAgentIds); OpenClaw's own hooks settings, if it has any, are only added to. Its uninstaller undoes this",
-		Run:         "Run it with your exec tool, on the machine (or in the container) where the OpenClaw gateway runs.",
-		Trust:       "There's nothing to approve in OpenClaw, and no restart. The plugin starts with your next turn, so ask them to send any reply first. If the gateway listens beyond this computer, the installer stops before changing anything and says to ask them first, because OpenClaw's hooks endpoint shares the gateway's listener.",
+		Changes: "installs the Wakeshift plugin with openclaw plugins install and sets the Wakeshift it trusts. When it connects a conversation, the plugin turns on OpenClaw's hooks endpoint with a token of its own, allowing it to start turns only in the conversations that connect through Wakeshift; hooks settings OpenClaw already has are only added to, and its uninstaller undoes this",
+		// One question, not two: a gateway in Docker usually listens beyond
+		// this computer, and the installer would otherwise stop to ask about
+		// it (wakebench, October 26, 2026: 5 of 5 asked twice; with this, 0).
+		AskAlso:     "if the OpenClaw gateway listens beyond this computer (in Docker it usually does), OpenClaw's hooks endpoint shares that listener, so it's reachable there too, guarded by the plugin's token; a firewall or proxy rule that blocks /hooks/ from other machines keeps it local.",
+		AgreeEnv:    "WAKESHIFT_OPENCLAW_NETWORK_HOOKS=1",
+		Run:         "Run it yourself with your exec tool, on the machine (or in the container) where the OpenClaw gateway runs.",
+		Trust:       "There's nothing to approve in OpenClaw, and no restart.",
+		Resume:      "The plugin starts with my next turn, so send any reply (\"done\" is enough), and I'll connect this conversation. After that, it reconnects by itself whenever the gateway starts.",
 		AfterUpdate: "There's nothing to approve again, and no restart. The new plugin starts with your next turn, so ask them to send any reply first.",
 		When:        "as soon as they arrive, even while the session is idle, as long as the OpenClaw gateway runs",
-		NoteAt:      "right after this result (or, when OpenClaw runs the turn in Codex, at the start of your next turn)",
+		NoteAt:      "right after this result (or, when OpenClaw runs the turn in Codex, with the result of your next call to this app's tools)",
 		Verified:    "2026.10.4",
 	},
 	{
@@ -322,7 +373,9 @@ var all = []Harness{
 		Binding: Unbound, Carrier: Meta, Installable: true,
 		Changes:     "adds Wakeshift's plugin, $HERMES_HOME/plugins/wakeshift, and enables it",
 		Run:         "Run it where Hermes runs (inside its container, if it's in one). If Hermes blocks the command, give it to the user to run there.",
-		Trust:       "There's nothing to approve in Hermes, but Hermes loads plugins only when a chat starts or is resumed, so Wakeshift can't wake this chat until they resume it: exit and run `hermes chat --continue` (through Hermes's gateway or API server, restart the gateway and continue the session), then send any message. A new chat works too. If the installer couldn't enable the plugin, first run `hermes plugins enable wakeshift` where Hermes runs.",
+		Trust:       "There's nothing to approve in Hermes, but Hermes loads plugins only when a chat starts or is resumed, so Wakeshift can't wake this chat until they resume it: exit and run `hermes chat --continue` (through Hermes's gateway or API server, restart the gateway and continue the session). A new chat works too. If the installer couldn't enable the plugin, first run `hermes plugins enable wakeshift` where Hermes runs.",
+		Resume:      "Then send any message (\"done\" is enough), so I can connect it.",
+		Restart:     "After a later restart of hermes chat, send any message once you've resumed it, so I can reconnect it (conversations through Hermes's gateway reconnect by themselves).",
 		AfterUpdate: "There's nothing to approve again, but Hermes loads plugins only when a chat starts or is resumed: ask them to resume this chat (exit and run `hermes chat --continue`, or restart Hermes's gateway) or start a new one, so it loads the new plugin.",
 		When:        "as soon as they arrive, even while it's idle, as long as Hermes is running (conversations through Hermes's API server or CLI)",
 		NoteAt:      "right after this result",
@@ -337,7 +390,7 @@ var all = []Harness{
 		// the app's own event types (pkg/appkit Attach, the TypeScript
 		// SDK's attach): ChatGPT subscribes natively and starts a run
 		// for each occurrence. What a conversation subscribes to with the
-		// app's topic tools waits for its next tool call (appapi
+		// app's own tools waits for its next tool call (appapi
 		// chatgptResult). openai/session only recognises it.
 		ID: "chatgpt", Name: "ChatGPT", Claim: "chatgpt", Clients: []string{"openai-mcp"}, UserAgents: []string{"openai-mcp"}, Fingerprint: "openai/session",
 		Wake: Events, Ack: "at least once, acknowledged when ChatGPT accepts the webhook (not when the run reads it)",
@@ -568,13 +621,80 @@ func slug(name string) string {
 	return id
 }
 
+// toShell is how InstallCommand runs the script it downloads.
+const toShell = " | sh"
+
 // InstallCommand is the command that installs Wakeshift's hooks for a
 // harness from the Wakeshift at base ("" if it has none).
 func InstallCommand(h Harness, base string) string {
 	if !h.Installable {
 		return ""
 	}
-	return "curl -fsSL " + strings.TrimSuffix(base, "/") + "/install/" + h.ID + ".sh | sh"
+	sh := toShell
+	if h.allowTools != "" {
+		sh = " | " + h.allowTools + " sh"
+	}
+	return "curl -fsSL " + strings.TrimSuffix(base, "/") + "/install/" + h.ID + ".sh" + sh
+}
+
+// AllowToolsEnv is the variable an install command sets for the installer
+// when the user agreed to pre-approve an app's tools in the same question:
+// <app>:<tool>,<tool>,… (internal/connector, Spec.AllowTools).
+const AllowToolsEnv = "WAKESHIFT_ALLOW_TOOLS"
+
+// ToolsOffer is an app's own MCP tools that the agent's program can run
+// without asking each time, as the app's manifest names them
+// (apps.Manifest.PreapproveTools).
+type ToolsOffer struct {
+	App, AppName string
+	Tools        []string
+}
+
+// toolNameRE: what apps.Manifest.Validate allows (checked again here, since
+// the names go into a shell command).
+var toolNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+var appIDRE = regexp.MustCompile(`^[a-z][a-z0-9-]{1,39}$`)
+
+// WithTools is h with the install offer extended to o's tools, for a
+// harness with exact per-tool rules (ToolRules): its Changes say so, by
+// name, and its install command (InstallCommand) passes them to the
+// installer (AllowToolsEnv), so the user's one yes covers both. h as it
+// is otherwise, or if o names no tool or anything a rule can't hold.
+func WithTools(h Harness, o ToolsOffer) Harness {
+	if !h.ToolRules || !h.Installable || len(o.Tools) == 0 || !appIDRE.MatchString(o.App) {
+		return h
+	}
+	for _, t := range o.Tools {
+		if !toolNameRE.MatchString(t) || strings.Contains(t, "__") {
+			return h
+		}
+	}
+	name := o.AppName
+	if name == "" {
+		name = o.App
+	}
+	h.Changes += "; it also lets " + h.Name + " run " + name + "'s " + ToolList(o.Tools) + " " + plural(len(o.Tools), "tool") + " without asking each time (no other tools)"
+	h.allowTools = AllowToolsEnv + "=" + o.App + ":" + strings.Join(o.Tools, ",")
+	return h
+}
+
+// ToolList names tools for the user: "history", "history and post",
+// "history, list_channels and post".
+func ToolList(tools []string) string {
+	switch len(tools) {
+	case 0:
+		return ""
+	case 1:
+		return tools[0]
+	}
+	return strings.Join(tools[:len(tools)-1], ", ") + " and " + tools[len(tools)-1]
+}
+
+func plural(n int, s string) string {
+	if n == 1 {
+		return s
+	}
+	return s + "s"
 }
 
 // Connected is the exact text a hook's note starts with once it connects a
@@ -634,16 +754,17 @@ func installNote(h Harness, install string) string {
 	if h.ZeroInstall == Background {
 		return "You can be woken now, within seconds even while idle, by a command you start in the background (subscribing gives it). " + backgroundUpgrade(h, install)
 	}
+	install = agreed(h, install)
 	ask := unwoken + " Ask the user now whether to install Wakeshift's hooks for " + h.Name + " (it " + h.Changes + "), so new messages reach this conversation " + h.When + ". " +
-		ShowAgree + " Only if they agree, run `" + install + "`. "
+		askAlso(h) + ShowAgree + " Only if they agree, run `" + install + "`. "
 	if h.AskTool != "" {
 		ask = unwoken + " Wakeshift's hooks for " + h.Name + " deliver new messages to this conversation " + h.When + ". " + askWith(h, install) + " "
 	}
 	if h.Run != "" {
 		ask += h.Run + " "
 	}
-	if h.Trust != "" {
-		ask += "Then tell them: " + h.Trust + " "
+	if t := TrustNote(h); t != "" {
+		ask += "Then tell them: " + t + " "
 	}
 	return ask + "Then call this tool again: a note \"" + Connected + "\" confirms it."
 }
@@ -713,15 +834,18 @@ func upgradeNote(h Harness, install string) string {
 	}
 	var n string
 	if h.AskTool != "" {
-		n = "For delivery without a Monitor, the user can install Wakeshift's hooks for " + h.Name + ". " + askWith(h, install)
+		n = "For delivery without a Monitor, the user can install Wakeshift's hooks for " + h.Name + ". Start the Monitor first either way: it wakes you until the hooks connect. " + askWith(h, install)
 	} else {
 		n = "For delivery without a Monitor, the user can install Wakeshift's hooks for " + h.Name + " (it " + h.Changes + "). " +
 			"Ask them first. " + ShowAgree + " Only if they agree, run `" + install + "`."
 	}
-	if h.Trust != "" {
-		n += " Then tell them: " + h.Trust
+	n += " After that, call this tool again right away, in the same turn and without waiting for the user: the hooks work in this session already, but they connect this conversation only from a result that comes after the install, so until you call it they can't wake you. Once they connect it, a note \"" + Connected + "\" appears " + h.NoteAt + ", and they deliver instead of the Monitor."
+	if t := TrustNote(h); t != "" {
+		// Last, for the reply after that call: placed before the call, an
+		// agent hurrying to call again skipped it (wakebench S6).
+		n += " Then, in your reply to the user, also tell them this: " + t
 	}
-	return n + " After that, call this tool again: once the hooks connect this conversation, a note \"" + Connected + "\" appears " + h.NoteAt + ", and they deliver instead of the Monitor."
+	return n
 }
 
 // SubscribeNote is what a conversation that just asked to be woken is
@@ -752,7 +876,7 @@ func RepeatNoteFor(h Harness, install string) string {
 	if !h.Installable {
 		return unsure(h, installNote(h, install))
 	}
-	ask := "If you haven't asked the user yet whether to install them (it " + h.Changes + "), ask now. " + ShowAgree + " If they agreed and it hasn't run, run `" + install + "`." + sep(h.Run)
+	ask := "If you haven't asked the user yet whether to install them (it " + h.Changes + "), ask now. " + askAlso(h) + ShowAgree + " If they agreed and it hasn't run, run `" + agreed(h, install) + "`." + sep(h.Run)
 	if h.AskTool != "" {
 		ask = "If you haven't asked the user yet whether to install them, ask now. " + askWith(h, install)
 	}
@@ -761,7 +885,41 @@ func RepeatNoteFor(h Harness, install string) string {
 		" Don't ask again if they said no.")
 }
 
+// askAlso is the sentence that has the agent tell the user h.AskAlso in
+// the same question ("" if there's nothing more to tell).
+func askAlso(h Harness) string {
+	if h.AskAlso == "" {
+		return ""
+	}
+	return "In the same question, tell them: " + h.AskAlso + " "
+}
+
+// agreed is the agent's install command for h once the user agreed to
+// everything they were asked (h.AgreeEnv set for the installer).
+// The command is InstallCommand's script and shell, with the variable set
+// for the shell; TestAgreed keeps every harness's in step with it.
+func agreed(h Harness, install string) string {
+	sh := toShell
+	if h.allowTools != "" {
+		sh = " | " + h.allowTools + " sh"
+	}
+	script, ok := strings.CutSuffix(install, sh)
+	if h.AgreeEnv == "" || !ok {
+		return install
+	}
+	return script + strings.TrimSuffix(sh, "sh") + h.AgreeEnv + " sh"
+}
+
 // sep is s after a space ("" if s is).
+// TrustNote is what the agent tells the user after the install: the
+// harness's trust step, what then connects this conversation (a message,
+// where the agent needs a turn to call the app's tool again), and what to
+// do after a later restart, only where nothing reconnects it by itself
+// ("" if there's nothing to tell).
+func TrustNote(h Harness) string {
+	return strings.TrimSpace(h.Trust + sep(h.Resume) + sep(h.Restart))
+}
+
 func sep(s string) string {
 	if s == "" {
 		return ""

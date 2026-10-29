@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +31,8 @@ type fakeWakeshift struct {
 	tool string
 	// held is the link each redeem said the hook held ("" for none).
 	held []string
+	// app, if set, is what redeems say about the beacon's app.
+	app *RedeemedApp
 }
 
 func newFakeWakeshift(t *testing.T) *fakeWakeshift {
@@ -47,14 +50,18 @@ func newFakeWakeshift(t *testing.T) *fakeWakeshift {
 		f.mu.Lock()
 		f.redeemed = append(f.redeemed, in.Ticket+"@"+in.Thread)
 		f.held = append(f.held, in.Held)
-		status, code := f.status, f.code
+		status, code, app := f.status, f.code, f.app
 		f.mu.Unlock()
 		w.WriteHeader(status)
 		if status != 200 {
 			json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": code}})
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"url": "ws://" + r.Host + "/v1/stream?link=tok-" + in.Thread})
+		out := map[string]any{"url": "ws://" + r.Host + "/v1/stream?link=tok-" + in.Thread}
+		if app != nil {
+			out["app"] = app
+		}
+		json.NewEncoder(w).Encode(out)
 	})
 	f.Server = httptest.NewServer(mux)
 	t.Cleanup(f.Close)
@@ -104,6 +111,13 @@ type fakePoller struct {
 }
 
 func newFakePoller() *fakePoller { return &fakePoller{queue: map[string][]Delivery{}} }
+
+// ackedNow is what was acked so far.
+func (p *fakePoller) ackedNow() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.acked)
+}
 
 func (p *fakePoller) add(link string, ds ...Delivery) {
 	p.mu.Lock()

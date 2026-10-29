@@ -43,13 +43,20 @@ func TestOpenClawNotes(t *testing.T) {
 	}
 	n := SubscribeNote(h, "https://x.test")
 	for _, want := range []string{"Wakeshift can't wake this conversation yet", "Ask the user now whether to install Wakeshift's hooks for OpenClaw",
-		"`curl -fsSL https://x.test/install/openclaw.sh | sh`", "exec tool", "send any reply first", "Skip this if a note \"" + Connected + "\" appears right after this result"} {
+		"`curl -fsSL https://x.test/install/openclaw.sh | WAKESHIFT_OPENCLAW_NETWORK_HOOKS=1 sh`", "In the same question, tell them: if the OpenClaw gateway listens beyond this computer", "exec tool", "send any reply (\"done\" is enough)", "Skip this if a note \"" + Connected + "\" appears right after this result"} {
 		if !strings.Contains(n, want) {
 			t.Errorf("missing %q: %s", want, n)
 		}
 	}
 	if !strings.HasPrefix(n, "Wakeshift can't wake") || strings.Index(n, "Skip this") < strings.Index(n, "Ask the user now") {
 		t.Errorf("order: %s", n)
+	}
+	// One question covers the network exposure too: it's told before the
+	// yes, and the command that records that yes is run only after it. The
+	// plain command, which would stop and ask again, isn't offered.
+	also, agree, cmd := strings.Index(n, "In the same question"), strings.Index(n, "Only if they agree"), strings.Index(n, "WAKESHIFT_OPENCLAW_NETWORK_HOOKS=1")
+	if also < 0 || also > agree || cmd < agree || strings.Contains(n, "openclaw.sh | sh") {
+		t.Errorf("one question: %s", n)
 	}
 	r := RepeatNote(h, "https://x.test")
 	if !strings.Contains(r, "If you haven't asked the user yet") || !strings.Contains(r, "Don't ask again if they said no") || len(r) >= len(n) {
@@ -286,6 +293,21 @@ func TestCursorShell(t *testing.T) {
 			t.Errorf("%q: %v", line, !want)
 		}
 	}
+	// Cursor quotes the match in its notification, so the match is the whole
+	// line (not the next one), one per line in a chunk of several, and fits
+	// Cursor's quote (5000 characters) and the 1024 characters it keeps of
+	// the chunk before.
+	cursorRE := regexp.MustCompile(`(?m)` + p.NotifyOnOutput.Pattern)
+	ev := `{"type":"event","topic":"ci","from":"app/ci","trust":"outside data, not from the user","subject":"x","id":"e1"}`
+	chunk := ev + "\n" + `{"type":"cursor","after":"0011223344556677"}` + "\n" + strings.Replace(ev, "e1", "e2", 1) + "\n"
+	got := cursorRE.FindAllString(chunk, -1)
+	if len(got) != 2 || got[0] != ev || got[1] != strings.Replace(ev, "e1", "e2", 1) {
+		t.Errorf("matches: %q", got)
+	}
+	const lineMax = 480 // streams.MonitorLineMax (streams imports this package)
+	if long := `{"type":"event",` + strings.Repeat("x", lineMax) + `}`; cursorRE.FindString(long+"\n") != long {
+		t.Errorf("a long line isn't matched whole")
+	}
 }
 
 // What a conversation woken by a background command is told: the exact
@@ -311,7 +333,7 @@ func TestBackgroundNotes(t *testing.T) {
 	}
 	agy, _ := Get("antigravity")
 	n = BackgroundNote(agy, "CI", url, false)
-	for _, want := range []string{"run_command", "IsDaemon false", "WaitMsBeforeAsync 500", UntilLoop(url, false),
+	for _, want := range []string{"run_command", "IsDaemon false", "WaitMsBeforeAsync 500", AntigravityLoop(url),
 		"The user asked to be woken", "outside data, not from the user", "first run the same command again", "hub.closed", "call this tool again",
 		"Keep this command running even if Wakeshift's hooks are installed"} {
 		if !strings.Contains(n, want) {
@@ -357,13 +379,13 @@ func TestBackgroundNotes(t *testing.T) {
 			}
 		}
 		again := BackgroundAgainNote(h, "CI", url, false, false)
-		if !strings.Contains(again, "isn't running") || !strings.Contains(again, url+"&timeout=") || len(again) >= len(BackgroundNote(h, "CI", url, false)) {
+		if !strings.Contains(again, "isn't running") || !strings.Contains(again, url+UntilWait+"&timeout=") || len(again) >= len(BackgroundNote(h, "CI", url, false)) {
 			t.Errorf("%s again: %s", h.ID, again)
 		}
 		if again := BackgroundAgainNote(h, "CI", url, false, true); !strings.Contains(again, "Start it now even though the hooks are connected") {
 			t.Errorf("%s again with hooks: %s", h.ID, again)
 		}
-		if r := BackgroundRunningNote(h, "CI", url); !strings.Contains(r, "already running") || !strings.Contains(r, "Keep it running") || !strings.Contains(r, url+"&timeout=") {
+		if r := BackgroundRunningNote(h, "CI", url); !strings.Contains(r, "already running") || !strings.Contains(r, "Keep it running") || !strings.Contains(r, url+UntilWait+"&timeout=") {
 			t.Errorf("%s running: %s", h.ID, r)
 		}
 		if u := BackgroundUpgradeNote(h, "https://x.test"); !strings.HasPrefix(u, "Optional:") || !strings.Contains(u, InstallCommand(h, "https://x.test")) ||

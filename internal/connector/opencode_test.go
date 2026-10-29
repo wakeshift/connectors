@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -69,17 +70,17 @@ func TestOpencodeBridge(t *testing.T) {
 		t.Fatalf("wake %s", lines.Bytes())
 	}
 	time.Sleep(50 * time.Millisecond)
-	if len(p.acked) != 0 {
-		t.Fatal("acked before the plugin did")
+	if a := p.ackedNow(); len(a) != 0 {
+		t.Fatalf("acked %v before the plugin did", a)
 	}
 	io.WriteString(inW, `{"ack":"not-this-one"}`+"\n")
 	io.WriteString(inW, `{"ack":"`+wake.Wake.ID+`"}`+"\n")
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		p.mu.Lock()
-		n := len(p.acked)
-		p.mu.Unlock()
-		if n == 1 {
+		if a := p.ackedNow(); len(a) > 0 {
+			if !slices.Equal(a, []string{"d1"}) {
+				t.Fatalf("acked %v, want d1", a)
+			}
 			break
 		}
 		if time.Now().After(deadline) {
@@ -102,6 +103,99 @@ func TestOpencodeBridge(t *testing.T) {
 	(&Bridge{Hook: h}).Run(ctx, strings.NewReader(in), &out)
 	if !strings.Contains(out.String(), `"keep_alive":true`) {
 		t.Fatalf("idle: %s", out.String())
+	}
+}
+
+// A message waiting when the bridge connects goes in the tool result's note
+// and is acknowledged once the plugin says it added the note: it doesn't
+// come again as a wake (wakebench S8, October 26: after a restart the held
+// message came in the watch result and as a wake, "GOT … (duplicate)").
+// Without the plugin's ack (a plugin from before note_id), it comes again
+// as a wake: at least once.
+func TestOpencodeBridgeNoteDeliversOnce(t *testing.T) {
+	for _, pluginAcks := range []bool{true, false} {
+		t.Run(map[bool]string{true: "plugin acks the note", false: "no ack"}[pluginAcks], func(t *testing.T) {
+			ws := newFakeWakeshift(t)
+			p := newFakePoller()
+			set := Settings{Dir: t.TempDir(), Issuers: []string{ws.URL}}
+			spec, _ := Lookup("opencode")
+			h := &Hook{Format: spec.Format, Verifier: &Verifier{Settings: set}, Poller: p, Links: LinksFor(set), When: spec.When,
+				Unbound: spec.Unbound, Repoll: 50 * time.Millisecond}
+			// The link the fake redeems for ses_2, with a message already waiting on it.
+			link := "ws://" + strings.TrimPrefix(ws.URL, "http://") + "/v1/stream?link=tok-ses_2"
+			p.add(link, msg("d1", "held while opencode was closed"))
+			acked := func() []string {
+				p.mu.Lock()
+				defer p.mu.Unlock()
+				return append([]string(nil), p.acked...)
+			}
+
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				done <- (&Bridge{Hook: h, NoteTimeout: 300 * time.Millisecond}).Run(ctx, inR, outW)
+				outW.Close()
+			}()
+			go io.WriteString(inW, opencodeLine("ses_2", unbound(t, ws)))
+			lines := bufio.NewScanner(outR)
+			if !lines.Scan() {
+				t.Fatal("no first line")
+			}
+			var first struct {
+				AdditionalContext string `json:"additionalContext"`
+				KeepAlive         bool   `json:"keep_alive"`
+				NoteID            string `json:"note_id"`
+			}
+			json.Unmarshal(lines.Bytes(), &first)
+			if got := h.Links.Load("ses_2"); got != link {
+				t.Fatalf("link %q, want %q", got, link)
+			}
+			if !first.KeepAlive || first.NoteID == "" || !strings.Contains(first.AdditionalContext, "held while opencode was closed") {
+				t.Fatalf("first line %s", lines.Bytes())
+			}
+			if a := acked(); len(a) != 0 {
+				t.Fatalf("acked %v before the plugin added the note", a)
+			}
+			wakes := make(chan string, 4)
+			go func() {
+				for lines.Scan() {
+					wakes <- lines.Text()
+				}
+			}()
+			if pluginAcks {
+				io.WriteString(inW, `{"ack":"`+first.NoteID+`"}`+"\n")
+				deadline := time.Now().Add(2 * time.Second)
+				for len(acked()) == 0 && time.Now().Before(deadline) {
+					time.Sleep(10 * time.Millisecond)
+				}
+				if a := acked(); len(a) != 1 || a[0] != "d1" {
+					t.Fatalf("acked %v after the plugin's ack, want [d1]", a)
+				}
+				select {
+				case w := <-wakes:
+					t.Fatalf("delivered again as a wake: %s", w)
+				case <-time.After(600 * time.Millisecond):
+				}
+			} else {
+				select {
+				case w := <-wakes:
+					if !strings.Contains(w, "held while opencode was closed") {
+						t.Fatalf("wake %s", w)
+					}
+				case <-time.After(2 * time.Second):
+					t.Fatal("an unacknowledged note's message never came again")
+				}
+			}
+			inW.Close()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("the bridge outlived opencode")
+			}
+		})
 	}
 }
 

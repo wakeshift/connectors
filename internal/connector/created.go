@@ -84,9 +84,15 @@ func removeCreated(s Settings, inst Installer, newBackups []string, out io.Write
 	if !ok {
 		return nil
 	}
+	return removeCreatedFile(s, f.path(), func(p string) bool { return onlyDefaults(inst, p) }, newBackups, out)
+}
+
+// removeCreatedFile is removeCreated for one file, with only saying
+// whether what's left in it is only the install's.
+func removeCreatedFile(s Settings, path string, only func(string) bool, newBackups []string, out io.Writer) (removed []string) {
 	rec := readCreated(s)
-	path := filepath.Clean(f.path())
-	if slices.Contains(rec, path) && onlyDefaults(inst, path) {
+	path = filepath.Clean(path)
+	if slices.Contains(rec, path) && only(path) {
 		if os.Remove(path) == nil {
 			fmt.Fprintf(out, "Removed %s: Wakeshift's install created it, and nothing else is in it.\n", path)
 			for _, b := range newBackups {
@@ -105,6 +111,16 @@ func removeCreated(s Settings, inst Installer, newBackups []string, out io.Write
 		fmt.Fprintf(out, "Removed %s: Wakeshift's install created it, and it's empty now.\n", dir)
 	}
 	return removed
+}
+
+// emptyJSON reports whether a file left by uninstall is an empty object.
+func emptyJSON(path string) bool {
+	st, err := os.Lstat(path)
+	if err != nil || !st.Mode().IsRegular() {
+		return false
+	}
+	o, err := ReadJSONFile(path)
+	return err == nil && o.Len() == 0
 }
 
 // onlyDefaults reports whether a file left by uninstall holds nothing but

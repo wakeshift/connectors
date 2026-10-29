@@ -100,6 +100,34 @@ func TestMinimums(t *testing.T) {
 	}
 }
 
+// Production's minimum (deploy/terraform/production/terraform.tfvars):
+// v1.1.0's own build is served, and every connector built before it (v1.0.0's,
+// a minute before) is refused, for each of the three connectors.
+func TestReleaseMinimum(t *testing.T) {
+	m, err := ParseMinimums("wakeshift=2026.10.26.2256,wakeshift-openclaw=2026.10.26.2256,wakeshift-hermes=2026.10.26.2256")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		version string
+		want    bool
+	}{
+		{"2026.10.26.2256+9534799", false}, // v1.1.0
+		{"2026.10.27.0011+53d19a4", false}, // later
+		{"2026.10.26.2255+9534799", true},
+		{"2026.10.26.0532+bde2a26", true}, // v1.0.0
+		{"0", true},
+		{"dev", true},
+	} {
+		for _, name := range []string{Binary, OpenClaw, Hermes} {
+			cl := Client{Name: name, Version: c.version, Harness: "codex"}
+			if got := m.Outdated(cl); got != c.want {
+				t.Errorf("Outdated(%v) = %v, want %v", cl, got, c.want)
+			}
+		}
+	}
+}
+
 func TestValue(t *testing.T) {
 	if v := Value(Binary, "2026.10.20.1435+91faaf7", "codex"); v != "wakeshift/2026.10.20.1435+91faaf7 codex" {
 		t.Errorf("Value = %q", v)

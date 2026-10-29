@@ -19,7 +19,7 @@ import (
 const codexName = "codex"
 
 func init() {
-	register(Spec{Name: codexName, Installer: codexInstaller{}, When: "as soon as they arrive, while the thread is open in Codex"})
+	register(Spec{Name: codexName, Installer: codexInstaller{}, When: "as soon as they arrive, or once its turn ends if it's busy, while the thread is open in Codex"})
 }
 
 // CodexHome is Codex's directory (CODEX_HOME, default ~/.codex).
@@ -40,10 +40,19 @@ type codexInstaller struct{}
 
 func (codexInstaller) path() string { return filepath.Join(CodexHome(), "hooks.json") }
 
+// The hook runs after MCP tool calls (PostToolUse: a beacon starts the
+// connector) and, with no tool call, when a thread opens or resumes in a
+// window (SessionStart) and at the user's prompt (UserPromptSubmit): there
+// it starts the thread's connector again with its kept link if none is
+// running (codexconnector.Hook). Codex has no hook for an idle thread.
 func (codexInstaller) entries(bin string) []entry {
-	return []entry{{event: "PostToolUse",
-		isOur: func(item json.RawMessage) bool { return commandIn(item, bin, codexName) },
-		json:  map[string]any{"matcher": CodexHookMatcher, "hooks": []any{map[string]any{"type": "command", "command": HookCommand(bin, codexName)}}}}}
+	isOur := func(item json.RawMessage) bool { return commandIn(item, bin, codexName) }
+	hook := []any{map[string]any{"type": "command", "command": HookCommand(bin, codexName)}}
+	return []entry{
+		{event: "PostToolUse", isOur: isOur, json: map[string]any{"matcher": CodexHookMatcher, "hooks": hook}},
+		{event: "SessionStart", isOur: isOur, json: map[string]any{"hooks": hook}},
+		{event: "UserPromptSubmit", isOur: isOur, json: map[string]any{"hooks": hook}},
+	}
 }
 
 // Install adds the hook, replacing one an earlier install added (the

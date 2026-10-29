@@ -25,8 +25,15 @@ import (
 // connection started or resumed (/resume, and /new then a prompt, move it
 // on). A plain thread/unsubscribe on the connection (/quit, Ctrl-C) closes
 // it, unless the connection resumed our thread just before (that's /resume
-// leaving the previous thread). It's Codex's internal log, so anything
-// unexpected means "can't tell", and the lease decides.
+// leaving the previous thread). A connection that has gone quiet for
+// heartbeatGone counts as gone only if a connection reset follows its last
+// line within that time that no other connection could account for (kill
+// -9): quiet alone may be an idle window. It's Codex's internal
+// log, so anything unexpected means "can't tell", and the lease decides.
+
+// connReset is what the daemon logs when a client's connection drops without
+// a close (a TUI killed), naming no connection.
+const connReset = "Connection reset without closing handshake"
 
 // ErrWindowClosed: the TUI showing the thread quit or moved to another.
 var ErrWindowClosed = errors.New("the Codex window showing the thread closed")
@@ -39,7 +46,7 @@ var (
 const (
 	windowPoll    = 5 * time.Second
 	bindWithin    = 2 * time.Minute   // how long Watch looks for a window the log doesn't show yet
-	heartbeatGone = 150 * time.Second // its rate-limit reads come about once a minute
+	heartbeatGone = 150 * time.Second // its rate-limit reads come about once a minute, when they come
 	resumeGrace   = 5 * time.Second   // /resume unsubscribes the previous thread just after
 )
 
@@ -50,6 +57,18 @@ type Window struct {
 	Thread string
 	Now    func() time.Time
 	Poll   time.Duration // how often Watch reads the log (0: windowPoll)
+	// Since: only the log from then on counts (after Codex's app-server
+	// restarted, its connection IDs start again from 0, so the earlier
+	// lines name other connections).
+	Since time.Time
+}
+
+// since is the SQL condition for Since.
+func (w *Window) since() string {
+	if w.Since.IsZero() {
+		return "1"
+	}
+	return fmt.Sprintf("ts >= %d", w.Since.Unix())
 }
 
 // hasLog reports whether there's a log database to read.
@@ -78,7 +97,7 @@ func (w *Window) Bind(ctx context.Context) (bound, bool) {
 	if !uuidRE.MatchString(w.Thread) {
 		return bound{}, false
 	}
-	rows, err := w.query(ctx, `SELECT ts, feedback_log_body FROM logs WHERE thread_id = '`+w.Thread+`'
+	rows, err := w.query(ctx, `SELECT ts, feedback_log_body FROM logs WHERE thread_id = '`+w.Thread+`' AND `+w.since()+`
 		AND feedback_log_body LIKE '%app_server.connection_id=%'
 		AND (feedback_log_body LIKE '%otel.name="thread/start"%' OR feedback_log_body LIKE '%otel.name="thread/resume"%')
 		ORDER BY ts DESC, ts_nanos DESC LIMIT 1`)
@@ -100,7 +119,7 @@ func (w *Window) Open(ctx context.Context, b bound) (bool, string, error) {
 	c := strconv.Itoa(b.conn)
 	// The last thread this connection started or resumed (not the short
 	// threads the TUI makes for titles).
-	rows, err := w.query(ctx, `SELECT ts, thread_id FROM logs WHERE thread_id IS NOT NULL
+	rows, err := w.query(ctx, `SELECT ts, thread_id FROM logs WHERE thread_id IS NOT NULL AND `+w.since()+`
 		AND feedback_log_body LIKE '%app_server.connection_id=`+c+` %'
 		AND (feedback_log_body LIKE '%otel.name="thread/start"%' OR feedback_log_body LIKE '%otel.name="thread/resume"%')
 		AND feedback_log_body NOT LIKE '%temporary-structured%'
@@ -117,13 +136,22 @@ func (w *Window) Open(ctx context.Context, b bound) (bool, string, error) {
 			last = time.Unix(ts, 0)
 		}
 	}
-	rows, err = w.query(ctx, `SELECT max(ts) FROM logs WHERE feedback_log_body LIKE '%connection_id=ConnectionId(`+c+`)%'`)
+	rows, err = w.query(ctx, `SELECT max(ts) FROM logs WHERE `+w.since()+` AND feedback_log_body LIKE '%connection_id=ConnectionId(`+c+`)%'`)
 	if err != nil {
 		return true, "", err
 	}
 	if len(rows) == 1 && rows[0][0] != "" {
 		if ts, err := strconv.ParseInt(rows[0][0], 10, 64); err == nil && w.now().Sub(time.Unix(ts, 0)) > heartbeatGone {
-			return false, "the window stopped answering", nil
+			// Quiet isn't gone: an open TUI with nothing to do can go
+			// minutes without a request (a connector stopping then missed
+			// a wake). A killed one also leaves a connection reset.
+			gone, err := w.killed(ctx, c, ts)
+			if err != nil {
+				return true, "", err
+			}
+			if gone {
+				return false, "the window stopped answering", nil
+			}
 		}
 	}
 	rows, err = w.query(ctx, fmt.Sprintf(`SELECT count(*) FROM logs WHERE ts > %d
@@ -136,6 +164,36 @@ func (w *Window) Open(ctx context.Context, b bound) (bool, string, error) {
 		return false, "the window closed the thread", nil
 	}
 	return true, "", nil
+}
+
+// killed reports whether a connection reset in the log is conn's, whose
+// last line was at last. The reset names no connection, so it's taken as
+// conn's only if it came while conn's heartbeat was still due (within
+// heartbeatGone of its last line), and no other connection went quiet in
+// the heartbeatGone before it (that one's as likely to be the one that
+// dropped). Otherwise: can't tell, and the lease decides. What it can't
+// rule out: another client quiet for longer than that, killed then.
+func (w *Window) killed(ctx context.Context, conn string, last int64) (bool, error) {
+	rows, err := w.query(ctx, fmt.Sprintf(`SELECT min(ts) FROM logs WHERE ts >= %d AND ts <= %d
+		AND feedback_log_body LIKE '%%`+connReset+`%%'`, last, last+int64(heartbeatGone/time.Second)))
+	if err != nil || len(rows) != 1 || rows[0][0] == "" {
+		return false, err
+	}
+	reset, err := strconv.ParseInt(rows[0][0], 10, 64)
+	if err != nil {
+		return false, nil
+	}
+	// Other connections whose last line came in the heartbeatGone before
+	// the reset, by ID.
+	rows, err = w.query(ctx, fmt.Sprintf(`SELECT count(*) FROM (
+		SELECT substr(rest, 1, instr(rest, ')') - 1) AS conn, max(ts) AS seen FROM (
+			SELECT ts, substr(feedback_log_body, instr(feedback_log_body, 'ConnectionId(') + 13) AS rest FROM logs
+			WHERE ts >= %d AND feedback_log_body LIKE '%%ConnectionId(%%')
+		GROUP BY conn) WHERE conn != '%s' AND seen <= %d`, reset-int64(heartbeatGone/time.Second), conn, reset))
+	if err != nil || len(rows) != 1 {
+		return false, err
+	}
+	return rows[0][0] == "0", nil
 }
 
 // Watch returns a channel that gets why the window closed, or nil if there's

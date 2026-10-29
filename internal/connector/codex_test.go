@@ -25,7 +25,7 @@ func TestCodexInstall(t *testing.T) {
 	os.MkdirAll(filepath.Dir(path), 0o700)
 	os.WriteFile(path, []byte(codexOtherHooks), 0o600)
 	spec, _ := Lookup("codex")
-	installRoundTrip(t, spec, path, []string{`"notify.sh"`, `"Stop"`}, []string{`"matcher": "^mcp__"`})
+	installRoundTrip(t, spec, path, []string{`"notify.sh"`, `"Stop"`}, []string{`"matcher": "^mcp__"`, `"SessionStart"`, `"UserPromptSubmit"`})
 	if s := LoadSettings("codex"); len(s.Issuers) != 0 {
 		t.Fatalf("uninstall left the trust: %+v", s)
 	}

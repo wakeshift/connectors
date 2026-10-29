@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -32,18 +33,72 @@ func init() {
 		When:     "if they come within a minute after the agent finishes a turn, otherwise at the start of the next one",
 		StopWait: 60 * time.Second, // the hook's timeout is 90s; Cursor shows "Working" meanwhile
 		Unbound:  true,
+		// No Rule (CursorRule): cursor-agent matches Shell rules on the
+		// command with its redirects taken off, and lets an allowlisted
+		// command redirect into workspace and temporary files, so the rule
+		// would let `… wait > <workspace file>` run unasked; the shell
+		// empties the file before `wakeshift wait` can refuse.
+		Wait:  true,
+		Tools: &cursorTools,
 	})
+}
+
+// cursorTools: Mcp(<server>:<tool>) in cli-config.json. Cursor matches
+// both parts as globs, case-insensitively, so names with no glob
+// characters (ValidToolName) match exactly that server's tool. The
+// server's name comes from afterMCPExecution (mcp_server_name, the name
+// its rules match), checked against ~/.cursor/mcp.json and the
+// workspace's .cursor/mcp.json, by the URL the call went to.
+var cursorTools = ToolRules{
+	Path: func() string {
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, ".cursor", "cli-config.json")
+	},
+	Rule:      func(server, tool string) string { return "Mcp(" + server + ":" + tool + ")" },
+	MustExist: true,
+	Configured: func(server string, dirs []string) ([]string, error) {
+		home, _ := os.UserHomeDir()
+		files := []string{filepath.Join(home, ".cursor", "mcp.json")}
+		for _, d := range dirs {
+			if filepath.IsAbs(d) {
+				files = append(files, filepath.Join(d, ".cursor", "mcp.json"))
+			}
+		}
+		var l []string
+		for _, f := range files {
+			e, err := mcpEntries(f, server, true, func(top *Object) []*Object {
+				if o := childObject(top, "mcpServers"); o != nil {
+					return []*Object{o}
+				}
+				return nil
+			})
+			if err != nil {
+				return nil, err
+			}
+			l = append(l, e...)
+		}
+		return l, nil
+	},
 }
 
 type cursorFormat struct{}
 
+// CallServers: Cursor's postToolUse names the tool, not its server;
+// afterMCPExecution, which runs just before it for the same call, names
+// both (cursor-agent 2026.10.16).
+func (cursorFormat) CallServers() bool { return true }
+
 type cursorInput struct {
-	ConversationID string `json:"conversation_id"`
-	HookEventName  string `json:"hook_event_name"`
-	ToolName       string `json:"tool_name"`
-	ToolOutput     string `json:"tool_output"`
-	ToolUseID      string `json:"tool_use_id"`
-	LoopCount      int    `json:"loop_count"`
+	ConversationID string   `json:"conversation_id"`
+	HookEventName  string   `json:"hook_event_name"`
+	ToolName       string   `json:"tool_name"`
+	ToolOutput     string   `json:"tool_output"`
+	ToolUseID      string   `json:"tool_use_id"`
+	LoopCount      int      `json:"loop_count"`
+	ServerName     string   `json:"mcp_server_name"`
+	ServerURL      string   `json:"mcp_server_url"`
+	Cwd            string   `json:"cwd"`
+	WorkspaceRoots []string `json:"workspace_roots"`
 }
 
 func (cursorFormat) Parse(b []byte) (Input, error) {
@@ -63,6 +118,16 @@ func (cursorFormat) Parse(b []byte) (Input, error) {
 		if !json.Valid(in.ToolResult) {
 			in.ToolResult, _ = json.Marshal(c.ToolOutput)
 		}
+		if c.Cwd != "" {
+			in.Dirs = append(in.Dirs, c.Cwd)
+		}
+		for _, d := range c.WorkspaceRoots {
+			if !slices.Contains(in.Dirs, d) {
+				in.Dirs = append(in.Dirs, d)
+			}
+		}
+	case "afterMCPExecution":
+		in.Event, in.ToolName, in.ToolCallID, in.Server, in.ServerURL = CallDone, c.ToolName, c.ToolUseID, c.ServerName, c.ServerURL
 	case "stop":
 		in.Event = Stop
 	}
@@ -129,6 +194,9 @@ func (cursorInstaller) path() string {
 func (cursorInstaller) entries(bin string) []entry {
 	isOur := func(item json.RawMessage) bool { return commandIn(item, bin, cursorName) }
 	return []entry{
+		// Records each MCP call's server, for its postToolUse (the server's
+		// name for tool rules, and pinning its beacons to one app).
+		{event: "afterMCPExecution", isOur: isOur, json: map[string]any{"command": HookCommand(bin, cursorName), "timeout": 10}},
 		{event: "postToolUse", isOur: isOur, json: map[string]any{"command": HookCommand(bin, cursorName), "matcher": "^MCP:", "timeout": 20}},
 		{event: "stop", isOur: isOur, json: map[string]any{"command": HookCommand(bin, cursorName), "timeout": 90, "loop_limit": nil}},
 	}
@@ -189,3 +257,6 @@ func (i cursorInstaller) Uninstall(bin string, out io.Writer) error {
 	reportEdit(out, i.path(), changed, backup, true)
 	return nil
 }
+
+// TextOnly: its hooks get a result's content as JSON text, never _meta.
+func (cursorFormat) TextOnly() bool { return true }

@@ -110,6 +110,7 @@ type mcpCall struct {
 	Call   string    `json:"call,omitempty"`
 	Server string    `json:"server"`
 	Tool   string    `json:"tool"`
+	URL    string    `json:"url,omitempty"` // the server's, if the harness said (Cursor)
 }
 
 func (h *Hook) callsPath(conversation string) string {
@@ -128,7 +129,7 @@ func (h *Hook) recordCall(in Input) {
 	}
 	defer unlock()
 	list := liveCalls(p)
-	list = append(list, mcpCall{At: time.Now(), Call: in.ToolCallID, Server: in.Server, Tool: in.ToolName})
+	list = append(list, mcpCall{At: time.Now(), Call: in.ToolCallID, Server: in.Server, Tool: in.ToolName, URL: in.ServerURL})
 	if len(list) > maxCalls {
 		list = list[len(list)-maxCalls:]
 	}
@@ -147,6 +148,27 @@ func liveCalls(path string) []mcpCall {
 		}
 	}
 	return live
+}
+
+// calledServer is the MCP server (and its URL) the recorded call with the
+// tool result's call ID went to, for harnesses whose CallDone hook names
+// it (CallServerFormat): "" without exactly that call.
+func (h *Hook) calledServer(in Input) (server, url string) {
+	if in.ToolCallID == "" {
+		return "", ""
+	}
+	p := h.callsPath(in.Conversation)
+	unlock, err := lockFile(p + ".lock")
+	if err != nil {
+		return "", ""
+	}
+	defer unlock()
+	for _, c := range liveCalls(p) {
+		if c.Call == in.ToolCallID {
+			return c.Server, c.URL
+		}
+	}
+	return "", ""
 }
 
 // ServerNamer is an AliasFormat that says which recorded call a tool
