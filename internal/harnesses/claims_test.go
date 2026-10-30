@@ -35,13 +35,13 @@ func TestClaimName(t *testing.T) {
 			t.Errorf("%s: its claim %q names %q", h.ID, h.Claim, c.ID)
 		}
 		if h.Family != "" && (len(h.Clients) > 0 || h.Fingerprint != "" || len(h.UserAgents) > 0) {
-			t.Errorf("%s: a family member is never recognised by itself", h.ID)
+			t.Errorf("%s: a family member is never recognized by itself", h.ID)
 		}
 	}
 }
 
 // Recognition comes first; a claim refines it only within its family, or
-// decides when nothing (or only a client name others send too) recognised
+// decides when nothing (or only a client name others send too) recognized
 // the call; a claim that contradicts it is ignored.
 func TestRefine(t *testing.T) {
 	cursor, _ := Get("cursor")

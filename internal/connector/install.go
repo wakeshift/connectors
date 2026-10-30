@@ -121,7 +121,7 @@ func (f *hookFile) write() error {
 }
 
 // entry is one hook to add: under event, the JSON to append, and how to
-// recognise it (and older versions of it) in an existing entry.
+// recognize it (and older versions of it) in an existing entry.
 type entry struct {
 	event string
 	json  any

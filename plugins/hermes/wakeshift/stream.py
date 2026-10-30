@@ -45,7 +45,7 @@ class Outdated(Exception):
     is kept for the updated plugin."""
 
 
-# The longest Retry-After honoured.
+# The longest Retry-After honored.
 RETRY_AFTER_MAX = 120.0
 
 # The most delivery IDs one ack may carry (Wakeshift refuses more), and

@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// An unrecognised harness's command is plain POSIX sh: it prints what
+// An unrecognized harness's command is plain POSIX sh: it prints what
 // arrives, confirms it and exits, in sh, bash and zsh alike.
 func TestGenericLoopShells(t *testing.T) {
 	for _, shell := range []string{"sh", "bash", "zsh"} {

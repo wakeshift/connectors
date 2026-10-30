@@ -92,7 +92,7 @@ func (s Settings) Save() error {
 	return os.WriteFile(filepath.Join(s.Dir, "config.json"), append(b, '\n'), 0o600)
 }
 
-// CheckIssuer normalises an issuer URL and refuses anything but https (or
+// CheckIssuer normalizes an issuer URL and refuses anything but https (or
 // localhost, for development).
 func CheckIssuer(issuer string) (string, error) {
 	issuer = strings.TrimSuffix(issuer, "/")

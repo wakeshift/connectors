@@ -101,25 +101,32 @@ func TestMinimums(t *testing.T) {
 }
 
 // Production's minimum (deploy/terraform/production/terraform.tfvars):
-// v1.1.0's own build is served, and every connector built before it (v1.0.0's,
-// a minute before) is refused, for each of the three connectors.
+// the binary from v1.3.1's own build, the plugins from v1.1.0's; every
+// build before its minimum (a minute before, earlier releases) is refused.
 func TestReleaseMinimum(t *testing.T) {
-	m, err := ParseMinimums("wakeshift=2026.10.26.2256,wakeshift-openclaw=2026.10.26.2256,wakeshift-hermes=2026.10.26.2256")
+	m, err := ParseMinimums("wakeshift=2026.10.29.2127,wakeshift-openclaw=2026.10.26.2256,wakeshift-hermes=2026.10.26.2256")
 	if err != nil {
 		t.Fatal(err)
 	}
+	all := []string{Binary, OpenClaw, Hermes}
+	plugins := []string{OpenClaw, Hermes}
 	for _, c := range []struct {
+		names   []string
 		version string
 		want    bool
 	}{
-		{"2026.10.26.2256+9534799", false}, // v1.1.0
-		{"2026.10.27.0011+53d19a4", false}, // later
-		{"2026.10.26.2255+9534799", true},
-		{"2026.10.26.0532+bde2a26", true}, // v1.0.0
-		{"0", true},
-		{"dev", true},
+		{all, "2026.10.29.2127+145cb04", false}, // v1.3.1
+		{all, "2026.10.30.0900+abcdef0", false}, // later
+		{[]string{Binary}, "2026.10.29.2126+145cb04", true},
+		{[]string{Binary}, "2026.10.29.1646+8b2f274", true}, // v1.3.0
+		{[]string{Binary}, "2026.10.26.2256+9534799", true}, // v1.1.0
+		{plugins, "2026.10.26.2256+9534799", false},         // v1.1.0
+		{plugins, "2026.10.26.2255+9534799", true},
+		{plugins, "2026.10.26.0532+bde2a26", true}, // v1.0.0
+		{all, "0", true},
+		{all, "dev", true},
 	} {
-		for _, name := range []string{Binary, OpenClaw, Hermes} {
+		for _, name := range c.names {
 			cl := Client{Name: name, Version: c.version, Harness: "codex"}
 			if got := m.Outdated(cl); got != c.want {
 				t.Errorf("Outdated(%v) = %v, want %v", cl, got, c.want)

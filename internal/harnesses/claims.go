@@ -9,11 +9,11 @@ import "strings"
 // doesn't tell (Grok Bot's and Cursor's cloud agents' calls are Cursor's).
 //
 // Both are self-reported hints. A claim never grants anything: it only
-// refines a harness the call was recognised as into one of its Family
+// refines a harness the call was recognized as into one of its Family
 // (Cursor → Grok Bot or a Cursor cloud agent), or names the harness of a
-// call nothing recognised, which is no more than stating that client name
-// would do (Recognise). A claim that contradicts what the call was
-// recognised as is ignored (Refine).
+// call nothing recognized, which is no more than stating that client name
+// would do (Recognize). A claim that contradicts what the call was
+// recognized as is ignored (Refine).
 
 // The tool arguments' names, as the SDK's ws.args and appkit's Args have
 // them.
@@ -102,25 +102,25 @@ type Outcome string
 const (
 	// NoClaim: the call didn't say.
 	NoClaim Outcome = ""
-	// Confirmed: it's what the call was recognised as.
+	// Confirmed: it's what the call was recognized as.
 	Confirmed Outcome = "confirmed"
-	// Refined: one of the recognised harness's Family (Cursor → Grok Bot).
+	// Refined: one of the recognized harness's Family (Cursor → Grok Bot).
 	Refined Outcome = "refined"
-	// Decided: nothing recognised the call (or only a client name others
+	// Decided: nothing recognized the call (or only a client name others
 	// send too, Unsure), so the claim names its harness.
 	Decided Outcome = "decided"
-	// Unlisted: nothing recognised the call, and the claim names a program
+	// Unlisted: nothing recognized the call, and the claim names a program
 	// Wakeshift doesn't know.
 	Unlisted Outcome = "unlisted"
-	// Ignored: it contradicts what the call was recognised as.
+	// Ignored: it contradicts what the call was recognized as.
 	Ignored Outcome = "ignored"
 )
 
-// Refine is a call's harness given what it was recognised as (detected,
-// ok: Recognise) and what its agent claims. Recognition comes first (the
+// Refine is a call's harness given what it was recognized as (detected,
+// ok: Recognize) and what its agent claims. Recognition comes first (the
 // client name, then _meta, then the User-Agent); the claim only refines
 // it within its Family, or decides when nothing (or only an Unsure client
-// name) recognised the call.
+// name) recognized the call.
 func Refine(detected Harness, ok bool, claim string) (Harness, Outcome) {
 	if ClaimName(claim) == "" {
 		return detected, NoClaim

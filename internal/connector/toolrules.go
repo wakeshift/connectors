@@ -128,7 +128,7 @@ func writeTools(s Settings, st toolsState) error {
 	return err
 }
 
-// rulesLock serialises changes to rules.json, tools.json and the files
+// rulesLock serializes changes to rules.json, tools.json and the files
 // they name: hooks run as separate processes, and an install can run
 // alongside them.
 func rulesLock(s Settings) (func(), error) {
@@ -395,7 +395,7 @@ func (h *Hook) toolServer(in Input) (string, string) {
 		return "", fmt.Sprintf("the MCP server's name (%q) has characters an exact rule can't hold", server)
 	}
 	// Claude Code names tools mcp__<server>__<tool> with the server's name
-	// normalised: the rule must use the same name.
+	// normalized: the rule must use the same name.
 	if p := MCPServerOf(in.ToolName); p != "" && p != server {
 		return "", fmt.Sprintf("the MCP server's name (%q) differs from the one in its tools' names (%q)", server, p)
 	}

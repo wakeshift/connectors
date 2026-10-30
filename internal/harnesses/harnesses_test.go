@@ -179,7 +179,7 @@ func TestInstallNote(t *testing.T) {
 	if InstallCommand(h, "https://x.test") != "" {
 		t.Fatal("a command for a harness with no install")
 	}
-	// Gemini CLI is retired: recognised by its client name only to say it
+	// Gemini CLI is retired: recognized by its client name only to say it
 	// can't be woken and that Antigravity CLI replaced it.
 	h, ok := ForClient("gemini-cli-mcp-client")
 	if !ok || h.Installable || h.ReplacedBy != "antigravity" || InstallCommand(h, "https://x.test") != "" {
@@ -379,19 +379,19 @@ func TestNotesReadNaturally(t *testing.T) {
 }
 
 // Hermes Agent sends the MCP Python SDK's default client name, "mcp", which
-// other Python clients send too: it's recognised by it, but its notes say
+// other Python clients send too: it's recognized by it, but its notes say
 // who they're for and what any other client should expect, and the agent
 // keeps the client's own name.
 func TestUnsure(t *testing.T) {
-	h, via, ok := Recognise("mcp", nil, "python-httpx2/2.12.0")
+	h, via, ok := Recognize("mcp", nil, "python-httpx2/2.12.0")
 	if !ok || h.ID != "hermes" || via != ByClient || h.Unsure == "" {
 		t.Fatalf("%+v %v %v", h, via, ok)
 	}
 	if id := AgentID("mcp"); id != "mcp" {
 		t.Fatalf("agent %q", id)
 	}
-	if _, _, ok := Recognise("", nil, "python-httpx2/2.12.0"); ok {
-		t.Fatal("recognised by the SDK's User-Agent")
+	if _, _, ok := Recognize("", nil, "python-httpx2/2.12.0"); ok {
+		t.Fatal("recognized by the SDK's User-Agent")
 	}
 	if id := AgentID("hermes"); id != "hermes" {
 		t.Fatalf("a client named hermes: %q", id)
@@ -439,10 +439,10 @@ func TestConversationAndCall(t *testing.T) {
 	}
 }
 
-// Recognise: a stated client name wins; without one, a _meta key only one
+// Recognize: a stated client name wins; without one, a _meta key only one
 // harness sends; without that, a User-Agent product token only one sends
 // (the User-Agents captured from the real binaries).
-func TestRecognise(t *testing.T) {
+func TestRecognize(t *testing.T) {
 	codex := map[string]any{"x-codex-turn-metadata": map[string]any{"thread_id": "t1"}}
 	claude := map[string]any{"claudecode/toolUseId": "toolu_1"}
 	for _, c := range []struct {
@@ -487,9 +487,9 @@ func TestRecognise(t *testing.T) {
 		{"", map[string]any{"agent-session-id": "g1", "vscode.conversationId": "v1"}, "", "", ""}, // documented, but no fingerprint
 		{"my-client", nil, "", "", ""},
 	} {
-		h, via, ok := Recognise(c.client, c.meta, c.ua)
+		h, via, ok := Recognize(c.client, c.meta, c.ua)
 		if h.ID != c.want || via != c.via || ok != (c.want != "") {
-			t.Errorf("Recognise(%q, %v, %q) = %q, %q, %v; want %q, %q", c.client, c.meta, c.ua, h.ID, via, ok, c.want, c.via)
+			t.Errorf("Recognize(%q, %v, %q) = %q, %q, %v; want %q, %q", c.client, c.meta, c.ua, h.ID, via, ok, c.want, c.via)
 		}
 	}
 	// Fingerprints and User-Agent tokens each name one harness.

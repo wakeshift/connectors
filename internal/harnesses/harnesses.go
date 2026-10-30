@@ -1,6 +1,6 @@
 // Package harnesses is what Wakeshift's core knows about each agent
-// harness: how to recognise it (the MCP clientInfo name it sends, else a
-// _meta key or User-Agent token only it sends: Recognise), how its
+// harness: how to recognize it (the MCP clientInfo name it sends, else a
+// _meta key or User-Agent token only it sends: Recognize), how its
 // conversations are woken, how a tool result's beacon reaches its hook and
 // is bound to the conversation, and what to tell its agent about installing
 // Wakeshift's hooks (the install command and the harness's own trust step).
@@ -96,7 +96,7 @@ type Harness struct {
 	Unsure string
 	// Fingerprint is a tools/call _meta key (dotted as ConversationMeta)
 	// that only this harness sends, with a string value: how a call is
-	// recognised when the server never saw initialize (a stateless MCP
+	// recognized when the server never saw initialize (a stateless MCP
 	// server). "" if none.
 	Fingerprint string
 	// UserAgents are product tokens (the part before "/") only this
@@ -195,7 +195,7 @@ type Harness struct {
 	// Blocker, if set, is why Wakeshift can't wake it yet.
 	Blocker string
 	// ReplacedBy, if set, is the harness that replaced this retired one
-	// (Gemini CLI: Antigravity CLI). Wakeshift recognises it only to say
+	// (Gemini CLI: Antigravity CLI). Wakeshift recognizes it only to say
 	// so: no install, no beacon.
 	ReplacedBy string
 	// Verified is the version checked against the real binary; "" means
@@ -209,7 +209,7 @@ type Harness struct {
 	Aliases   []string
 	// Family, if set, is the harness whose MCP traffic this one's is
 	// (Grok Bot's and Cursor's cloud agents' calls are Cursor's): it's
-	// never recognised by itself, only claimed by a call recognised as
+	// never recognized by itself, only claimed by a call recognized as
 	// Family (Refine).
 	Family string
 	// Embeds, if set, marks the calls this harness makes through another
@@ -391,12 +391,12 @@ var all = []Harness{
 		// SDK's attach): ChatGPT subscribes natively and starts a run
 		// for each occurrence. What a conversation subscribes to with the
 		// app's own tools waits for its next tool call (appapi
-		// chatgptResult). openai/session only recognises it.
+		// chatgptResult). openai/session only recognizes it.
 		ID: "chatgpt", Name: "ChatGPT", Claim: "chatgpt", Clients: []string{"openai-mcp"}, UserAgents: []string{"openai-mcp"}, Fingerprint: "openai/session",
 		Wake: Events, Ack: "at least once, acknowledged when ChatGPT accepts the webhook (not when the run reads it)",
 		When: "as soon as they arrive, as a new run in the chat (Work chats and dots), for the app's own events it subscribes to",
 	},
-	// Retired: recognised only to tell its agent what replaced it.
+	// Retired: recognized only to tell its agent what replaced it.
 	{
 		ID: "gemini", Name: "Gemini CLI", Clients: []string{"gemini-cli-mcp-client"},
 		Wake: Pull, ReplacedBy: "antigravity",
@@ -487,7 +487,7 @@ func ExactClient(name string) (Harness, bool) {
 	return Harness{}, false
 }
 
-// Via is the signal a call's harness was recognised by.
+// Via is the signal a call's harness was recognized by.
 type Via string
 
 const (
@@ -501,16 +501,16 @@ const (
 	ByUserAgent Via = "user_agent"
 )
 
-// Recognise is the harness a tool call came from and how it was told: by
+// Recognize is the harness a tool call came from and how it was told: by
 // the client name if that names a harness (a stated client always wins:
 // _meta and the User-Agent never override it, except the _meta that says
 // another harness runs that client, Harness.Embeds), else by a Fingerprint key
 // in the call's _meta, else by a product token in the User-Agent. A
 // stateless MCP server (a new server per request) never sees initialize,
 // so it has no client name; the other two come with every call. Every
-// signal is self-asserted, the client name included: recognising a harness
+// signal is self-asserted, the client name included: recognizing a harness
 // by one grants nothing that stating its client name doesn't.
-func Recognise(client string, meta map[string]any, userAgent string) (Harness, Via, bool) {
+func Recognize(client string, meta map[string]any, userAgent string) (Harness, Via, bool) {
 	for _, h := range all {
 		if Embedded(h, meta) { // the stated client is the one it runs
 			return h, ByMeta, true
@@ -723,7 +723,7 @@ func InstallNote(h Harness, base string) string {
 	return unsure(h, installNote(h, InstallCommand(h, base)))
 }
 
-// unsure is a note for a harness recognised by a client name others send
+// unsure is a note for a harness recognized by a client name others send
 // too (Unsure): for it if the condition holds, and otherwise CantWake.
 func unsure(h Harness, note string) string {
 	if h.Unsure == "" {
@@ -749,7 +749,7 @@ func installNote(h Harness, install string) string {
 		return CantWake(h.Name)
 	}
 	if h.ZeroInstall == Monitor {
-		return "You can be woken now with the Monitor tool on your stream link (it's restarted about once an hour). " + upgradeNote(h, install)
+		return "You can be woken now with the Monitor tool on your stream link (started again every 25 minutes, since Claude Code stops a Monitor after 30). " + upgradeNote(h, install)
 	}
 	if h.ZeroInstall == Background {
 		return "You can be woken now, within seconds even while idle, by a command you start in the background (subscribing gives it). " + backgroundUpgrade(h, install)
@@ -824,6 +824,12 @@ func askWith(h Harness, install string) string {
 	return n + "."
 }
 
+// monitorLimit is why the hooks are better for anything that runs long:
+// the Monitor has to be started again every 25 minutes (MonitorRestart),
+// and in manual permission mode each start asks the user to approve it
+// (Claude Code 2.1.312's "Yes" covers only that once).
+const monitorLimit = "Claude Code stops a Monitor after 30 minutes, so you start it again every 25, and in manual permission mode each start asks the user to approve it. "
+
 // UpgradeNote, for a harness that's woken without installing anything
 // (Claude Code's Monitor), offers Wakeshift's hooks as the better path.
 func UpgradeNote(h Harness, base string) string { return upgradeNote(h, InstallCommand(h, base)) }
@@ -834,7 +840,7 @@ func upgradeNote(h Harness, install string) string {
 	}
 	var n string
 	if h.AskTool != "" {
-		n = "For delivery without a Monitor, the user can install Wakeshift's hooks for " + h.Name + ". Start the Monitor first either way: it wakes you until the hooks connect. " + askWith(h, install)
+		n = monitorLimit + "For delivery without a Monitor, with no such limit, the user can install Wakeshift's hooks for " + h.Name + ". Start the Monitor first either way: it wakes you until the hooks connect. " + askWith(h, install)
 	} else {
 		n = "For delivery without a Monitor, the user can install Wakeshift's hooks for " + h.Name + " (it " + h.Changes + "). " +
 			"Ask them first. " + ShowAgree + " Only if they agree, run `" + install + "`."

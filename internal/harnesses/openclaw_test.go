@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// OpenClaw is recognised by the client name its own runtime sends
+// OpenClaw is recognized by the client name its own runtime sends
 // (captured from 2026.10.4), and by Codex's _meta when it runs the turn in
 // Codex's app-server, where Codex's client name doesn't make it Codex's.
 // Only the exact thread_source value counts.
@@ -27,7 +27,7 @@ func TestOpenClaw(t *testing.T) {
 		{"codex-mcp-client", "", codexMeta(7), "codex", ByClient},
 		{"", "undici", nil, "", ""}, // Node's default User-Agent names nothing
 	} {
-		h, via, ok := Recognise(c.client, c.meta, c.ua)
+		h, via, ok := Recognize(c.client, c.meta, c.ua)
 		if h.ID != c.want || via != c.via || ok != (c.want != "") {
 			t.Errorf("%q %q %v: %s %s %v", c.client, c.ua, c.meta, h.ID, via, ok)
 		}

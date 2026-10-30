@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -160,6 +161,45 @@ func TestMonitorLoop(t *testing.T) {
 	}
 	if !strings.Contains(w.qs()[0], "until=hooks") {
 		t.Fatalf("queries %q", w.qs())
+	}
+}
+
+// Claude Code stops a Monitor after 30 minutes, so its loop ends first, by
+// itself: after MonitorRestart it confirms what it printed and ends with a
+// hub.restart line (valid JSON) saying to start it again the same way,
+// without asking the user.
+func TestMonitorLoopRestarts(t *testing.T) {
+	quiet := make([]string, 4000)
+	for i := range quiet {
+		quiet[i] = "NEXT\n"
+	}
+	w := &waitScript{answers: append([]string{ev1 + "\n" + cursorA + "\nNEXT\n"}, quiet...)}
+	out := runShell(t, monitorLoop(w.serve(t), 1))
+	if len(out) != 2 || out[0] != ev1 {
+		t.Fatalf("printed %q", out)
+	}
+	var last struct{ Type, Note string }
+	if err := json.Unmarshal([]byte(out[1]), &last); err != nil || last.Type != "hub.restart" {
+		t.Fatalf("last line %q: %v", out[1], err)
+	}
+	for _, want := range []string{"Start the Monitor tool again now with the same command and timeout_ms " + MonitorTimeout, "without asking the user", "nothing was missed", "only if it fails to start"} {
+		if !strings.Contains(last.Note, want) {
+			t.Errorf("note missing %q: %s", want, last.Note)
+		}
+	}
+	if c := w.confs(); len(c) != 1 || c[0] != "00000000000000aa" {
+		t.Fatalf("confirmed before ending: %q", c)
+	}
+	if n := len(w.qs()); n < 2 || n >= len(w.answers) {
+		t.Fatalf("%d rounds", n)
+	}
+	// The real one ends with its round in progress (curl -m 90) and a
+	// retry's sleep well inside Claude Code's 30 minutes.
+	if !strings.Contains(MonitorLoop("https://x.test/w?link=a"), "-ge "+strconv.Itoa(MonitorRestart)+" ]") || MonitorRestart+90+5 >= 30*60-60 {
+		t.Fatal("MonitorLoop doesn't end well before Claude Code's limit")
+	}
+	if MonitorTimeout != "1800000" || !strings.Contains(MonitorWith, "timeout_ms "+MonitorTimeout) {
+		t.Fatalf("timeout %s, %s", MonitorTimeout, MonitorWith)
 	}
 }
 

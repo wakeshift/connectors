@@ -10,6 +10,15 @@
 // client, so the connector never subscribes to the thread (which would keep
 // it loaded) and never polls.
 //
+// A turn the model fails (at capacity, say) leaves the thread in
+// systemError rather than idle, and it stays there until a turn succeeds.
+// Codex still takes a turn there, so the connector starts one, and
+// acknowledges its events only once that turn ends idle (it succeeded). A
+// turn of its own that fails, from idle or not, keeps its events for the
+// next try, after a capped backoff (RetryAfter, doubling up to RetryMax),
+// so a model that's down isn't sent turn after turn; the thread going idle
+// (the user's turn succeeded) ends the wait at once.
+//
 // It exits when its watch ends: the link is revoked (close code 4001, or a
 // refused link), another connection takes the stream (4000), the thread is
 // archived or deleted, Codex's socket goes away, the TUI showing the thread
@@ -94,7 +103,12 @@ type Config struct {
 	// failing, as it does once the thread is deleted) before the connector
 	// takes it as deleted (0: unreadableGrace).
 	GoneAfter time.Duration
-	Log       *slog.Logger
+	// RetryAfter: how long to wait after a turn of ours fails before trying
+	// again (0: retryAfter); each failure in a row doubles it, up to RetryMax
+	// (0: retryMax).
+	RetryAfter time.Duration
+	RetryMax   time.Duration
+	Log        *slog.Logger
 }
 
 // Run delivers until the watch ends, and says why.
@@ -182,6 +196,7 @@ type delivery struct {
 	App   string // the display name of the app it came through
 	Event map[string]any
 	gen   uint64 // which copy (conn.seen): a copy taken meanwhile isn't delivered
+	acked bool   // acknowledged already (its turn started from idle, then failed)
 }
 
 type conn struct {
@@ -193,9 +208,15 @@ type conn struct {
 	// (a "taken" frame, an ack's receipt, a ping's pong).
 	arrived chan struct{}
 
-	mu          sync.Mutex
-	status      string // the thread's: idle, active, notLoaded, systemError
-	ours        bool   // a turn we started hasn't finished
+	mu     sync.Mutex
+	status string // the thread's: idle, active, notLoaded, systemError
+	ours   bool   // a turn we started hasn't finished
+	// judging: a turn we started hasn't been judged yet; ended is how it
+	// ended, once known: idle (it succeeded) or systemError (it failed).
+	judging     bool
+	ended       string
+	failures    int       // our turns that failed in a row
+	retryAt     time.Time // when to try again after the last of them
 	lastUsed    time.Time
 	changed     chan struct{}
 	ws          *websocket.Conn
@@ -215,6 +236,11 @@ func (c *conn) setStatus(s string) {
 	}
 	if s != "active" {
 		c.ours = false
+	}
+	// Our turn's outcome is the first idle or systemError after it started
+	// (notLoaded says neither: a window reloading the thread).
+	if c.judging && !c.ours && c.ended == "" && (s == "idle" || s == "systemError") {
+		c.ended = s
 	}
 	c.status = s
 	c.mu.Unlock()
@@ -632,7 +658,7 @@ func (c *conn) streamOnce(ctx context.Context, link string) (next string, err er
 				c.seen[m.DeliveryID] = c.gen
 			}
 			if !dup {
-				c.queue = append(c.queue, delivery{m.DeliveryID, m.App, m.Event, c.gen})
+				c.queue = append(c.queue, delivery{ID: m.DeliveryID, App: m.App, Event: m.Event, gen: c.gen})
 			}
 			c.mu.Unlock()
 			if !dup {
@@ -742,11 +768,15 @@ func (c *conn) gather(ctx context.Context) ([]delivery, bool) {
 	return batch, true
 }
 
-// startTurn starts a turn with batch once the thread is idle, and confirms
-// what it started with. False if the connector stopped meanwhile.
+// startTurn starts a turn with batch once the thread can take one, and
+// confirms what it started with: at once from idle (the thread has them),
+// and once the turn succeeds from systemError (a model failure left the
+// thread there, and the next turn may fail too). A turn of ours that fails
+// keeps its batch for the next try, after the backoff. False if the
+// connector stopped meanwhile.
 func (c *conn) startTurn(ctx context.Context, batch []delivery) bool {
 	for {
-		if !c.waitIdle(ctx) {
+		if !c.waitTurnable(ctx) {
 			return false
 		}
 		if err := c.readStatus(ctx); errors.Is(err, errDisconnected) {
@@ -754,11 +784,12 @@ func (c *conn) startTurn(ctx context.Context, batch []delivery) bool {
 				return false
 			}
 			continue
-		} else if err != nil { // still open, and still idle?
+		} else if err != nil { // still open, and still able to take a turn?
 			c.cancel(err)
 			return false
 		}
-		if !c.claimIdle() {
+		from, ok := c.claim()
+		if !ok {
 			continue
 		}
 		// What arrived while the thread was busy comes in this turn too,
@@ -766,6 +797,9 @@ func (c *conn) startTurn(ctx context.Context, batch []delivery) bool {
 		if batch = c.current(c.more(batch)); len(batch) == 0 {
 			c.release()
 			return true
+		}
+		if from == "systemError" {
+			c.cfg.Log.Info("codex: the thread's last turn failed; starting one anyway, acknowledged once it succeeds", "events", len(batch))
 		}
 		_, err := c.appNow().call(ctx, "turn/start", map[string]any{"threadId": c.cfg.Thread, "input": []any{},
 			"toolOutput": map[string]any{"name": "wakeshift_event", "output": payload(batch...)}})
@@ -775,6 +809,9 @@ func (c *conn) startTurn(ctx context.Context, batch []delivery) bool {
 			case stopped:
 				return false
 			case retryTurn:
+				continue
+			case failedTurn:
+				c.failed(len(batch))
 				continue
 			}
 			// Not acknowledged: Wakeshift redelivers them.
@@ -791,12 +828,114 @@ func (c *conn) startTurn(ctx context.Context, batch []delivery) bool {
 			c.status = "active"
 		}
 		c.mu.Unlock()
-		// The turn started with them: confirmed.
-		for _, d := range batch {
-			c.cfg.Log.Info("codex: delivered", "delivery", d.ID, "batch", len(batch))
-			c.ack(ctx, d.ID)
+		if from == "idle" {
+			c.confirm(ctx, batch) // the turn started with them
 		}
+		ended, ok := c.outcome(ctx)
+		if !ok {
+			return false
+		}
+		if ended == "systemError" {
+			// The model failed the turn: the same batch (and what comes
+			// meanwhile) next time, after the backoff.
+			c.failed(len(batch))
+			continue
+		}
+		c.confirm(ctx, batch)
+		c.recovered()
 		return true
+	}
+}
+
+// confirm acknowledges what in batch isn't yet, and isn't another's now
+// (an app's wait took it during the turn: "taken").
+func (c *conn) confirm(ctx context.Context, batch []delivery) {
+	for i := range batch {
+		if batch[i].acked || !c.held(batch[i]) {
+			continue
+		}
+		batch[i].acked = true
+		c.cfg.Log.Info("codex: delivered", "delivery", batch[i].ID, "batch", len(batch))
+		c.ack(ctx, batch[i].ID)
+	}
+}
+
+// held says whether d is still the connector's copy (not taken since).
+func (c *conn) held(d delivery) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	g, ok := c.seen[d.ID]
+	return ok && g == d.gen
+}
+
+// retryAfter and retryMax: the backoff after our turns fail (Config).
+const (
+	retryAfter = 15 * time.Second
+	retryMax   = 5 * time.Minute
+)
+
+// backoff is how long to wait after the nth failure in a row.
+func (c *conn) backoff(n int) time.Duration {
+	first, most := c.cfg.RetryAfter, c.cfg.RetryMax
+	if first <= 0 {
+		first = retryAfter
+	}
+	if most <= 0 {
+		most = retryMax
+	}
+	d := first
+	for i := 1; i < n && d < most; i++ {
+		d *= 2
+	}
+	return min(d, most)
+}
+
+// failed records that a turn of ours with n events failed, and when to try
+// again.
+func (c *conn) failed(n int) {
+	c.mu.Lock()
+	c.failures++
+	failures := c.failures
+	wait := c.backoff(failures)
+	c.retryAt = time.Now().Add(wait)
+	c.mu.Unlock()
+	c.cfg.Log.Warn("codex: the turn failed (the model may be unavailable); holding its events to try again",
+		"events", n, "failed_turns", failures, "retry_in", wait.String())
+}
+
+// recovered: a turn of ours succeeded, after failures if any.
+func (c *conn) recovered() {
+	c.mu.Lock()
+	failures := c.failures
+	c.failures, c.retryAt = 0, time.Time{}
+	c.mu.Unlock()
+	if failures > 0 {
+		c.cfg.Log.Info("codex: the model is back; delivered the held events", "failed_turns", failures)
+	}
+}
+
+// outcome waits for the turn we started to end, and says how: idle (it
+// succeeded) or systemError (it failed). False if the connector stopped
+// meanwhile.
+func (c *conn) outcome(ctx context.Context) (string, bool) {
+	defer func() { c.mu.Lock(); c.judging, c.ended = false, ""; c.mu.Unlock() }()
+	for {
+		c.mu.Lock()
+		ended := c.ended
+		c.mu.Unlock()
+		if ended != "" {
+			return ended, true
+		}
+		select {
+		case <-ctx.Done():
+			return "", false
+		case <-c.changed:
+		case <-time.After(30 * time.Second): // a missed broadcast; re-read
+			if err := c.readStatus(ctx); err != nil && !errors.Is(err, errDisconnected) {
+				c.cancel(err)
+				return "", false
+			}
+		}
 	}
 }
 
@@ -804,9 +943,10 @@ func (c *conn) startTurn(ctx context.Context, batch []delivery) bool {
 type afterRefusal int
 
 const (
-	retryTurn afterRefusal = iota // the same batch, once the thread is idle
-	dropBatch                     // left unacknowledged, for Wakeshift to redeliver
-	stopped                       // the connector stopped
+	retryTurn  afterRefusal = iota // the same batch, once the thread can take a turn
+	failedTurn                     // the same batch, after the backoff
+	dropBatch                      // left unacknowledged, for Wakeshift to redeliver
+	stopped                        // the connector stopped
 )
 
 // refused decides what follows turn/start's err.
@@ -822,12 +962,15 @@ func (c *conn) refused(ctx context.Context, err error) afterRefusal {
 		time.Sleep(500 * time.Millisecond) // a turn began between the check and here
 		return retryTurn
 	}
-	// Refused for another reason: if the thread is no longer idle (unloaded
-	// between the check and here, as a window resuming it does), the same
-	// batch once it is. Codex's errors carry no code to tell, so its status
-	// says.
+	// Refused for another reason: if the thread can no longer take a turn
+	// (unloaded between the check and here, as a window resuming it does),
+	// the same batch once it can; in systemError, after the backoff, as for
+	// a turn that failed. Codex's errors carry no code to tell, so its
+	// status says.
 	switch err := c.readStatus(ctx); {
-	case err == nil && !c.idle():
+	case err == nil && c.statusIs("systemError"):
+		return failedTurn
+	case err == nil && !c.statusIs("idle"):
 		return retryTurn
 	case err == nil:
 		return dropBatch
@@ -841,29 +984,46 @@ func (c *conn) refused(ctx context.Context, err error) afterRefusal {
 	}
 }
 
-// idle says whether the thread was idle when its status was last read.
-func (c *conn) idle() bool {
+// statusIs says whether the thread's status, as last read, is s.
+func (c *conn) statusIs(s string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.status == "idle"
+	return c.status == s
 }
 
-// claimIdle marks the turn about to start as the connector's own, if the
-// thread is idle, and says whether it is.
-func (c *conn) claimIdle() bool {
+// turnable says whether the thread can take a turn of ours now: idle, or
+// in systemError once the backoff after our last failed turn has passed
+// (else how long that is).
+func (c *conn) turnable() (bool, time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	idle := c.status == "idle"
-	if idle {
-		c.ours = true
+	switch c.status {
+	case "idle":
+		return true, 0
+	case "systemError":
+		wait := time.Until(c.retryAt)
+		return wait <= 0, wait
 	}
-	return idle
+	return false, 0
 }
 
-// release gives up the turn claimIdle claimed.
+// claim marks the turn about to start as the connector's own, if the
+// thread can take it, and says what its status was.
+func (c *conn) claim() (string, bool) {
+	c.mu.Lock()
+	ok := c.status == "idle" || c.status == "systemError" && !time.Now().Before(c.retryAt)
+	if ok {
+		c.ours, c.judging, c.ended = true, true, ""
+	}
+	from := c.status
+	c.mu.Unlock()
+	return from, ok
+}
+
+// release gives up the turn claim claimed.
 func (c *conn) release() {
 	c.mu.Lock()
-	c.ours = false
+	c.ours, c.judging, c.ended = false, false, ""
 	c.mu.Unlock()
 }
 
@@ -881,16 +1041,22 @@ func (c *conn) current(batch []delivery) []delivery {
 	return out
 }
 
-func (c *conn) waitIdle(ctx context.Context) bool {
+// waitTurnable waits until the thread can take a turn of ours (turnable).
+func (c *conn) waitTurnable(ctx context.Context) bool {
 	for {
-		if c.idle() {
+		ok, wait := c.turnable()
+		if ok {
 			return true
+		}
+		reread := 30 * time.Second // a missed broadcast
+		if wait > 0 && wait < reread {
+			reread = wait // the backoff ends first: re-read then, and try
 		}
 		select {
 		case <-ctx.Done():
 			return false
 		case <-c.changed:
-		case <-time.After(30 * time.Second): // a missed broadcast; re-read
+		case <-time.After(reread):
 			if err := c.readStatus(ctx); err != nil && !errors.Is(err, errDisconnected) {
 				c.cancel(err)
 				return false

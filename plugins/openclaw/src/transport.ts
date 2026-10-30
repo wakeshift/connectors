@@ -1,6 +1,6 @@
 // Transport for one conversation's Wakeshift stream link: reading only. It
 // owns no delivery state (deliveries.ts does): it hands each delivery it
-// reads to `receive`, and sends acknowledgements when asked (`ack`).
+// reads to `receive`, and sends acknowledgments when asked (`ack`).
 //
 // Server-Sent Events first (GET /v1/stream?format=sse), long polling (GET
 // /v1/stream/poll) as the fallback when SSE doesn't get through (a proxy

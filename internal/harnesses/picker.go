@@ -59,8 +59,8 @@ func Picker() []PickerAgent {
 			Steps:  []PickerStep{run("claude mcp add --transport http {name} {url}")},
 			SignIn: "If it doesn't open a browser to sign in, type /mcp in Claude Code, choose {name}, then Authenticate.",
 			Wakes: []string{
-				"Claude Code asks you to approve a background monitor. Approve it, and {each} wakes the agent within seconds, even when it's idle.",
-				"Nothing to install. If the agent offers to install Wakeshift's hooks, they're optional.",
+				"Claude Code starts a background monitor (in manual permission mode, it asks you to approve it). Then {each} wakes the agent within seconds, even when it's idle.",
+				"Nothing to install. Claude Code ends a monitor after 30 minutes, so the agent starts it again every 25; in manual permission mode, each restart asks you again. If the agent offers to install Wakeshift's hooks, they're optional: they wake it with no monitor and nothing more to approve.",
 			},
 		},
 		{
