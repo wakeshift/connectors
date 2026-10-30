@@ -190,7 +190,7 @@ type Harness struct {
 	// once).
 	NoteAt string
 	// Review: the harness holds new hooks until the user reviews them
-	// (Codex's /hooks), so a hook that's installed may still need Trust.
+	// (Codex's review when it starts), so a hook that's installed may still need Trust.
 	Review bool
 	// Blocker, if set, is why Wakeshift can't wake it yet.
 	Blocker string
@@ -212,6 +212,12 @@ type Harness struct {
 	// never recognized by itself, only claimed by a call recognized as
 	// Family (Refine).
 	Family string
+	// Tasks: with nothing installed, a call whose client takes MCP tasks
+	// (protocol 2026-07-28 with the tasks extension, which the app's SDK
+	// reports) is woken by Wakeshift's wait tool answered with a task
+	// (TaskNote) instead of ZeroInstall (Claude Code: instead of Monitor).
+	// The switch for the task path, per harness.
+	Tasks bool
 	// Embeds, if set, marks the calls this harness makes through another
 	// harness's MCP client (OpenClaw running its turns in Codex's
 	// app-server): a tools/call _meta key (dotted as ConversationMeta) and
@@ -246,21 +252,21 @@ var all = []Harness{
 		ConversationMeta: "x-codex-turn-metadata.thread_id", Fingerprint: "x-codex-turn-metadata.thread_id", Installable: true,
 		Changes: "adds Wakeshift's hook to ~/.codex/hooks.json, keeping a backup",
 		Run:     "It needs network access and writes ~/.wakeshift/bin and ~/.codex/hooks.json, which the sandbox blocks: run it with escalated permissions, so the user approves it.",
-		Trust:   "In Codex, type /hooks and press t to trust the Wakeshift hooks (or restart Codex and choose Trust).",
+		Trust:   "Quit Codex (/quit), start it again in this conversation with `codex resume --last`, and trust the Wakeshift hooks when Codex asks (\"Trust all and continue\").",
 		Resume:  "Then send any message here (\"done\" is enough), so I can connect this conversation.",
 		// Codex runs its SessionStart hook when the resumed thread's first turn
 		// starts, not when the window opens (wakebench S8, October 28: the
 		// connector re-armed only at the next prompt), so a restart needs one.
 		Restart:     "After a later restart, send any message in this thread once it's open again, so I can reconnect it.",
-		AfterUpdate: "Codex keeps trusting the hooks it trusted, since their command stays the same; if Codex asks (an update can add one, or a hook stops running), type /hooks and press t.",
+		AfterUpdate: "Codex keeps trusting the hooks it trusted, since their command stays the same; if Codex asks the next time it starts (an update can add one, or a hook stops running), choose \"Trust all and continue\".",
 		When:        "as soon as they arrive, or once its turn ends if it's busy, while the thread is open in Codex",
 		NoteAt:      "right after this result",
 		Review:      true,
-		Verified:    "0.163.0",
+		Verified:    "0.166.0",
 	},
 	{
 		ID: "claude-code", Name: "Claude Code", Claim: "claude-code", Aliases: []string{"claude", "claude-cli"}, Clients: []string{"claude-code"}, UserAgents: []string{"claude-code"},
-		Wake: Rewake, ZeroInstall: Monitor, Ack: "at least once, acknowledged when the hook hands the message over",
+		Wake: Rewake, ZeroInstall: Monitor, Tasks: true, Ack: "at least once, acknowledged when the hook hands the message over",
 		Binding: ByCall, Carrier: Meta, CallMeta: "claudecode/toolUseId", Fingerprint: "claudecode/toolUseId", Installable: true,
 		Changes: "adds three hooks to ~/.claude/settings.json and pre-approves Wakeshift's own wait command there (~/.wakeshift/bin/wakeshift wait), so Claude Code runs it without asking, keeping a backup",
 		AskTool: "AskUserQuestion", UserShell: "!", ToolRules: true,
@@ -705,14 +711,13 @@ const Connected = "Wakeshift: connected"
 // unwoken is what a conversation nothing delivers to is told.
 const unwoken = "Wakeshift can't wake this conversation yet: new messages are held until you call this tool again."
 
-// InstallAgree is the agreement line for the wakeshift program and its
-// connectors (Connector Terms Section 3.1): every offer to install or update
-// them has the agent show it to the user, word for word, as it asks
-// (ShowAgree). It is written once, here.
-const InstallAgree = "By installing, you agree to Wakeshift's Connector Terms (https://wakeshift.ai/connector-terms) and Privacy Policy (https://wakeshift.ai/privacy)."
-
-// ShowAgree tells the agent to show InstallAgree when it asks.
-const ShowAgree = "When you ask, show them this line, word for word: \"" + InstallAgree + "\""
+// TermsLine is the line every installer for the wakeshift program and its
+// connectors prints (internal/downloads): the Connector Terms and the
+// Privacy Policy apply to it (Connector Terms Section 3.1). Agents don't
+// relay it: an app's own terms carry both documents to its users (Terms of
+// Service Section 6.6). The offers still ask the user, and the install runs
+// only on a yes. It is written once, here.
+const TermsLine = "Wakeshift's Connector Terms (https://wakeshift.ai/connector-terms) and Privacy Policy (https://wakeshift.ai/privacy) apply to this connector."
 
 // InstallNote is what an agent in this harness should tell its user
 // while nothing delivers Wakeshift's messages to its conversation: whether
@@ -756,7 +761,7 @@ func installNote(h Harness, install string) string {
 	}
 	install = agreed(h, install)
 	ask := unwoken + " Ask the user now whether to install Wakeshift's hooks for " + h.Name + " (it " + h.Changes + "), so new messages reach this conversation " + h.When + ". " +
-		askAlso(h) + ShowAgree + " Only if they agree, run `" + install + "`. "
+		askAlso(h) + "Only if they agree, run `" + install + "`. "
 	if h.AskTool != "" {
 		ask = unwoken + " Wakeshift's hooks for " + h.Name + " deliver new messages to this conversation " + h.When + ". " + askWith(h, install) + " "
 	}
@@ -814,9 +819,13 @@ func askWith(h Harness, install string) string {
 	if h.ZeroInstall == Monitor {
 		no = "messages still wake this conversation through the Monitor"
 	}
+	return askWithNo(h, install, no)
+}
+
+// askWithNo is askWith with the "no" option's description given.
+func askWithNo(h Harness, install, no string) string {
 	n := "Ask them with your " + h.AskTool + " tool, with two options: \"" + AskYes(h) + "\" (description: runs `" + install + "`, " + h.Changes + ") " +
 		"and \"" + AskNo + "\" (description: " + no + "). " +
-		"Put this line in the question, word for word: \"" + InstallAgree + "\" " +
 		"Run `" + install + "` only if they pick yes"
 	if h.UserShell != "" {
 		n += "; if running it is refused (auto mode or a permission denial), ask them to run it themselves by typing `" + h.UserShell + " " + install + "` (the " + h.UserShell + " prefix runs it as the user)"
@@ -843,12 +852,30 @@ func upgradeNote(h Harness, install string) string {
 		n = monitorLimit + "For delivery without a Monitor, with no such limit, the user can install Wakeshift's hooks for " + h.Name + ". Start the Monitor first either way: it wakes you until the hooks connect. " + askWith(h, install)
 	} else {
 		n = "For delivery without a Monitor, the user can install Wakeshift's hooks for " + h.Name + " (it " + h.Changes + "). " +
-			"Ask them first. " + ShowAgree + " Only if they agree, run `" + install + "`."
+			"Ask them first. Only if they agree, run `" + install + "`."
 	}
 	n += " After that, call this tool again right away, in the same turn and without waiting for the user: the hooks work in this session already, but they connect this conversation only from a result that comes after the install, so until you call it they can't wake you. Once they connect it, a note \"" + Connected + "\" appears " + h.NoteAt + ", and they deliver instead of the Monitor."
 	if t := TrustNote(h); t != "" {
 		// Last, for the reply after that call: placed before the call, an
 		// agent hurrying to call again skipped it (wakebench S6).
+		n += " Then, in your reply to the user, also tell them this: " + t
+	}
+	return n
+}
+
+// TaskUpgradeNote is UpgradeNote for a conversation on the MCP task path
+// (TaskNote), which has no time limit: the hooks are an optional upgrade
+// there (an acknowledgment for each message, and Claude Code's other
+// apps), offered with the same consent.
+func TaskUpgradeNote(h Harness, base string) string {
+	if !h.Installable || h.AskTool == "" {
+		return ""
+	}
+	install := InstallCommand(h, base)
+	n := "The user can also install Wakeshift's hooks for " + h.Name + ", which deliver without " + WaitTool + " and acknowledge each message as it reaches you. Call " + WaitTool + " first either way: it wakes you until the hooks connect. " +
+		askWithNo(h, install, "messages still wake this conversation through "+WaitTool) +
+		" After that, call this tool again right away, in the same turn and without waiting for the user: the hooks work in this session already, but they connect this conversation only from a result that comes after the install. Once they connect it, a note \"" + Connected + "\" appears as " + WaitTool + "'s result, or with your next tool result or wake, and they deliver instead of " + WaitTool + "."
+	if t := TrustNote(h); t != "" {
 		n += " Then, in your reply to the user, also tell them this: " + t
 	}
 	return n
@@ -882,7 +909,7 @@ func RepeatNoteFor(h Harness, install string) string {
 	if !h.Installable {
 		return unsure(h, installNote(h, install))
 	}
-	ask := "If you haven't asked the user yet whether to install them (it " + h.Changes + "), ask now. " + askAlso(h) + ShowAgree + " If they agreed and it hasn't run, run `" + agreed(h, install) + "`." + sep(h.Run)
+	ask := "If you haven't asked the user yet whether to install them (it " + h.Changes + "), ask now. " + askAlso(h) + "If they agreed and it hasn't run, run `" + agreed(h, install) + "`." + sep(h.Run)
 	if h.AskTool != "" {
 		ask = "If you haven't asked the user yet whether to install them, ask now. " + askWith(h, install)
 	}

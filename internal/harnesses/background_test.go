@@ -174,7 +174,9 @@ func TestMonitorLoopRestarts(t *testing.T) {
 		quiet[i] = "NEXT\n"
 	}
 	w := &waitScript{answers: append([]string{ev1 + "\n" + cursorA + "\nNEXT\n"}, quiet...)}
-	out := runShell(t, monitorLoop(w.serve(t), 1))
+	// Two seconds, not one: the loop counts whole seconds (date +%s), so a
+	// run that straddles a second boundary would end after one round.
+	out := runShell(t, monitorLoop(w.serve(t), 2))
 	if len(out) != 2 || out[0] != ev1 {
 		t.Fatalf("printed %q", out)
 	}

@@ -1,6 +1,7 @@
 package harnesses
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -20,9 +21,9 @@ func TestUpdateNotes(t *testing.T) {
 		}
 		install := InstallCommand(h, base)
 		n := UpdateNote(h, base)
-		wants := []string{Outdated(h), "Ask the user now whether to update them", "Only if they agree, run `" + install + "`.", InstallAgree, h.AfterUpdate, `"` + Connected + `" confirms it`, "held for you"}
+		wants := []string{Outdated(h), "Ask the user now whether to update them", "Only if they agree, run `" + install + "`.", h.AfterUpdate, `"` + Connected + `" confirms it`, "held for you"}
 		if h.AskTool != "" { // Claude Code: its AskUserQuestion, two options, and the user's own shell if refused
-			wants = []string{Outdated(h), "with your " + h.AskTool + " tool", `"` + UpdateYes(h) + `"`, `"` + UpdateNo + `"`, "Only if they agree (they pick yes), run `" + install + "`", InstallAgree,
+			wants = []string{Outdated(h), "with your " + h.AskTool + " tool", `"` + UpdateYes(h) + `"`, `"` + UpdateNo + `"`, "Only if they agree (they pick yes), run `" + install + "`",
 				"typing `" + h.UserShell + " " + install + "`", h.AfterUpdate, `"` + Connected + `" confirms it`}
 		}
 		for _, want := range wants {
@@ -33,7 +34,7 @@ func TestUpdateNotes(t *testing.T) {
 		if h.Unsure != "" && !strings.HasPrefix(n, "If "+h.Unsure+": ") {
 			t.Errorf("%s: %s", h.ID, n)
 		}
-		if r := UpdateRequired(h, base); !strings.HasPrefix(r, Outdated(h)+" Ask the user whether to update them. "+ShowAgree+" Only if they agree, run `"+install+"`.") {
+		if r := UpdateRequired(h, base); !strings.HasPrefix(r, Outdated(h)+" Ask the user whether to update them. Only if they agree, run `"+install+"`.") {
 			t.Errorf("%s: refusal %s", h.ID, r)
 		}
 	}
@@ -42,10 +43,21 @@ func TestUpdateNotes(t *testing.T) {
 	}
 }
 
-// Every offer to install or update Wakeshift's hooks has the agent show
-// the user the Connector Terms' agreement line (InstallAgree) as it asks.
-func TestOffersShowAgreement(t *testing.T) {
+// Every offer to install or update Wakeshift's hooks asks the user and
+// runs the installer only on a yes. None has the agent relay a legal
+// notice: the installer prints TermsLine, and an app's own terms carry the
+// Connector Terms and the Privacy Policy to its users.
+func TestOffersAskWithoutNotice(t *testing.T) {
 	const base = "https://app.wakeshift.ai"
+	// Each install command in an offer is gated: it follows "only if they
+	// agree" (or "want it"), "if they agreed and it hasn't run", the yes
+	// option's description, or the user's own shell after a refusal, or it is
+	// followed by "only if they pick yes".
+	command := regexp.MustCompile("`[^`]*/install/[^`]*`")
+	gate := regexp.MustCompile(`(?i)(only if they (agree|want it)[^.` + "`" + `]*, run |if they agreed and it hasn't run, run |\(description: runs |by typing )$`)
+	if bad := "Install Wakeshift's hooks: run `curl -fsSL https://x/install/codex.sh | sh` now."; gate.MatchString(bad[:strings.Index(bad, "`")]) {
+		t.Errorf("the gate accepts an ungated command: %s", bad)
+	}
 	for _, h := range All() {
 		if !h.Installable || h.ReplacedBy != "" {
 			continue
@@ -64,8 +76,20 @@ func TestOffersShowAgreement(t *testing.T) {
 			offers["background"] = BackgroundUpgradeNote(h, base)
 		}
 		for name, n := range offers {
-			if !strings.Contains(n, InstallAgree) {
-				t.Errorf("%s: the %s offer lacks the agreement line: %s", h.ID, name, n)
+			cmds := command.FindAllStringIndex(n, -1)
+			if len(cmds) == 0 {
+				t.Errorf("%s: the %s offer has no install command: %s", h.ID, name, n)
+			}
+			for _, c := range cmds {
+				before, after := n[max(0, c[0]-80):c[0]], n[c[1]:]
+				if !gate.MatchString(before) && !strings.HasPrefix(after, " only if they pick yes") {
+					t.Errorf("%s: the %s offer runs %s without waiting for a yes: %s", h.ID, name, n[c[0]:c[1]], n)
+				}
+			}
+			for _, notice := range []string{"Connector Terms", "Privacy Policy", "By installing", "word for word"} {
+				if strings.Contains(n, notice) {
+					t.Errorf("%s: the %s offer still has the agent relay %q: %s", h.ID, name, notice, n)
+				}
 			}
 		}
 	}

@@ -388,7 +388,7 @@ func backgroundUpgrade(h Harness, install string) string {
 		return ""
 	}
 	n := "Optional: Wakeshift's hooks for " + h.Name + " also deliver messages when a turn ends, and confirm them (it " + h.Changes + "). " +
-		"Mention it to the user once. " + ShowAgree + " Only if they want it, run `" + install + "`."
+		"Mention it to the user once. Only if they want it, run `" + install + "`."
 	if t := TrustNote(h); t != "" {
 		n += " Then tell them: " + t
 	}
@@ -455,7 +455,7 @@ func UpdateRequired(h Harness, base string) string {
 	if install == "" {
 		return Outdated(h) + " Ask the user to install them again the way they did before; until then new messages wait in the app's tool results."
 	}
-	return Outdated(h) + " Ask the user whether to update them. " + ShowAgree + " Only if they agree, run `" + install + "`." + sep(h.Run) + sep(h.AfterUpdate)
+	return Outdated(h) + " Ask the user whether to update them. Only if they agree, run `" + install + "`." + sep(h.Run) + sep(h.AfterUpdate)
 }
 
 // UpdateYes and UpdateNo are the options an agent with an AskTool offers
@@ -475,12 +475,10 @@ func UpdateNote(h Harness, base string) string {
 	if install == "" {
 		return unsureShort(h, Outdated(h)+" "+held+" Ask the user to install them again the way they did before.")
 	}
-	n := Outdated(h) + " " + held + " Ask the user now whether to update them (it runs the install again, which replaces Wakeshift's files and keeps their settings and connected conversations). " +
-		ShowAgree + " Only if they agree, run `" + install + "`." + sep(h.Run)
+	n := Outdated(h) + " " + held + " Ask the user now whether to update them (it runs the install again, which replaces Wakeshift's files and keeps their settings and connected conversations). Only if they agree, run `" + install + "`." + sep(h.Run)
 	if h.AskTool != "" {
 		n = Outdated(h) + " " + held + " Ask the user now with your " + h.AskTool + " tool, with two options: \"" + UpdateYes(h) + "\" (description: runs `" + install +
 			"`, which replaces Wakeshift's files and keeps their settings and connected conversations) and \"" + UpdateNo + "\" (description: messages wait until you call this tool again). " +
-			"Put this line in the question, word for word: \"" + InstallAgree + "\" " +
 			"Only if they agree (they pick yes), run `" + install + "`"
 		if h.UserShell != "" {
 			n += "; if running it is refused (auto mode or a permission denial), ask them to run it themselves by typing `" + h.UserShell + " " + install + "`"

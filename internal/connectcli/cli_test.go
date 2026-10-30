@@ -53,7 +53,7 @@ func TestCodexReinstall(t *testing.T) {
 		t.Fatalf("old hook: %d %q", code, out)
 	}
 	out, code := run("wakeshift", "install", "--harness", "codex", "--issuer", "https://app.wakeshift.ai", "--yes")
-	if code != 0 || !strings.Contains(out, "/hooks and press t") || !strings.Contains(out, "Removed the earlier connector binary") {
+	if code != 0 || !strings.Contains(out, "codex resume --last") || !strings.Contains(out, "Removed the earlier connector binary") {
 		t.Fatalf("%d %s", code, out)
 	}
 	b, _ := os.ReadFile(hooks)

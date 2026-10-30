@@ -68,7 +68,7 @@ func Picker() []PickerAgent {
 			Steps:  []PickerStep{run("codex mcp add {name} --url {url}")},
 			SignIn: "If it asks you to sign in, run codex mcp login {name}.",
 			Wakes: []string{
-				"The first time, the agent offers a one-time install of Wakeshift's connector for Codex. Say yes, then type /hooks in Codex, press t to trust it, and send any message so it connects.",
+				"The first time, the agent offers a one-time install of Wakeshift's connector for Codex. Say yes, then restart Codex with codex resume --last, choose Trust all and continue, and send any message so it connects.",
 				"After that, {each} wakes the agent within seconds, even when it's idle.",
 			},
 		},
