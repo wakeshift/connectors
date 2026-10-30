@@ -101,10 +101,10 @@ func TestMinimums(t *testing.T) {
 }
 
 // Production's minimum (deploy/terraform/production/terraform.tfvars):
-// the binary from v1.3.1's own build, the plugins from v1.1.0's; every
+// the binary from v1.4.0's own build, the plugins from v1.1.0's; every
 // build before its minimum (a minute before, earlier releases) is refused.
 func TestReleaseMinimum(t *testing.T) {
-	m, err := ParseMinimums("wakeshift=2026.10.29.2127,wakeshift-openclaw=2026.10.26.2256,wakeshift-hermes=2026.10.26.2256")
+	m, err := ParseMinimums("wakeshift=2026.10.30.0132,wakeshift-openclaw=2026.10.26.2256,wakeshift-hermes=2026.10.26.2256")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,9 +115,11 @@ func TestReleaseMinimum(t *testing.T) {
 		version string
 		want    bool
 	}{
-		{all, "2026.10.29.2127+145cb04", false}, // v1.3.1
-		{all, "2026.10.30.0900+abcdef0", false}, // later
-		{[]string{Binary}, "2026.10.29.2126+145cb04", true},
+		{all, "2026.10.30.0132+be7032b", false}, // v1.4.0
+		{all, "2026.10.30.0142+b0190dc", false}, // later
+		{[]string{Binary}, "2026.10.30.0131+be7032b", true},
+		{[]string{Binary}, "2026.10.30.0122+be7032b", true}, // staging's build of v1.4.0's commit
+		{[]string{Binary}, "2026.10.29.2127+145cb04", true}, // v1.3.1
 		{[]string{Binary}, "2026.10.29.1646+8b2f274", true}, // v1.3.0
 		{[]string{Binary}, "2026.10.26.2256+9534799", true}, // v1.1.0
 		{plugins, "2026.10.26.2256+9534799", false},         // v1.1.0
