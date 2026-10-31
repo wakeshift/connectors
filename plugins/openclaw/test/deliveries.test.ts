@@ -74,7 +74,7 @@ class FakeOpenClaw {
 
 const C = "openclaw/x/agent:main:main";
 
-function conv(dir: string, oc: FakeOpenClaw, ack: (ids: string[]) => Promise<number>, extra: Partial<ConversationOptions> = {}) {
+function conv(dir: string, oc: FakeOpenClaw, ack: ConversationOptions["ack"], extra: Partial<ConversationOptions> = {}) {
   return new Conversation({
     ledger: new Ledger(dir),
     conversation: C,
@@ -394,6 +394,213 @@ test("property: random interleavings keep every invariant", async () => {
       const n = oc.taken.get(id) ?? 0;
       if (n < 1 || (n > 1 && !oc.mayRepeat.has(id))) violations.push(`${id} taken by ${n} turns`);
       if (acked.get(id) !== 1) violations.push(`${id} acked ${acked.get(id)} times`);
+    }
+    for (const id of new Set(oc.overlaps)) violations.push(`${id} in two wake requests at once`);
+    assert.deepEqual(violations, [], `seed ${seed}`);
+  }
+});
+
+// Several streams per conversation (a link per app): a delivery from app
+// try's publish pub, with the event's ID the publish's (a topic copy) or
+// naming it in $emit (a direct copy).
+const from = (id: string, pub = id, direct = false): Delivery => ({
+  delivery_id: id,
+  attempt: 1,
+  event: { id: "e-" + (direct ? id : pub), source: "app:try", subject: "message " + pub, from: { kind: "app", id: "try" }, ...(direct ? { attrs: { $emit: "e-" + pub } } : {}) },
+});
+
+test("deliveries from two streams: turns one at a time, each acked only on the stream it came from", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wsd-"));
+  const oc = new FakeOpenClaw();
+  oc.delay = 5;
+  const acks: [string, string[]][] = [];
+  const c = conv(dir, oc, async (ids, via) => (acks.push([via, ids]), 200));
+  await Promise.all([c.receive([d("a1")], "A"), c.receive([d("b1")], "B"), c.receive([d("a2")], "A")]);
+  await until(() => acks.flatMap(([, ids]) => ids).length === 3);
+  await c.settled();
+  assert.deepEqual(oc.overlaps, []);
+  const on = new Map(acks.flatMap(([via, ids]) => ids.map((id) => [id, via] as const)));
+  assert.deepEqual([...on].sort(), [["a1", "A"], ["a2", "A"], ["b1", "B"]]);
+  assert.equal(new Ledger(dir).get(C, "b1")!.via, "B");
+  c.stop();
+});
+
+test("what a lost stream brought runs once and isn't acked anywhere, unless it arrives on a live stream", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wsd-"));
+  const oc = new FakeOpenClaw();
+  oc.next = () => ({ kind: "retry", fresh: false, why: "busy" });
+  const live = new Set(["old"]);
+  const acks: [string, string[]][] = [];
+  const c = conv(dir, oc, async (ids, via) => (acks.push([via, ids]), 200), { stream: (v) => (live.has(v) ? "live" : "lost"), wakeRetry: 5 });
+  await c.receive([d("x"), d("y")], "old");
+  await c.settled();
+  // The stream is replaced by a newer link of its app: y comes again on it
+  // (the same session), x doesn't (its session was superseded).
+  live.delete("old");
+  live.add("new");
+  await c.receive([d("y")], "new");
+  oc.next = () => "ran";
+  const l = new Ledger(dir);
+  await until(() => l.get(C, "x")!.state === "superseded" && l.get(C, "y")!.state === "acked");
+  assert.equal(oc.taken.get("x"), 1);
+  assert.equal(oc.taken.get("y"), 1);
+  assert.deepEqual(acks, [["new", ["y"]]]);
+  // A late copy from the old stream changes nothing.
+  await c.receive([d("x")], "old");
+  await c.settled();
+  assert.equal(l.get(C, "x")!.state, "superseded");
+  // On a live stream after all: acked there.
+  await c.receive([d("x")], "new");
+  await until(() => l.get(C, "x")!.state === "acked");
+  assert.deepEqual(acks.at(-1), ["new", ["x"]]);
+  assert.equal(oc.taken.get("x"), 1, "not run again");
+  c.stop();
+});
+
+test("a publish through two sessions starts one turn: its copies are carried once, or had by the turn that had the first", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wsd-"));
+  const oc = new FakeOpenClaw();
+  const acks: [string, string[]][] = [];
+  const live = new Set(["new"]);
+  const c = conv(dir, oc, async (ids, via) => (acks.push([via, ids]), 200), { stream: (v) => (live.has(v) ? "live" : "lost") });
+  // Already run from the old session, then its copies on the new one.
+  live.add("old");
+  await c.receive([from("o1", "p1")], "old");
+  await until(() => new Ledger(dir).get(C, "o1")!.state === "acked");
+  live.delete("old");
+  await c.receive([from("n1", "p1"), from("n1d", "p1", true)], "new");
+  // Both copies arriving before any turn: one request, the publish once in it.
+  await c.receive([from("n2", "p2"), from("n2d", "p2", true), from("n3", "p3")], "new");
+  await until(() => acks.flatMap(([, ids]) => ids).length === 6);
+  assert.equal(oc.taken.get("p1"), 1);
+  assert.equal(oc.taken.get("p2"), 1);
+  assert.equal(oc.taken.get("p3"), 1);
+  assert.equal(oc.requests.length, 2);
+  assert.deepEqual(idsIn(oc.requests[1].message).sort(), ["p2", "p3"]);
+  assert.deepEqual(acks.filter(([v]) => v === "new").flatMap(([, ids]) => ids).sort(), ["n1", "n1d", "n2", "n2d", "n3"]);
+  c.stop();
+});
+
+test("what arrives while a request whose answer was lost is sent again gets its own turn once that one ran", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wsd-"));
+  const oc = new FakeOpenClaw();
+  let busy = true;
+  oc.next = () => (busy ? { kind: "retry", fresh: false, why: "busy" } : "ran");
+  const acks: string[][] = [];
+  const c = conv(dir, oc, async (ids) => (acks.push(ids), 200), { wakeRetry: 10 });
+  await c.receive([d("a")]);
+  await c.receive([d("b")]); // not in a's request: that one goes again as is
+  await c.settled();
+  busy = false;
+  await until(() => acks.flat().length === 2);
+  assert.equal(oc.taken.get("a"), 1);
+  assert.equal(oc.taken.get("b"), 1);
+  c.stop();
+});
+
+// The random interleavings again, with several streams: deliveries arrive
+// on two apps' streams, an app's stream is replaced by a newer link (its
+// old session superseded: what it held isn't handed out again, though some
+// of its publishes reach the new session as copies of their own), and
+// restarts. Every delivery is taken by a turn, each publish by exactly one
+// (more only through the one gap), each delivery is acked at most once and
+// only on its own stream, and exactly once if that stream is still live.
+test("property: random interleavings with several streams keep every invariant", async () => {
+  for (let seed = 1; seed <= 8; seed++) {
+    let s = seed;
+    const rand = () => ((s = (s * 1103515245 + 12345) & 0x7fffffff), s / 0x7fffffff);
+    const dir = mkdtempSync(join(tmpdir(), "wsd-streams-"));
+    const oc = new FakeOpenClaw();
+    let flaky = true;
+    oc.next = () => {
+      if (!flaky) return "ran";
+      const x = rand();
+      if (x < 0.15) throw new Error("gateway busy");
+      if (x < 0.3) return { kind: "retry", fresh: false, why: "503" };
+      if (x < 0.4) return { kind: "retry", fresh: true, why: "the woken turn ended error" };
+      if (x < 0.5) return "lost";
+      return "ran";
+    };
+    const apps = { a: "a0", b: "b0" } as Record<string, string>; // each app's live stream
+    let gen = 0;
+    const live = () => new Set(Object.values(apps));
+    const viaOf = new Map<string, string>(); // delivery -> the stream it's on
+    const pubOf = new Map<string, string>(); // delivery -> its publish
+    const acked = new Map<string, number>();
+    const violations: string[] = [];
+    const ack = async (ids: string[], via: string) => {
+      if (ids.length > 100) violations.push("chunk over 100");
+      // Replaced since the ack was decided: as the plugin does, nothing is
+      // sent on a stream it no longer has.
+      if (!live().has(via)) return 401;
+      const x = rand();
+      if (flaky && x < 0.25) return 0;
+      for (const id of ids) {
+        if (viaOf.get(id) !== via) violations.push(`${id} (on ${viaOf.get(id)}) acked on ${via}`);
+        if (!oc.taken.get(pubOf.get(id)!)) violations.push(`${id} acked before a turn took it`);
+        acked.set(id, (acked.get(id) ?? 0) + 1);
+      }
+      return 200;
+    };
+    const all: string[] = [];
+    const add = (via: string, pub?: string) => {
+      const id = `s${seed}-${all.length}`;
+      all.push(id);
+      viaOf.set(id, via);
+      pubOf.set(id, pub ?? id);
+      return from(id, pub ?? id);
+    };
+    const resend = (vias: string[]) => {
+      for (const via of vias) {
+        const ds = all.filter((id) => viaOf.get(id) === via && !acked.get(id)).map((id) => from(id, pubOf.get(id)!));
+        if (ds.length) void c.receive(ds, via);
+      }
+    };
+    const make = () =>
+      conv(dir, oc, ack, { wakeFor: 20, stream: (v) => (live().has(v) ? "live" : "lost"), redeliver: (vias) => resend(vias) });
+    let c = make();
+    for (let step = 0; step < 150; step++) {
+      const x = rand();
+      const app = rand() < 0.5 ? "a" : "b";
+      if (x < 0.35) {
+        void c.receive([add(apps[app])], apps[app]);
+      } else if (x < 0.55 && all.length > 0) {
+        resend([apps[app]]);
+      } else if (x < 0.62) {
+        // A new session for the app supersedes its stream: what it held and
+        // no one acked is gone from Wakeshift; some of its publishes reach
+        // the new session too.
+        const old = apps[app];
+        apps[app] = `${app}${++gen}`;
+        for (const id of all.filter((i) => viaOf.get(i) === old && !acked.get(i))) {
+          if (rand() < 0.5) void c.receive([add(apps[app], pubOf.get(id)!)], apps[app]);
+        }
+      } else if (x < 0.68) {
+        await c.settled();
+        c.stop();
+        oc.restart();
+        c = make();
+        c.start();
+      } else {
+        await new Promise((r) => setTimeout(r, Math.floor(rand() * 4)));
+      }
+    }
+    flaky = false;
+    const pubs = new Set(all.map((id) => pubOf.get(id)!));
+    await until(() => {
+      resend([...live()]);
+      return [...pubs].every((p) => oc.taken.get(p)) && all.every((id) => !live().has(viaOf.get(id)!) || acked.get(id));
+    }, 10000);
+    await c.settled();
+    c.stop();
+    for (const p of pubs) {
+      const n = oc.taken.get(p) ?? 0;
+      if (n < 1 || (n > 1 && !oc.mayRepeat.has(p))) violations.push(`${p} taken by ${n} turns`);
+    }
+    for (const id of all) {
+      const n = acked.get(id) ?? 0;
+      if (n > 1) violations.push(`${id} acked ${n} times`);
+      if (live().has(viaOf.get(id)!) && n !== 1) violations.push(`${id} on a live stream acked ${n} times`);
     }
     for (const id of new Set(oc.overlaps)) violations.push(`${id} in two wake requests at once`);
     assert.deepEqual(violations, [], `seed ${seed}`);

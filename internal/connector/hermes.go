@@ -109,7 +109,7 @@ func (i hermesInstaller) Install(bin string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(filepath.Join(dir, path.Base(p)), b, 0o644)
+		return os.WriteFile(filepath.Join(dir, path.Base(p)), hermes.Stamped(path.Base(p), b, version.Version), 0o644)
 	})
 	if err == nil {
 		err = os.WriteFile(filepath.Join(dir, hermes.VersionFileName), hermes.VersionFile(version.Version), 0o644)

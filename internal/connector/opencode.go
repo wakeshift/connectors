@@ -461,12 +461,14 @@ export default {
     // opencode started (or restarted, opencode --continue): listen again for
     // this project's sessions that were connected, without waiting for the
     // user's next message. Only a session with a saved link gets a bridge:
-    // the link's file (named by a hash of the session ID, as the bridge
-    // names it) is only checked for, never read here.
+    // the link's file, or the directory of its links per app (named by a
+    // hash of the session ID, as the bridge names them), is only checked
+    // for, never read here.
     const linksDir = join(process.env.WAKESHIFT_HOME || join(homedir(), ".wakeshift"), "opencode", "links")
     const linked = (sid) => {
       try {
-        return existsSync(join(linksDir, createHash("sha256").update(sid).digest("hex").slice(0, 32) + ".json"))
+        const h = join(linksDir, createHash("sha256").update(sid).digest("hex").slice(0, 32))
+        return existsSync(h + ".json") || existsSync(h)
       } catch {
         return false
       }

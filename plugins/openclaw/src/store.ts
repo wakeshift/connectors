@@ -1,7 +1,8 @@
 // What the plugin keeps on disk, under <OpenClaw state>/wakeshift: each
-// connected conversation's stream link (a secret: 0600 files in a 0700
-// directory, named by a hash of the conversation so odd IDs can't escape
-// it), the issuer's signing keys, and this install's random ID.
+// connected conversation's stream links, one per app it watches (a secret:
+// 0600 files in a 0700 directory, named by a hash of the conversation, the
+// issuer and the app, so odd IDs can't escape it), the issuer's signing
+// keys, and this install's random ID.
 
 import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, closeSync, fchmodSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
@@ -13,7 +14,20 @@ export interface SavedLink {
   agentId: string;
   link: string;
   issuer: string; // the Wakeshift that issued it (the pinned one, when saved)
+  // The app whose beacon it was redeemed from: a conversation has a link
+  // per app. Absent from a link saved before links named their app (one
+  // per conversation): the first beacon after the update replaces it.
+  app?: string;
+  // This link's stream, random per redeem and kept when the link rotates:
+  // delivery records name it, so each is acknowledged only on the stream it
+  // came from ("" for a link saved before).
+  stream?: string;
   saved_at: string;
+}
+
+/** A link's place among its conversation's: its issuer and app ("" for a link that names no app). */
+export function linkKey(l: { issuer?: string; app?: string }): string {
+  return l.app ? `${l.issuer ?? ""}\n${l.app}` : "";
 }
 
 /** Store.pin's answer when the pins exist but can't be read. */
@@ -45,6 +59,20 @@ export function writeAtomic(path: string, body: string) {
     rmSync(tmp, { force: true });
     throw e;
   }
+}
+
+function valid(s: SavedLink): boolean {
+  return (
+    !!s &&
+    typeof s.conversation === "string" &&
+    !!s.conversation &&
+    typeof s.link === "string" &&
+    !!s.link &&
+    typeof s.sessionKey === "string" &&
+    (s.issuer === undefined || typeof s.issuer === "string") &&
+    (s.app === undefined || typeof s.app === "string") &&
+    (s.stream === undefined || typeof s.stream === "string")
+  );
 }
 
 export class Store {
@@ -80,28 +108,36 @@ export class Store {
     return id;
   }
 
-  private linkPath(conversation: string) {
-    return join(this.dir, "links", hash(conversation, 32) + ".json");
+  // links/<hash>.json: a conversation's link for one app (key: linkKey),
+  // or its one link from before links named their app (key "").
+  private linkName(conversation: string, key: string) {
+    return hash(key ? `${conversation}\n${key}` : conversation, 32) + ".json";
+  }
+
+  private linkPath(conversation: string, key: string) {
+    return join(this.dir, "links", this.linkName(conversation, key));
   }
 
   saveLink(l: Omit<SavedLink, "saved_at">) {
     this.ensure("links");
-    this.write(this.linkPath(l.conversation), JSON.stringify({ ...l, saved_at: new Date().toISOString() }));
+    this.write(this.linkPath(l.conversation, linkKey(l)), JSON.stringify({ ...l, saved_at: new Date().toISOString() }));
   }
 
-  loadLink(conversation: string): SavedLink | undefined {
+  /** The conversation's link for one app (key: linkKey; "" for the one saved before links named their app). */
+  loadLink(conversation: string, key = ""): SavedLink | undefined {
     try {
-      const s = JSON.parse(readFileSync(this.linkPath(conversation), "utf8")) as SavedLink;
-      return s.conversation === conversation && s.link ? s : undefined;
+      const s = JSON.parse(readFileSync(this.linkPath(conversation, key), "utf8")) as SavedLink;
+      return valid(s) && s.conversation === conversation && linkKey(s) === key ? s : undefined;
     } catch {
       return undefined;
     }
   }
 
-  forgetLink(conversation: string) {
-    rmSync(this.linkPath(conversation), { force: true });
+  forgetLink(conversation: string, key = "") {
+    rmSync(this.linkPath(conversation, key), { force: true });
   }
 
+  /** Every saved link: only a file named for what it holds (a copy under another name isn't read). */
   links(): SavedLink[] {
     let names: string[];
     try {
@@ -114,7 +150,7 @@ export class Store {
       if (!n.endsWith(".json")) continue;
       try {
         const s = JSON.parse(readFileSync(join(this.dir, "links", n), "utf8")) as SavedLink;
-        if (s.conversation && s.link && s.sessionKey && n === hash(s.conversation, 32) + ".json") out.push(s);
+        if (valid(s) && s.sessionKey && n === this.linkName(s.conversation, linkKey(s))) out.push(s);
       } catch {
         /* skip */
       }

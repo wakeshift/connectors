@@ -10,20 +10,29 @@
 // (plugins.entries.wakeshift.config.issuer), redeems its one-time ticket
 // for the conversation's own stream link, and keeps the link on disk.
 //
-// Waking: per connected conversation, a transport reads the stream
-// (transport.ts: Server-Sent Events, falling back to long polling) and a
-// Conversation (deliveries.ts) owns every delivery from there: a durable
+// One conversation can watch several apps: it keeps a link per app (and
+// issuer), each with its own transport. A beacon replaces only its own
+// app's link and hands back (supersedes) only that one: another app's link
+// is never sent anywhere but its own stream, and a new link never stops
+// another app's stream. A link saved before links named their app (one per
+// conversation) is handed back and replaced by the first beacon after the
+// update, as before.
+//
+// Waking: per connected conversation, a transport per link reads its stream
+// (transport.ts: Server-Sent Events, falling back to long polling) and one
+// Conversation (deliveries.ts) owns every delivery from all of them: a durable
 // record each, framed as outside data (framing.ts), handed to a turn with
 // OpenClaw's /hooks/agent (wake.ts: persistent, in the conversation's own
 // session, which OpenClaw safety-wraps as outside content), and an ack only
 // once that turn has finished. The hooks it needs are set up and scoped by
 // control.ts (hooks.ts says what changes).
 
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { acceptable, BeaconError, beaconIn, findBeacon, jwkKey, mcpServer, mcpTool, verifyBound, type Carried, type Claims } from "./beacon.js";
 import { Conversation, Ledger, type Host } from "./deliveries.js";
 import { agentOf } from "./hooks.js";
-import { PINS_UNREADABLE, Store, type SavedLink } from "./store.js";
+import { linkKey, PINS_UNREADABLE, Store, type SavedLink } from "./store.js";
 import { Transport, type Stopped, type TransportOptions } from "./transport.js";
 import { CLIENT_HEADER, clientHeader } from "./version.js";
 import type { Route } from "./wake.js";
@@ -136,7 +145,12 @@ export const notePinned = (why: string, file: string) =>
 export class Wakeshift {
   private readonly f: typeof fetch;
   private readonly install: string;
-  private readonly streams = new Map<string, { t: Transport; c: Conversation }>();
+  // Per conversation: its one Conversation, and a transport per link (by
+  // linkKey: its issuer and app), each with its link's stream ID.
+  private readonly streams = new Map<string, { c: Conversation; ts: Map<string, { t: Transport; stream: string }> }>();
+  // A conversation's last Conversation while it may still be inside a host
+  // call, for the next one to wait on.
+  private readonly settling = new Map<string, Promise<void>>();
   private readonly ledger: Ledger;
   // Each session's last beacon and the note it produced: OpenClaw's own
   // runtime shows an MCP result twice (the call inside code mode, then the
@@ -226,15 +240,17 @@ export class Wakeshift {
     this.started = false;
     clearInterval(this.pruneTimer);
     this.pruneTimer = undefined;
-    for (const s of this.streams.values()) {
+    for (const [conversation, s] of this.streams) {
       s.c.stop();
-      s.t.stop();
+      for (const x of s.ts.values()) x.t.stop();
+      this.settling.set(conversation, s.c.settled());
     }
     this.streams.clear();
   }
 
+  /** Each listening conversation's links, by linkKey. */
   get listening() {
-    return [...this.streams.keys()];
+    return [...this.streams].flatMap(([c, s]) => [...s.ts.keys()].map((k) => (k ? `${c}\n${k}` : c)));
   }
 
   /**
@@ -293,12 +309,18 @@ export class Wakeshift {
     if (!acceptable(claims, carried, mcpTool(call.toolName))) return "";
     const pinned = this.o.store.pin(server, claims.app);
     if (pinned) return notePinned(pinned, this.o.store.pinsPath());
-    // The link this conversation had until now, if any: after a gateway
-    // restart OpenClaw may run its turns in a new Codex thread, whose calls
-    // start a new Wakeshift session. Handing the old link back ends the
-    // session it belongs to, so one conversation stays one subscription.
-    const prior = this.o.store.loadLink(conversation);
-    const supersedes = prior && prior.issuer === this.o.issuer && linkOnIssuer(prior.link, this.o.issuer) ? prior.link : "";
+    // The link this conversation had until now for this app, if any: after
+    // a gateway restart OpenClaw may run its turns in a new Codex thread,
+    // whose calls start a new Wakeshift session. Handing the old link back
+    // ends the session it belongs to, so one conversation stays one
+    // subscription per app. Another app's link isn't this app's to hand
+    // back (Wakeshift supersedes only within an app), and stays as it is. A
+    // link saved before links named their app goes too, as it did then.
+    const key = linkKey({ issuer: this.o.issuer, app: claims.app });
+    const prior = this.o.store.loadLink(conversation, key);
+    const legacy = prior ? undefined : this.o.store.loadLink(conversation, "");
+    const held = prior ?? legacy;
+    const supersedes = held && held.issuer === this.o.issuer && linkOnIssuer(held.link, this.o.issuer) ? held.link : "";
     let link: string;
     try {
       link = await this.redeem(claims, conversation, call.toolCallId ?? "", supersedes);
@@ -308,9 +330,11 @@ export class Wakeshift {
       return noteFailed((e as Error).message);
     }
     if (!linkOnIssuer(link, this.o.issuer)) return noteFailed("Wakeshift gave a stream link on another host");
-    const saved = { conversation, sessionKey, agentId: call.agentId ?? "", link, issuer: this.o.issuer };
+    // A new stream ID: what the link it replaces brought isn't this one's to acknowledge.
+    const saved = { conversation, sessionKey, agentId: call.agentId ?? "", link, issuer: this.o.issuer, app: claims.app, stream: randomBytes(8).toString("hex") };
     this.o.store.saveLink(saved);
-    this.listen({ ...saved, saved_at: new Date().toISOString() });
+    if (legacy) this.o.store.forgetLink(conversation, "");
+    this.listen({ ...saved, saved_at: new Date().toISOString() }, legacy ? [""] : []);
     const why = await this.o.hooks.allow(sessionKey, call.agentId || agentOf(sessionKey));
     if (why) {
       // Said now, in the note: not again on the next result.
@@ -410,54 +434,96 @@ export class Wakeshift {
     throw new Error(`Wakeshift answered ${r.status}`);
   }
 
-  // One connected conversation: its transport reads, its Conversation
-  // decides (deliveries.ts).
-  private listen(l: SavedLink) {
+  // One link of a connected conversation, in place of the transport it had
+  // for the same app (and for the keys in replaces): its transport reads,
+  // the conversation's one Conversation decides (deliveries.ts). What a
+  // replaced transport read and no turn has had is still in the
+  // conversation's records: it runs, but isn't acknowledged on the new
+  // link, which doesn't carry it (a new stream ID).
+  private listen(l: SavedLink, replaces: string[] = []) {
     if (!this.started) return;
-    const old = this.streams.get(l.conversation);
-    old?.c.stop();
-    old?.t.stop();
+    const key = linkKey(l);
+    const stream = l.stream ?? "";
     const log = (m: string) => this.o.host.log.info(`wakeshift (${l.sessionKey}): ${m}`);
+    let e = this.streams.get(l.conversation);
+    if (!e) {
+      const ts = new Map<string, { t: Transport; stream: string }>();
+      const transport = (via: string) => [...ts.values()].find((x) => x.stream === via)?.t;
+      const after = this.settling.get(l.conversation);
+      this.settling.delete(l.conversation);
+      const c = new Conversation({
+        ledger: this.ledger,
+        conversation: l.conversation,
+        sessionKey: l.sessionKey,
+        agentId: l.agentId || undefined,
+        host: this.o.host,
+        // Only on the link that brought it: a lost stream's are never sent elsewhere.
+        ack: (ids, via) => transport(via)?.ack(ids) ?? Promise.resolve(401),
+        // Waiting: a saved link start() would listen on (the pinned
+        // issuer's) that isn't listening now; any other is lost.
+        stream: (via) =>
+          transport(via)
+            ? "live"
+            : this.o.store
+                  .links()
+                  .some((x) => x.conversation === l.conversation && (x.stream ?? "") === via && x.issuer === this.o.issuer && linkOnIssuer(x.link, this.o.issuer))
+              ? "waiting"
+              : "lost",
+        redeliver: (vias) => {
+          for (const via of vias) transport(via)?.reconnect();
+        },
+        route: () => this.routes.get(l.sessionKey),
+        routeRefused: () => this.routes.delete(l.sessionKey),
+        problem: (why) => this.setProblem(l.sessionKey, why),
+        wakeFor: this.o.wakeFor,
+        wakeRetry: this.o.wakeRetry,
+        ackRetry: this.o.ackRetry,
+        redeliverAfter: this.o.redeliverAfter,
+        // A Conversation it had before may still be inside a host call for
+        // these records: this one starts once it's done, so nothing is
+        // queued twice.
+        after,
+      });
+      e = { c, ts };
+      this.streams.set(l.conversation, e);
+    }
+    const { c, ts } = e;
+    for (const k of new Set([key, ...replaces])) {
+      ts.get(k)?.t.stop();
+      ts.delete(k);
+    }
     let t!: Transport;
-    const c = new Conversation({
-      ledger: this.ledger,
-      conversation: l.conversation,
-      sessionKey: l.sessionKey,
-      agentId: l.agentId || undefined,
-      host: this.o.host,
-      ack: (ids) => t.ack(ids),
-      redeliver: () => t.reconnect(),
-      route: () => this.routes.get(l.sessionKey),
-      routeRefused: () => this.routes.delete(l.sessionKey),
-      problem: (why) => this.setProblem(l.sessionKey, why),
-      wakeFor: this.o.wakeFor,
-      wakeRetry: this.o.wakeRetry,
-      ackRetry: this.o.ackRetry,
-      redeliverAfter: this.o.redeliverAfter,
-      // The old one may still be inside a host call for these records: the
-      // new one starts once it's done, so nothing is queued twice.
-      after: old?.c.settled(),
-    });
     t = new Transport({
       ...this.o.stream,
       link: l.link,
       fetch: this.f,
       log,
-      receive: (ds) => c.receive(ds),
-      onLink: (link) => this.o.store.saveLink({ conversation: l.conversation, sessionKey: l.sessionKey, agentId: l.agentId, link, issuer: l.issuer }),
+      receive: (ds) => c.receive(ds, stream),
+      onLink: (link) => {
+        // Saved only while it's still this app's transport: a replaced one
+        // must not overwrite the newer link.
+        if (this.streams.get(l.conversation)?.ts.get(key)?.t === t)
+          this.o.store.saveLink({ conversation: l.conversation, sessionKey: l.sessionKey, agentId: l.agentId, link, issuer: l.issuer, app: l.app, stream: l.stream });
+      },
       onStop: (why: Stopped) => {
         const cur = this.streams.get(l.conversation);
-        if (cur?.t === t) {
-          this.streams.delete(l.conversation);
-          c.stop();
+        if (cur?.ts.get(key)?.t === t) {
+          cur.ts.delete(key);
+          if (cur.ts.size === 0) {
+            this.streams.delete(l.conversation);
+            c.stop();
+            this.settling.set(l.conversation, c.settled());
+          }
         }
         if (why.why === "gone") {
           this.beacons.delete(l.sessionKey); // its next beacon connects again
           log(`the stream ended (${why.reason}); forgetting its link`);
-          if (this.o.store.loadLink(l.conversation)?.link === t.currentLink) this.o.store.forgetLink(l.conversation);
-          this.problems.delete(l.sessionKey);
+          // Only this app's link: another app's stays, and goes on.
+          if (this.o.store.loadLink(l.conversation, key)?.link === t.currentLink) this.o.store.forgetLink(l.conversation, key);
+          if (!this.streams.has(l.conversation)) this.problems.delete(l.sessionKey);
           // Its session and agent are no longer allowed in OpenClaw's hooks
-          // (unless another connected conversation still needs them).
+          // (unless another connected conversation, or another app's link
+          // of this one, still needs them).
           const rest = this.o.store.links();
           void this.o.hooks
             .release({ sessionKeys: rest.map((x) => x.sessionKey), agentIds: rest.map((x) => x.agentId || agentOf(x.sessionKey) || "").filter(Boolean) })
@@ -465,7 +531,8 @@ export class Wakeshift {
         }
       },
     });
-    this.streams.set(l.conversation, { t, c });
+    ts.set(key, { t, stream });
+    // Picks up what an earlier process left, and what's for this stream.
     c.start();
     t.start();
   }

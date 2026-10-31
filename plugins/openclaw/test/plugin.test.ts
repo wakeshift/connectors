@@ -24,6 +24,13 @@ async function wakeshift() {
     stream: undefined as ServerResponse | undefined,
     redeemAnswer: undefined as undefined | { status: number; body: unknown; headers?: Record<string, string> },
     sseStatus: 200,
+    // Per link token: its open stream, its SSE connections, its acks, a
+    // status to answer its stream with, and the link a redeem gives.
+    streams: new Map<string, ServerResponse>(),
+    sseBy: new Map<string, number>(),
+    acksBy: new Map<string, string[][]>(),
+    statusBy: new Map<string, number>(),
+    redeemLink: undefined as undefined | ((body: Record<string, string>) => string),
     private: privateKey as KeyObject,
     close: async () => {},
   };
@@ -39,20 +46,26 @@ async function wakeshift() {
       if (u.pathname === "/v1/connector/redeem") {
         w.redeems.push(JSON.parse(body));
         w.redeemClients.push(String(req.headers["x-wakeshift-connector"] ?? ""));
-        const a = w.redeemAnswer ?? { status: 200, body: { url: w.url.replace("http", "ws") + "/v1/stream?link=tok1", session: "openclaw#1" } };
+        const link = w.redeemLink?.(JSON.parse(body)) ?? w.url.replace("http", "ws") + "/v1/stream?link=tok1";
+        const a = w.redeemAnswer ?? { status: 200, body: { url: link, session: "openclaw#1" } };
         return res.writeHead(a.status, { "Content-Type": "application/json", ...(a.headers ?? {}) }).end(JSON.stringify(a.body));
       }
+      const tok = String(req.headers.authorization ?? "").replace(/^Bearer /, "");
       if (u.pathname === "/v1/stream" && u.searchParams.get("format") === "sse") {
         w.sse++;
-        if (w.sseStatus !== 200) return res.writeHead(w.sseStatus).end();
+        w.sseBy.set(tok, (w.sseBy.get(tok) ?? 0) + 1);
+        const status = w.statusBy.get(tok) ?? w.sseStatus;
+        if (status !== 200) return res.writeHead(status).end();
         res.writeHead(200, { "Content-Type": "text/event-stream" });
         res.write("retry: 3000\n\n");
         w.stream = res;
+        w.streams.set(tok, res);
         return;
       }
       if (u.pathname === "/v1/stream/ack") {
         const ids = JSON.parse(body).delivery_ids;
         w.acks.push(ids);
+        w.acksBy.set(tok, [...(w.acksBy.get(tok) ?? []), ids]);
         return res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ acked: ids }));
       }
       res.writeHead(404).end();
@@ -745,4 +758,178 @@ test("a beacon is remembered only while it connected: a failed redeem, or a stre
   w.sseStatus = 200;
   assert.ok((await note()).startsWith(CONNECTED));
   assert.equal(w.redeems.length, 3);
+});
+
+// Several apps in one conversation: a link and a stream per app.
+const linkOf = (w: W, tok: string) => w.url.replace("http", "ws") + "/v1/stream?link=" + tok;
+const watchResult = (w: W, app: string, ticket: string) => ({ content: [{ type: "text", text: textBeacon(beaconFor(w, { app, ticket })) }] });
+const sseFrom = (res: ServerResponse, id: string, subject: string, event: Record<string, unknown>) =>
+  res.write(`id: ${id}\nevent: event\ndata: ${JSON.stringify({ type: "event", delivery_id: id, attempt: 1, app: "Try",
+    event: { id: "e-" + id, subject, trust: "external", from: { kind: "app", id: "try" }, attrs: { topic: "u/x/webhook" }, ...event } })}\n\n`);
+const savedLinks = (dir: string) =>
+  readdirSync(join(dir, "wakeshift", "links")).map((n) => JSON.parse(readFileSync(join(dir, "wakeshift", "links", n), "utf8")) as Record<string, string>);
+// Each redeem's link is named for its ticket's last part: each app, and each redeem, has its own.
+const linkPerTicket = (w: W) => (w.redeemLink = (b) => linkOf(w, "tok-" + b.ticket.split("_").at(-1)));
+const ackedOn = (w: W, tok: string) => (w.acksBy.get(tok) ?? []).flat().sort();
+
+test("two apps in one conversation: each has its own link and stream, both wake it, and each is acked on its own link", async (t) => {
+  const w = await wakeshift();
+  t.after(w.close);
+  linkPerTicket(w);
+  const dir = mkdtempSync(join(tmpdir(), "wsoc-"));
+  const o = await openclaw(w, dir);
+  t.after(stop(o));
+  const a = await o.middleware!({ toolName: "try__watch", toolCallId: "c1", result: watchResult(w, "try", "wsct_t1_a") }, ctx);
+  assert.ok(a!.result.content.at(-1).text.startsWith(CONNECTED));
+  const b = await o.middleware!({ toolName: "news__watch", toolCallId: "c2", result: watchResult(w, "news", "wsct_t1_b") }, ctx);
+  assert.ok(b!.result.content.at(-1).text.startsWith(CONNECTED));
+  assert.equal(w.redeems[1].supersedes, undefined, "another app's link is never handed back");
+  assert.deepEqual(savedLinks(dir).map((l) => [l.app, l.issuer, l.link]).sort(), [["news", w.url, linkOf(w, "tok-b")], ["try", w.url, linkOf(w, "tok-a")]]);
+  await until(() => w.streams.has("tok-a") && w.streams.has("tok-b"));
+  sseFrom(w.streams.get("tok-a")!, "da", "from try", { source: "app:try" });
+  await until(() => ackedOn(w, "tok-a").length === 1);
+  sseFrom(w.streams.get("tok-b")!, "db", "from news", { source: "app:news", from: { kind: "app", id: "news" } });
+  await until(() => ackedOn(w, "tok-b").length === 1);
+  assert.deepEqual(ackedOn(w, "tok-a"), ["da"]);
+  assert.deepEqual(ackedOn(w, "tok-b"), ["db"]);
+  assert.equal(o.hookCalls.length, 2, "each woke the conversation");
+  assert.ok(o.hookCalls[0].body.message.includes("from try"));
+  assert.ok(o.hookCalls[1].body.message.includes("from news"));
+});
+
+test("one app connecting again replaces only its own link: the other app's stream goes on, and its link is never handed back", async (t) => {
+  const w = await wakeshift();
+  t.after(w.close);
+  linkPerTicket(w);
+  const dir = mkdtempSync(join(tmpdir(), "wsoc-"));
+  const o = await openclaw(w, dir);
+  t.after(stop(o));
+  await o.middleware!({ toolName: "try__watch", toolCallId: "c1", result: watchResult(w, "try", "wsct_t1_a") }, ctx);
+  await o.middleware!({ toolName: "news__watch", toolCallId: "c2", result: watchResult(w, "news", "wsct_t1_b") }, ctx);
+  await until(() => w.streams.has("tok-a") && w.streams.has("tok-b"));
+  // try's watch again, in a new Wakeshift session (OpenClaw after a
+  // restart, or a call without the session key): it hands back try's link.
+  await o.middleware!({ toolName: "try__watch", toolCallId: "c3", result: watchResult(w, "try", "wsct_t1_a2") }, ctx);
+  assert.equal(w.redeems[2].supersedes, linkOf(w, "tok-a"));
+  // news connecting again hands back news's own link, never try's.
+  await o.middleware!({ toolName: "news__watch", toolCallId: "c4", result: watchResult(w, "news", "wsct_t1_b2") }, ctx);
+  assert.equal(w.redeems[3].supersedes, linkOf(w, "tok-b"));
+  await o.middleware!({ toolName: "try__watch", toolCallId: "c5", result: watchResult(w, "try", "wsct_t1_a3") }, ctx);
+  assert.equal(w.redeems[4].supersedes, linkOf(w, "tok-a2"));
+  assert.deepEqual(savedLinks(dir).map((l) => [l.app, l.link]).sort(), [["news", linkOf(w, "tok-b2")], ["try", linkOf(w, "tok-a3")]]);
+  await until(() => w.streams.has("tok-a3") && w.streams.has("tok-b2"));
+  assert.equal(w.sseBy.get("tok-b2"), 1, "news's stream wasn't touched by try's reconnects");
+  sseFrom(w.streams.get("tok-b2")!, "db", "from news", { source: "app:news" });
+  sseFrom(w.streams.get("tok-a3")!, "da", "from try", { source: "app:try" });
+  await until(() => ackedOn(w, "tok-b2").length === 1 && ackedOn(w, "tok-a3").length === 1);
+  assert.deepEqual(ackedOn(w, "tok-b2"), ["db"]);
+  assert.deepEqual(ackedOn(w, "tok-a3"), ["da"]);
+});
+
+test("a replaced stream's message runs once, never acked on the new link; a publish through both sessions starts one turn", async (t) => {
+  const w = await wakeshift();
+  t.after(w.close);
+  linkPerTicket(w);
+  let run = false;
+  const ran: string[] = [];
+  const o = await openclaw(w, mkdtempSync(join(tmpdir(), "wsoc-")), {
+    answer: (c) => (run ? (ran.push(c.body.message), { status: 200, body: { ok: true, completion: { status: "ok" } } }) : { status: 503, body: { ok: false, error: "busy" } }),
+  });
+  t.after(stop(o));
+  await o.middleware!({ toolName: "try__watch", toolCallId: "c1", result: watchResult(w, "try", "wsct_t1_a") }, ctx);
+  await until(() => w.streams.has("tok-a"));
+  // Taken from the old session's stream and not run yet (OpenClaw is
+  // busy): a message of its own, and a publish that reaches the new
+  // session too.
+  sseFrom(w.streams.get("tok-a")!, "old-only", "only on the old session", { source: "app:try", id: "pub-1" });
+  sseFrom(w.streams.get("tok-a")!, "old-twin", "on both sessions", { source: "app:try", id: "pub-2" });
+  await until(() => o.hookCalls.length >= 1);
+  // A new session supersedes the old one (Wakeshift cancels what it held).
+  await o.middleware!({ toolName: "try__watch", toolCallId: "c2", result: watchResult(w, "try", "wsct_t1_a2") }, ctx);
+  await until(() => w.streams.has("tok-a2"));
+  // The same publish as the new session's topic copy (the publish's ID as
+  // its event ID) and as a direct copy (naming it in $emit), and one of its own.
+  sseFrom(w.streams.get("tok-a2")!, "new-twin", "on both sessions", { source: "app:try", id: "pub-2" });
+  sseFrom(w.streams.get("tok-a2")!, "new-direct", "on both sessions", { source: "app:try", id: "ev-9", attrs: { $emit: "pub-2" } });
+  sseFrom(w.streams.get("tok-a2")!, "new-own", "only on the new session", { source: "app:try", id: "pub-3" });
+  await new Promise((r) => setTimeout(r, 50));
+  run = true;
+  await until(() => ackedOn(w, "tok-a2").length === 3);
+  await new Promise((r) => setTimeout(r, 100));
+  const text = ran.join("\n");
+  assert.equal(text.split("only on the old session").length - 1, 1, "the replaced stream's message ran, once");
+  assert.equal(text.split("on both sessions").length - 1, 1, "the publish through both sessions ran once");
+  assert.equal(text.split("only on the new session").length - 1, 1);
+  assert.deepEqual(ackedOn(w, "tok-a2"), ["new-direct", "new-own", "new-twin"], "acked on the new link: only what it carries");
+  assert.deepEqual(ackedOn(w, "tok-a"), [], "nothing on the old link");
+});
+
+test("a link saved by the plugin before links named their app is handed back and replaced by the first beacon after the update", async (t) => {
+  const w = await wakeshift();
+  t.after(w.close);
+  linkPerTicket(w);
+  const dir = mkdtempSync(join(tmpdir(), "wsoc-"));
+  const first = await openclaw(w, dir);
+  const conversation = `openclaw/${readFileSync(join(dir, "wakeshift", "install-id"), "utf8").trim()}/agent:main:main`;
+  await stop(first)();
+  // What the earlier plugin saved: one link for the conversation, naming no app.
+  new Store(join(dir, "wakeshift")).saveLink({ conversation, sessionKey: "agent:main:main", agentId: "main", link: linkOf(w, "tok-old"), issuer: w.url });
+  const o = await openclaw(w, dir);
+  t.after(stop(o));
+  await until(() => w.streams.has("tok-old"));
+  // A delivery the old link brought, acked there as before.
+  sseFrom(w.streams.get("tok-old")!, "d-old", "before the update", {});
+  await until(() => ackedOn(w, "tok-old").length === 1);
+  await o.middleware!({ toolName: "news__watch", toolCallId: "c1", result: watchResult(w, "news", "wsct_t1_b") }, ctx);
+  assert.equal(w.redeems[0].supersedes, linkOf(w, "tok-old"), "handed back, as before the update");
+  assert.deepEqual(savedLinks(dir).map((l) => [l.app, l.link]), [["news", linkOf(w, "tok-b")]], "replaced");
+  // The next app's beacon hands back nothing of the other's.
+  await o.middleware!({ toolName: "try__watch", toolCallId: "c2", result: watchResult(w, "try", "wsct_t1_a") }, ctx);
+  assert.equal(w.redeems[1].supersedes, undefined);
+  assert.equal(savedLinks(dir).length, 2);
+});
+
+test("after a restart every app's link listens again; a revoked link forgets only its own app's", async (t) => {
+  const w = await wakeshift();
+  t.after(w.close);
+  linkPerTicket(w);
+  const dir = mkdtempSync(join(tmpdir(), "wsoc-"));
+  const o = await openclaw(w, dir);
+  await o.middleware!({ toolName: "try__watch", toolCallId: "c1", result: watchResult(w, "try", "wsct_t1_a") }, ctx);
+  await o.middleware!({ toolName: "news__watch", toolCallId: "c2", result: watchResult(w, "news", "wsct_t1_b") }, ctx);
+  await until(() => w.sseBy.get("tok-a") === 1 && w.sseBy.get("tok-b") === 1);
+  await stop(o)();
+  const again = await openclaw(w, dir, { hooks: o.cfg.hooks });
+  t.after(stop(again));
+  await until(() => w.sseBy.get("tok-a") === 2 && w.sseBy.get("tok-b") === 2);
+  assert.equal(w.redeems.length, 2);
+  sseFrom(w.streams.get("tok-a")!, "da", "from try", { source: "app:try" });
+  sseFrom(w.streams.get("tok-b")!, "db", "from news", { source: "app:news" });
+  await until(() => ackedOn(w, "tok-a").length === 1 && ackedOn(w, "tok-b").length === 1);
+  // try's link is revoked: only its record goes, and news's stream goes on.
+  w.statusBy.set("tok-a", 401);
+  w.streams.get("tok-a")!.destroy();
+  await until(() => again.logs.some((l) => l.includes("forgetting its link")));
+  assert.deepEqual(savedLinks(dir).map((l) => l.app), ["news"]);
+  assert.deepEqual(again.cfg.hooks!.allowedSessionKeyPrefixes, ["hook:wakeshift", "agent:main:main"], "still allowed: news's link needs it");
+  sseFrom(w.streams.get("tok-b")!, "db2", "from news again", { source: "app:news" });
+  await until(() => ackedOn(w, "tok-b").length === 2);
+  assert.equal(w.sseBy.get("tok-b"), 2);
+});
+
+test("a link file whose name isn't the hash of what it holds isn't read", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wsoc-"));
+  const store = new Store(join(dir, "wakeshift"));
+  store.saveLink({ conversation: "c", sessionKey: "agent:main:main", agentId: "main", link: "wss://x.test/v1/stream?link=a", issuer: "https://x.test", app: "try", stream: "s1" });
+  const [name] = readdirSync(join(dir, "wakeshift", "links"));
+  const held = JSON.parse(readFileSync(join(dir, "wakeshift", "links", name), "utf8"));
+  assert.equal(store.links().length, 1);
+  assert.equal(store.loadLink("c", "https://x.test\ntry")?.link, "wss://x.test/v1/stream?link=a");
+  assert.equal(store.loadLink("c", "https://x.test\nnews"), undefined, "another app's isn't this one's");
+  assert.equal(store.loadLink("c"), undefined, "nor the conversation's link from before");
+  // The same record under another app's name: neither listed nor loaded as that app's.
+  writeFileSync(join(dir, "wakeshift", "links", name), JSON.stringify({ ...held, app: "news" }));
+  assert.equal(store.links().length, 0);
+  assert.equal(store.loadLink("c", "https://x.test\nnews"), undefined);
+  assert.equal(store.loadLink("c", "https://x.test\ntry"), undefined);
 });

@@ -3,8 +3,8 @@ be tested without them (``__init__.register`` wires it in).
 
 1. transform_tool_result: an MCP result carrying a beacon has it taken out
    before the model sees it (Hermes shows ``_meta`` to the model). A beacon
-   signed by the Wakeshift pinned at install (and for this conversation, or for
-   none: Hermes tells MCP servers neither the session nor the call, so Hermes
+   signed by a Wakeshift it trusts (trusted_issuers), and for this conversation
+   or for none (Hermes tells MCP servers neither the session nor the call, so Hermes
    handing this session's result to this hook is what binds it) is redeemed for
    the conversation's stream link, and the result gets the note
    "Wakeshift: connected …".
@@ -21,6 +21,15 @@ be tested without them (``__init__.register`` wires it in).
    a turn there marks it internal (as if the user's own), which we never use.
 3. Approvals stay as Hermes sets them: a woken run is unattended, so what needs
    approval is denied unless the user changed approvals.unattended_mode.
+4. One conversation can be connected to several Wakeshift apps at once: it
+   keeps a link (and a Listener) per app (and issuer), and any of them wakes
+   it. A beacon replaces only its own app's link, and hands back only that
+   one (supersedes): another app's link is never sent anywhere but its own
+   stream, and a new link never stops another app's listener. Turns start
+   one at a time whichever app's message starts them (the session's busy
+   state is shared), and a publish that reaches the conversation through two
+   of one app's sessions (a superseded one and its successor) starts a turn
+   once (_publish).
 """
 from __future__ import annotations
 
@@ -78,6 +87,73 @@ STARTED_FOR = 7 * 24 * 3600
 QUEUES = {"cli"}
 
 
+# The Wakeshift the plugin trusts when nothing says otherwise: the public one.
+DEFAULT_ISSUER = "https://app.wakeshift.ai"
+
+
+def trusted_issuers(setting=None, pinned=()) -> list:
+    """The Wakeshifts whose beacons the plugin acts on (it redeems their tickets
+    and holds their stream links):
+
+    - the ``issuers`` plugin setting (``plugins.entries.wakeshift.settings.issuers``
+      in Hermes's config.yaml: a list, or one string of URLs separated by commas
+      or spaces) when it's set, else the public Wakeshift (DEFAULT_ISSUER);
+    - plus the ones Wakeshift's installer pinned in the plugin's config.json.
+
+    Each must be an origin, https://host[:port], or http:// on this machine's
+    loopback (a local Wakeshift); anything else is dropped. A setting that's
+    neither a list nor a string trusts nothing from the setting (it never
+    falls back to the default)."""
+    if setting is None:
+        chosen = [DEFAULT_ISSUER]
+    elif isinstance(setting, str):
+        chosen = setting.replace(",", " ").split()
+    elif isinstance(setting, (list, tuple)):
+        chosen = list(setting)
+    else:
+        log.warning("wakeshift: the issuers setting isn't a list of URLs; ignoring it")
+        chosen = []
+    out: list = []
+    for raw in chosen + list(pinned or ()):
+        o = _origin(raw)
+        if o is None:
+            log.warning("wakeshift: not trusting %r: a Wakeshift is an https:// origin (http:// only on loopback)",
+                        raw if isinstance(raw, str) else type(raw).__name__)
+        elif o not in out:
+            out.append(o)
+    return out
+
+
+def _origin(raw) -> Optional[str]:
+    """scheme://host[:port], lowercased, if raw is a trustworthy Wakeshift
+    origin (see trusted_issuers), else None."""
+    from urllib.parse import urlsplit
+    if not isinstance(raw, str):
+        return None
+    u = raw.strip().rstrip("/")
+    try:
+        p = urlsplit(u)
+        p.port  # a malformed port raises
+    except ValueError:
+        return None
+    if (p.scheme not in ("https", "http") or not p.hostname or p.username is not None or p.password is not None
+            or p.path or p.query or p.fragment or "@" in p.netloc or any(c.isspace() for c in u)):
+        return None
+    if p.scheme == "http" and not _loopback(p.hostname):
+        return None
+    return f"{p.scheme}://{p.netloc.lower()}"
+
+
+def _loopback(host: str) -> bool:
+    import ipaddress
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 class ApiRuns:
     """Starts a run in an API server session: POST /v1/runs on the loopback
     API server, with its key."""
@@ -103,12 +179,20 @@ class ApiRuns:
             return False
 
 
+# A link record's app, as a listener key: (issuer, app). A link saved before
+# links named their app (one per conversation) is LEGACY: the first beacon
+# connecting the conversation after the update replaces it, as before.
+LEGACY = ("", "")
+
+
 class Session:
     def __init__(self, sid: str):
         self.id = sid
         self.platform = ""
-        self.listener: Optional[Listener] = None
-        self.queued: set = set()  # delivery IDs in the input queue, no turn started since
+        self.listeners: dict[tuple, Listener] = {}  # (issuer, app) -> its link's listener
+        # Delivery ID -> its publish key (or ""), for what's in the input
+        # queue with no turn started since.
+        self.queued: dict = {}
 
 
 class Wakeshift:
@@ -130,8 +214,11 @@ class Wakeshift:
         self.sessions: dict[str, Session] = {}
 
     # -- files --
-    def _link_path(self, sid: str) -> Path:
-        return self.dir / "links" / (hashlib.sha256(sid.encode()).hexdigest()[:32] + ".json")
+    def _link_path(self, sid: str, key: tuple = LEGACY) -> Path:
+        """links/<hash>.json: a conversation's link for one app of one issuer
+        (key), named by a hash so odd IDs can't escape the directory."""
+        name = sid if key == LEGACY else "\n".join((sid, key[0], key[1]))
+        return self.dir / "links" / (hashlib.sha256(name.encode()).hexdigest()[:32] + ".json")
 
     def _dir(self, d: Path) -> None:
         """Makes a directory of the plugin's state (self.dir or one inside it).
@@ -170,32 +257,50 @@ class Wakeshift:
                 pass
             raise
 
-    def _save_link(self, sid: str, platform: str, link: str) -> None:
-        self._write(self._link_path(sid), json.dumps({"session": sid, "platform": platform, "link": link}).encode())
+    def _save_link(self, sid: str, platform: str, link: str, key: tuple = LEGACY) -> None:
+        d = {"session": sid, "platform": platform, "link": link}
+        if key != LEGACY:
+            d.update(issuer=key[0], app=key[1])
+        self._write(self._link_path(sid, key), json.dumps(d).encode())
 
-    def _forget_link(self, sid: str) -> None:
+    def _forget_link(self, sid: str, key: tuple = LEGACY) -> None:
         try:
-            self._link_path(sid).unlink()
+            self._link_path(sid, key).unlink()
         except FileNotFoundError:
             pass
 
+    @staticmethod
+    def _key_of(d: dict) -> tuple:
+        return (d.get("issuer") or "", d.get("app") or "") if d.get("app") else LEGACY
+
     def _stored(self) -> list[dict]:
+        """Every saved link: only a file named for what it holds (a copy
+        under another name, or a hand-edited one, isn't read)."""
         out = []
         for p in sorted((self.dir / "links").glob("*.json")):
             try:
                 d = json.loads(p.read_text())
             except Exception:
                 continue
-            if isinstance(d, dict) and all(isinstance(d.get(k), str) and d.get(k) for k in ("session", "platform", "link")):
+            if not isinstance(d, dict) or not all(isinstance(d.get(k), str) and d.get(k) for k in ("session", "platform", "link")):
+                continue
+            if not all(isinstance(d.get(k, ""), str) for k in ("issuer", "app")):
+                continue
+            if self._link_path(d["session"], self._key_of(d)).name == p.name:
                 out.append(d)
         return out
 
-    def _load_link(self, sid: str) -> Optional[dict]:
+    def _links_of(self, sid: str) -> list[dict]:
+        """The conversation's saved links, one per app (and an old one that
+        names none)."""
+        return [d for d in self._stored() if d["session"] == sid]
+
+    def _load_link(self, sid: str, key: tuple = LEGACY) -> Optional[dict]:
         try:
-            d = json.loads(self._link_path(sid).read_text())
+            d = json.loads(self._link_path(sid, key).read_text())
         except Exception:
             return None
-        return d if isinstance(d, dict) and d.get("session") == sid else None
+        return d if isinstance(d, dict) and d.get("session") == sid and self._key_of(d) == key else None
 
     # -- pins (connector.Pins): which app's beacons each MCP server carries --
     def _pins_path(self) -> Path:
@@ -271,12 +376,12 @@ class Wakeshift:
             s = self._session(session_id)
             if platform:
                 s.platform = platform
-            listening = s.listener is not None and not s.listener.stopped
+            listening = {k for k, l in s.listeners.items() if not l.stopped}
         self._set_busy(session_id, self.now() + BUSY_FOR, started=True)
-        if not listening:
-            d = self._load_link(session_id)
-            if d and d["platform"] == (platform or d["platform"]) and d["platform"] in self.wakers:
-                self._listen(session_id, d["platform"], d["link"])
+        for d in self._links_of(session_id):
+            key = self._key_of(d)
+            if key not in listening and d["platform"] == (platform or d["platform"]) and d["platform"] in self.wakers:
+                self._listen(session_id, d["platform"], d["link"], key)
         return None  # pre_llm_call's return is added to the prompt: nothing
 
     def turn_ended(self, session_id: str = "", **_) -> None:
@@ -328,11 +433,18 @@ class Wakeshift:
         if platform not in self.wakers:
             return wire.add_note(stripped, NOTE_UNSUPPORTED.format(platform or "these"))
         call = "" if claims.get("thread") else (tool_call_id or "")
-        # The link this conversation had until now, if any: handed back, it
-        # ends the Wakeshift session it belonged to, so a conversation whose
-        # calls started a new one stays one subscription.
-        prior = self._load_link(session_id)
-        supersedes = prior["link"] if prior and _same_origin(prior["link"], claims.get("iss", "")) else ""
+        key = (claims.get("iss", "").rstrip("/"), claims.get("app", ""))
+        # The link this conversation had until now for this app, if any:
+        # handed back, it ends the Wakeshift session it belonged to, so a
+        # conversation whose calls started a new one stays one subscription
+        # (and Wakeshift refuses to move it to another workspace's session
+        # while that link is live). Another app's link isn't this app's to
+        # hand back, and stays as it is. A link saved before links named
+        # their app goes too, as it did then.
+        prior = self._load_link(session_id, key)
+        legacy = self._load_link(session_id) if prior is None else None
+        held = prior or legacy
+        supersedes = held["link"] if held and _same_origin(held["link"], claims.get("iss", "")) else ""
         try:
             link = _redeem(claims, session_id, call, supersedes)
         except Outdated as e:
@@ -345,60 +457,76 @@ class Wakeshift:
             # A link on another host would get the token: refused, unused.
             return wire.add_note(stripped, NOTE_FAILED.format("its stream link wasn't on the Wakeshift this plugin trusts"))
         try:
-            self._save_link(session_id, platform, link)
+            self._save_link(session_id, platform, link, key)
         except OSError:
             return wire.add_note(stripped, NOTE_FAILED.format("its link couldn't be saved"))
+        if legacy is not None:
+            self._forget_link(session_id)
         self._set_busy(session_id, self.now() + BUSY_FOR)  # this turn is still running
-        self._listen(session_id, platform, link)
+        self._listen(session_id, platform, link, key, replaces=(LEGACY,) if legacy is not None else ())
         return wire.add_note(stripped, NOTE_CONNECTED)
 
     def resume(self, platforms: tuple = ("api_server",)) -> int:
         """Listen again for every conversation connected before a restart, on
         these platforms (the gateway's; a CLI resumes its own on its next turn)."""
-        n = 0
+        n, idle = 0, set()
         for d in self._stored():
             if d["platform"] in platforms and d["platform"] in self.wakers:
                 with self.lock:
                     self._session(d["session"]).platform = d["platform"]
-                # A turn this process had running when it stopped ended with it.
-                self._set_busy(d["session"], 0.0)
-                self._listen(d["session"], d["platform"], d["link"])
+                if d["session"] not in idle:
+                    # A turn this process had running when it stopped ended with it.
+                    self._set_busy(d["session"], 0.0)
+                    idle.add(d["session"])
+                self._listen(d["session"], d["platform"], d["link"], self._key_of(d))
                 n += 1
         return n
 
-    def _listen(self, sid: str, platform: str, link: str) -> None:
+    def _listen(self, sid: str, platform: str, link: str, key: tuple = LEGACY, replaces: tuple = ()) -> None:
+        """Listens on the conversation's link for one app (key), in place of
+        the listener it had for that app (and for any key in replaces). What
+        a replaced listener took and never handed over goes to the new one:
+        Wakeshift ends a superseded session's deliveries, so nothing else
+        would bring them."""
         with self.lock:
             s = self._session(sid)
-            old = s.listener
+            olds = [s.listeners.pop(k) for k in (key,) + tuple(replaces) if k in s.listeners]
             l = Listener(link, lambda ds: self._deliver(s, l, ds),
-                         on_link=lambda u: self._linked(s, l, platform, u),
-                         on_gone=lambda: self._gone(s, l), spawn=self.spawn, **self.listener_args)
-            s.listener = l
-        if old is not None:
+                         on_link=lambda u: self._linked(s, key, l, platform, u),
+                         on_gone=lambda: self._gone(s, key, l), spawn=self.spawn, **self.listener_args)
+            s.listeners[key] = l
+        for old in olds:
             old.stop()
+            l.adopt(old.undelivered())
         l.start()
 
-    def _linked(self, s: Session, l: Listener, platform: str, link: str) -> None:
-        """A rotated link, saved only while l is still the session's listener
-        (a superseded one must not overwrite the new link)."""
+    def _current(self, s: Session, l) -> bool:
+        """l is still one of the session's listeners, and running."""
         with self.lock:
-            if s.listener is l:
-                self._save_link(s.id, platform, link)
+            return not l.stopped and any(x is l for x in s.listeners.values())
 
-    def _gone(self, s: Session, l: Listener) -> None:
+    def _linked(self, s: Session, key: tuple, l: Listener, platform: str, link: str) -> None:
+        """A rotated link, saved only while l is still the app's listener (a
+        superseded one must not overwrite the new link)."""
         with self.lock:
-            if s.listener is l:
-                s.listener = None
-                self._forget_link(s.id)
+            if s.listeners.get(key) is l:
+                self._save_link(s.id, platform, link, key)
+
+    def _gone(self, s: Session, key: tuple, l: Listener) -> None:
+        with self.lock:
+            if s.listeners.get(key) is l:
+                del s.listeners[key]
+                self._forget_link(s.id, key)
 
     # -- each session's state, owned by one lock --
     # started/<hash>.json holds a connected session's state, shared by every
     # Hermes process on this machine (a gateway, and a `hermes chat --resume`
-    # of one of its sessions): busy_until (a turn runs until then) and started
-    # (delivery ID -> when it started a turn, kept for STARTED_FOR). It's read
-    # and written only under the session's flock (_locked), which every thread
-    # and process takes for its own open of started/<hash>.lock; that's also
-    # where a turn start decides, reserves, starts and records.
+    # of one of its sessions) and every app's listener: busy_until (a turn
+    # runs until then), started (delivery ID -> when it started a turn) and
+    # published (publish key -> when, _publish), each kept for STARTED_FOR.
+    # It's read and written only under the session's flock (_locked), which
+    # every thread and process takes for its own open of started/<hash>.lock;
+    # that's also where a turn start decides, reserves, starts and records.
     def _state_path(self, sid: str) -> Path:
         return self.dir / "started" / (hashlib.sha256(sid.encode()).hexdigest()[:32] + ".json")
 
@@ -422,10 +550,13 @@ class Wakeshift:
             d = {}
         d = d if isinstance(d, dict) else {}
         now = self.now()
-        started = d.get("started") if isinstance(d.get("started"), dict) else {}
+
+        def recent(name):
+            m = d.get(name) if isinstance(d.get(name), dict) else {}
+            return {k: v for k, v in m.items() if isinstance(v, (int, float)) and now - v < STARTED_FOR}
         busy = d.get("busy_until")
         return {"busy_until": float(busy) if isinstance(busy, (int, float)) else 0.0,
-                "started": {k: v for k, v in started.items() if isinstance(v, (int, float)) and now - v < STARTED_FOR}}
+                "started": recent("started"), "published": recent("published")}
 
     def _save_state(self, sid: str, st: dict) -> None:
         self._write(self._state_path(sid), json.dumps(st).encode())
@@ -441,7 +572,7 @@ class Wakeshift:
     def _set_busy(self, sid: str, until: float, started: bool = False) -> None:
         """A turn started (or ended) in a connected session. A start also
         records what was waiting in its input queue as started."""
-        if not (self._link_path(sid).exists() or self._state_path(sid).exists()):
+        if not (self._state_path(sid).exists() or self._links_of(sid)):
             return
         try:
             with self._locked(sid):
@@ -449,67 +580,106 @@ class Wakeshift:
                 st["busy_until"] = until
                 with self.lock:
                     s = self.sessions.get(sid)
-                    queued = set(s.queued) if started and s is not None else set()
+                    queued = dict(s.queued) if started and s is not None else {}
                 now = self.now()
                 st["started"].update({i: now for i in queued})
+                st["published"].update({k: now for k in queued.values() if k})
                 self._save_state(sid, st)
                 with self.lock:
                     if s is not None:
-                        s.queued -= queued
+                        for i in queued:
+                            s.queued.pop(i, None)
         except OSError:
             log.debug("wakeshift: couldn't record the session's state", exc_info=True)
 
     def _deliver(self, s: Session, l: Listener, ds: list) -> list:
         """Hands a batch to the session: returns the IDs that are done (they
-        started a turn, now or before, and that's recorded), which are the only
-        ones the listener acknowledges. Under the session's lock: what already
-        started is just done; the rest start one turn, if the session is idle
-        (in any process), recorded before it returns."""
-        while self._busy_hint(s.id) and not l.stopped and s.listener is l:
-            with self.lock:
-                self.lock.wait(1)
-        if l.stopped or s.listener is not l:
-            return []
-        with self._locked(s.id):
-            st = self._state(s.id)
-            done = [d["delivery_id"] for d in ds if d["delivery_id"] in st["started"]]
-            with self.lock:
-                queued = set(s.queued)
-            fresh = [d for d in ds if d["delivery_id"] not in st["started"] and d["delivery_id"] not in queued]
-            waker = self.wakers.get(s.platform)
-            if not fresh or waker is None or self.now() < st["busy_until"] or l.stopped:
-                return done
-            st["busy_until"] = self.now() + STARTING_FOR  # until its turn starts (pre_llm_call)
-            self._save_state(s.id, st)
-            batch = hashlib.sha256(",".join(sorted(d["delivery_id"] for d in fresh)).encode()).hexdigest()[:32]
-            ok = False
-            try:
-                ok = bool(waker(s.id, wire.prompt(fresh), batch))
-            except Exception:
-                log.warning("wakeshift: starting a turn failed", exc_info=True)
-            now = self.now()
-            if ok and s.platform in QUEUES:
-                # Only queued: done when the turn it's in starts.
+        started a turn, now or before, or their publish did through another
+        delivery, and that's recorded), which are the only ones the listener
+        acknowledges. Under the session's lock: what already started is just
+        done; the rest start one turn, if the session is idle (in any
+        process, whichever app's listener started its last turn), recorded
+        before it returns."""
+        while True:
+            if not self._current(s, l):
+                return []
+            with self._locked(s.id):
+                st = self._state(s.id)
                 with self.lock:
-                    s.queued.update(d["delivery_id"] for d in fresh)
-                ok = False
-                fresh = []
-            elif ok:
-                st["started"].update({d["delivery_id"]: now for d in fresh})
-            else:
-                st["busy_until"] = 0.0
-            try:
-                self._save_state(s.id, st)
-            except OSError:
-                # Not recorded: not acknowledged either (its redelivery runs
-                # again only if Hermes's Idempotency-Key doesn't stop it).
-                log.warning("wakeshift: couldn't record a started message")
-                return done
-            return done + ([d["delivery_id"] for d in fresh] if ok else [])
+                    queued = dict(s.queued)
+                seen = set(queued.values())
+                done, fresh = [], []
+                for d in ds:
+                    i, k = d["delivery_id"], _publish(d)
+                    if i in st["started"] or (k and k in st["published"]):
+                        done.append(i)
+                    elif i not in queued and not (k and k in seen):
+                        fresh.append(d)
+                # Another delivery of a publish that started a turn: done too.
+                twice = {i: self.now() for i in done if i not in st["started"]}
+                if twice:
+                    st["started"].update(twice)
+                    self._record(s.id, st)
+                waker = self.wakers.get(s.platform)
+                # What's done is acknowledged at once, busy or not; the rest
+                # is offered again straight after.
+                if done or not fresh or waker is None or not self._current(s, l):
+                    return done
+                if self.now() >= st["busy_until"]:
+                    return self._start(s, st, ds, fresh, queued, waker)
+            # Busy (a turn of the user's, or one another app's listener or
+            # another process just started): wait for it to end.
+            while self._busy_hint(s.id) and self._current(s, l):
+                with self.lock:
+                    self.lock.wait(1)
+
+    def _start(self, s: Session, st: dict, ds: list, fresh: list, queued: dict, waker) -> list:
+        """Starts one turn with fresh (under the session's lock, idle): the
+        IDs it's done with, recorded before it returns."""
+        # One per publish, in this batch too: the others are done with it.
+        fresh = list({(_publish(d) or d["delivery_id"]): d for d in reversed(fresh)}.values())[::-1]
+        ids = [d["delivery_id"] for d in fresh]
+        keys = {k for k in map(_publish, fresh) if k}
+        twins = {d["delivery_id"]: _publish(d) for d in ds
+                 if d["delivery_id"] not in ids and d["delivery_id"] not in queued and _publish(d) in keys}
+        st["busy_until"] = self.now() + STARTING_FOR  # until its turn starts (pre_llm_call)
+        self._save_state(s.id, st)
+        batch = hashlib.sha256(",".join(sorted(ids)).encode()).hexdigest()[:32]
+        ok = False
+        try:
+            ok = bool(waker(s.id, wire.prompt(fresh), batch))
+        except Exception:
+            log.warning("wakeshift: starting a turn failed", exc_info=True)
+        now = self.now()
+        if ok and s.platform in QUEUES:
+            # Only queued: done when the turn it's in starts.
+            with self.lock:
+                s.queued.update({d["delivery_id"]: _publish(d) for d in fresh})
+                s.queued.update(twins)
+            return []
+        if ok:
+            st["started"].update({i: now for i in ids + list(twins)})
+            st["published"].update({k: now for k in keys})
+        else:
+            st["busy_until"] = 0.0
+        try:
+            self._save_state(s.id, st)
+        except OSError:
+            # Not recorded: not acknowledged either (its redelivery runs
+            # again only if Hermes's Idempotency-Key doesn't stop it).
+            log.warning("wakeshift: couldn't record a started message")
+            return []
+        return ids + list(twins) if ok else []
+
+    def _record(self, sid: str, st: dict) -> None:
+        try:
+            self._save_state(sid, st)
+        except OSError:
+            log.debug("wakeshift: couldn't record the session's state", exc_info=True)
 
     def stop(self) -> None:
         with self.lock:
-            ls = [s.listener for s in self.sessions.values() if s.listener is not None]
+            ls = [l for s in self.sessions.values() for l in s.listeners.values()]
             self.lock.notify_all()
         for l in ls:
             l.stop()
@@ -527,6 +697,20 @@ class Outdated(RedeemError):
 class Taken(RedeemError):
     """Wakeshift refused to move the conversation to another workspace's session
     (409 conversation_taken): the link it has stays."""
+
+
+def _publish(d: dict) -> str:
+    """Which of its app's publishes a delivery carries, the same in every
+    session it reached ("" if it doesn't say): a topic copy has the
+    publish's own ID in every workspace, a direct one names it ($emit).
+    Scoped by the app it's from, so two apps can't collide."""
+    ev = d.get("event") if isinstance(d.get("event"), dict) else {}
+    src = ev.get("source")
+    attrs = ev.get("attrs") if isinstance(ev.get("attrs"), dict) else {}
+    if not isinstance(src, str) or not src.startswith("app:"):
+        return ""
+    pid = attrs.get("$emit") or ev.get("id")
+    return src + "|" + pid if isinstance(pid, str) and pid else ""
 
 
 def _same_origin(link: str, issuer: str) -> bool:

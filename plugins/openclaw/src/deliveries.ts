@@ -7,7 +7,8 @@
 //   taken → turn-started → acked
 //
 // (or `refused`: Wakeshift answered 400 for that ID alone, so it's not
-// sent again).
+// sent again; or `superseded`: a turn had it, but no stream that carries it
+// is left to acknowledge it on, below).
 //
 //   taken         recorded on arrival, with the delivery; not yet handled
 //                 by a turn that finished.
@@ -16,6 +17,16 @@
 //   acked         Wakeshift answered 2xx to its ack.
 //
 // (`enqueued`, from the plugin's earlier heartbeat wake, is read as taken.)
+//
+// Streams: a conversation can watch several apps, each on its own link
+// (store.ts), so several streams feed one conversation's records. A record
+// names the stream it last arrived on (`via`). A stream that was replaced by
+// a newer link of its app (a new Wakeshift session superseding the old one,
+// which cancels what the old one held), or that ended for good, is lost:
+// what it brought still runs here (nothing else would bring it), but isn't
+// acknowledged on any link, as none that's left carries it; it's marked
+// superseded once a turn had it. If it arrives again on a live stream, it's
+// that stream's, and acknowledged there.
 //
 // Invariants (tested in test/deliveries.test.ts, including random
 // interleavings of redelivery, failures and restarts):
@@ -28,14 +39,21 @@
 //      (recorded as `unsure`), before anything newer, so OpenClaw replays a
 //      run it admitted instead of running it again; a try after a known
 //      one (a run that ended without ok, a refused request) uses a new key.
-//   2. It's acknowledged only from `turn-started`, and only a 2xx moves it
-//      to `acked`; nothing is acknowledged after that.
+//   2. It's acknowledged only from `turn-started`, only on the stream it
+//      last arrived on and only while that stream is live, and only a 2xx
+//      moves it to `acked`; nothing is acknowledged after that.
 //   3. A record isn't evicted while it isn't acked or refused (no capped
 //      sets): records are pruned only once acked or refused for ACKED_TTL,
 //      or after MAX_AGE whatever their state.
-//   4. Every decision for a delivery reads and writes only its record, on
-//      the conversation's one chain (the gateway is one process, and owns
-//      its state dir), so no two decisions for it interleave.
+//   4. Every decision for a delivery reads and writes only its record (and
+//      for a publish, the records of its other copies), on the
+//      conversation's one chain, whichever of its streams brought it (the
+//      gateway is one process, and owns its state dir), so no two decisions
+//      for it interleave, and turns start one at a time per conversation.
+//   5. A publish starts one turn: a copy of one that a turn already had (it
+//      reached the conversation through two of its app's sessions, the
+//      superseded one and its successor) is marked as had by that turn,
+//      without one of its own, and one wake request carries it once.
 //
 // The gaps (at least once, never lost): OpenClaw keeps its replay keys in
 // memory, so a request in flight when the gateway restarts is sent again
@@ -57,7 +75,7 @@ import { writeAtomic } from "./store.js";
 import type { Delivery } from "./transport.js";
 import type { Route, WakeRequest, WakeResult } from "./wake.js";
 
-export type State = "taken" | "enqueued" | "turn-started" | "acked" | "refused";
+export type State = "taken" | "enqueued" | "turn-started" | "acked" | "refused" | "superseded";
 
 export interface Record {
   id: string;
@@ -71,7 +89,8 @@ export interface Record {
   unsure?: string; // the key of a request it was in whose outcome isn't known: sent again as is
   unsureRoute?: Route; // that request's route
   turnAt?: number;
-  doneAt?: number; // acked or refused
+  doneAt?: number; // acked, refused or superseded
+  via?: string; // the stream it last arrived on ("" or absent: a link saved before streams were named)
 }
 
 export const ACKED_TTL = 24 * 3600 * 1000;
@@ -143,7 +162,7 @@ export class Ledger {
     for (const n of names(this.dir)) {
       const d = join(this.dir, n);
       for (const r of read(d)) {
-        const done = (r.state === "acked" || r.state === "refused") && now - (r.doneAt ?? r.takenAt) > ACKED_TTL;
+        const done = finished(r) && now - (r.doneAt ?? r.takenAt) > ACKED_TTL;
         if (done || now - r.takenAt > MAX_AGE) rmSync(this.path(r.conversation, r.id), { force: true });
       }
       try {
@@ -189,10 +208,16 @@ export interface ConversationOptions {
   sessionKey: string;
   agentId?: string;
   host: Host;
-  /** Sends one ack chunk (≤100 IDs): the HTTP status, 0 if unreachable. */
-  ack: (ids: string[]) => Promise<number>;
-  /** Makes Wakeshift hand out again what isn't acknowledged. */
-  redeliver: () => void;
+  /** Sends one ack chunk (≤100 IDs) on the stream via: the HTTP status, 0 if unreachable. */
+  ack: (ids: string[], via: string) => Promise<number>;
+  /**
+   * Whether a stream reads now (live), has a link but isn't reading
+   * (waiting: what's for it is acknowledged once it's back), or is lost
+   * (replaced by a newer link, or ended for good). Default: live.
+   */
+  stream?: (via: string) => "live" | "waiting" | "lost";
+  /** Makes Wakeshift hand out again what isn't acknowledged, on these streams. */
+  redeliver: (vias: string[]) => void;
   /** Where the woken turn's reply goes, when the conversation has a channel. */
   route?: () => Route | undefined;
   /** The route was refused: it's dropped. */
@@ -213,13 +238,45 @@ export interface ConversationOptions {
 
 /** Not yet handled by a turn that finished (enqueued: the earlier heartbeat wake's state). */
 const pending = (r: Record) => r.state === "taken" || r.state === "enqueued";
+/** Done with: nothing more is sent for it. */
+const finished = (r: Record) => r.state === "acked" || r.state === "refused" || r.state === "superseded";
+const viaOf = (r: Record) => r.via ?? "";
+
+/**
+ * Which of its app's publishes a delivery carries, the same in every
+ * session it reached ("" if it doesn't say): a topic copy has the
+ * publish's own ID as its event ID in every workspace, a direct copy names
+ * it in $emit (internal/appapi/fanout.go). Scoped by the app it's from, so
+ * two apps' IDs can't collide.
+ */
+export function publishKey(d: Delivery): string {
+  const ev = d?.event;
+  if (!ev || typeof ev !== "object") return "";
+  const src = ev.source;
+  if (typeof src !== "string" || !src.startsWith("app:")) return "";
+  const attrs = ev.attrs && typeof ev.attrs === "object" ? (ev.attrs as { [k: string]: unknown }) : {};
+  const id = attrs["$emit"] || ev.id;
+  return typeof id === "string" && id ? `${src}|${id}` : "";
+}
 
 /** The wake request's idempotency key: the same deliveries and attempt, the same key. */
 export function idempotencyKey(conversation: string, ids: string[], attempt: number, variant = ""): string {
   return "wakeshift-" + createHash("sha256").update(JSON.stringify([conversation, [...ids].sort(), attempt, variant])).digest("hex").slice(0, 40);
 }
 
-/** One conversation's deliveries: every decision about them is made here, on one chain. */
+/** One record per publish (the first), for a wake request's message. */
+function once(rs: Record[]): Record[] {
+  const seen = new Set<string>();
+  return rs.filter((r) => {
+    const k = publishKey(r.delivery);
+    if (!k) return true;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+/** One conversation's deliveries, from every stream it has: every decision about them is made here, on one chain. */
 export class Conversation {
   private chain: Promise<void> = Promise.resolve();
   private stopped = false;
@@ -271,23 +328,45 @@ export class Conversation {
    * many were new. A redelivery of one not yet handled opens a new turn
    * window; one a turn handled, acked or refused is left alone.
    */
-  receive(ds: Delivery[]): Promise<number> {
+  receive(ds: Delivery[], via = ""): Promise<number> {
     return this.on(async () => {
       let fresh = 0;
       const now = this.now();
+      // Arriving on a live stream makes it that stream's to acknowledge (a
+      // stream that was replaced may still hand over what it read).
+      const live = this.streamOf(via) === "live";
       for (const d of ds) {
         const r = this.o.ledger.get(this.o.conversation, d.delivery_id);
         if (!r) {
-          this.o.ledger.put({ id: d.delivery_id, conversation: this.o.conversation, state: "taken", delivery: d, takenAt: now });
+          this.o.ledger.put({ id: d.delivery_id, conversation: this.o.conversation, state: "taken", delivery: d, takenAt: now, via });
           fresh++;
         } else if (pending(r)) {
-          this.o.ledger.put({ ...r, windowFrom: now });
+          this.o.ledger.put({ ...r, ...(live ? { via } : {}), windowFrom: now });
           this.turnDelay = 0;
+        } else if (r.state === "turn-started" && live) {
+          this.o.ledger.put({ ...r, via });
+        } else if (r.state === "superseded" && live) {
+          // Had by a turn, and on a stream that can acknowledge it after all.
+          this.o.ledger.put({ ...r, via, state: "turn-started", doneAt: undefined });
         }
       }
       void this.on(() => this.step()); // recorded: the rest happens after, on the chain
       return fresh;
     });
+  }
+
+  private streamOf(via: string) {
+    return this.o.stream ? this.o.stream(via) : "live";
+  }
+
+  // streamOf, asked once per stream for one pass over the records.
+  private streams() {
+    const m = new Map<string, "live" | "waiting" | "lost">();
+    return (via: string) => {
+      let s = m.get(via);
+      if (!s) m.set(via, (s = this.streamOf(via)));
+      return s;
+    };
   }
 
   // Everything that can happen now, from the records alone.
@@ -303,6 +382,7 @@ export class Conversation {
   // the same key), so OpenClaw replays it rather than running it twice.
   private async turn() {
     const { host } = this.o;
+    this.twins();
     const all = this.o.ledger.of(this.o.conversation).filter(pending);
     const unsure = all.find((r) => r.unsure)?.unsure;
     const waiting = unsure ? all.filter((r) => r.unsure === unsure) : all;
@@ -311,7 +391,7 @@ export class Conversation {
     let req = {
       sessionKey: this.o.sessionKey,
       ...(this.o.agentId ? { agentId: this.o.agentId } : {}),
-      message: prompt(waiting.map((w) => w.delivery)),
+      message: prompt(once(waiting).map((w) => w.delivery)),
       idempotencyKey: unsure ?? idempotencyKey(this.o.conversation, waiting.map((w) => w.id), attempt),
       // A request sent again as is (unsure) keeps the route it had.
       route: unsure ? waiting[0].unsureRoute : this.o.route?.(),
@@ -336,6 +416,9 @@ export class Conversation {
       for (const w of waiting) this.o.ledger.put({ ...w, state: "turn-started", turnAt: now, unsure: undefined, unsureRoute: undefined });
       this.turnDelay = 0;
       this.o.problem?.("");
+      // What arrived while a request was sent again as is (unsure) wasn't
+      // in it: its own turn next (no timer or delivery would start one).
+      if (this.o.ledger.of(this.o.conversation).some(pending)) void this.on(() => this.step());
       return;
     }
     if (r.kind === "broken") this.o.problem?.(r.why);
@@ -352,6 +435,22 @@ export class Conversation {
     this.retryTurn(Math.min(...waiting.map((w) => w.windowFrom ?? w.takenAt)));
   }
 
+  // A copy of a publish that a turn already had (the same publish through
+  // another session) is had by that turn: no turn of its own. Every record
+  // that isn't pending had a turn: refused and superseded are reached only
+  // from turn-started.
+  private twins() {
+    const recs = this.o.ledger.of(this.o.conversation);
+    const had = new Set(recs.filter((r) => !pending(r)).map((r) => publishKey(r.delivery)).filter(Boolean));
+    if (had.size === 0) return;
+    const now = this.now();
+    for (const r of recs) {
+      if (pending(r) && !r.unsure && had.has(publishKey(r.delivery))) {
+        this.o.ledger.put({ ...r, state: "turn-started", turnAt: now });
+      }
+    }
+  }
+
   // Tries the turn again with backoff while the window is open; once it
   // closes, has Wakeshift hand the delivery out again (a new window).
   private retryTurn(windowFrom: number) {
@@ -362,7 +461,7 @@ export class Conversation {
       this.o.host.log.warn(`wakeshift (${this.o.sessionKey}): no turn could run in time; Wakeshift will hand it out again`);
       this.turnDelay = 0;
       clearTimeout(this.redeliverTimer);
-      this.redeliverTimer = setTimeout(() => !this.stopped && this.o.redeliver(), this.o.redeliverAfter ?? 30000);
+      this.redeliverTimer = setTimeout(() => !this.stopped && void this.on(() => this.reopen()), this.o.redeliverAfter ?? 30000);
       return;
     }
     this.turnTimer = setTimeout(() => {
@@ -371,25 +470,57 @@ export class Conversation {
     }, this.turnDelay);
   }
 
-  // Acknowledges what a turn took, in chunks of 100.
+  // A window closed: Wakeshift hands out again what a live stream carries;
+  // what no live stream carries (a replaced stream's) has its window opened
+  // here, as nothing else would bring it.
+  private async reopen() {
+    const waiting = this.o.ledger.of(this.o.conversation).filter(pending);
+    const vias = new Set<string>();
+    const now = this.now();
+    let local = false;
+    const streamOf = this.streams();
+    for (const r of waiting) {
+      if (streamOf(viaOf(r)) === "live") vias.add(viaOf(r));
+      else {
+        this.o.ledger.put({ ...r, windowFrom: now });
+        local = true;
+      }
+    }
+    if (vias.size > 0) this.o.redeliver([...vias]);
+    if (local) {
+      this.turnDelay = 0;
+      await this.step();
+    }
+  }
+
+  // Acknowledges what a turn took, in chunks of 100, each on the stream it
+  // came from; what came from a lost stream is done with, unacknowledged.
   private async acks() {
-    const ids = this.o.ledger
-      .of(this.o.conversation)
-      .filter((r) => r.state === "turn-started")
-      .map((r) => r.id);
+    const by = new Map<string, string[]>();
+    const now = this.now();
+    const streamOf = this.streams();
+    for (const r of this.o.ledger.of(this.o.conversation)) {
+      if (r.state !== "turn-started") continue;
+      const s = streamOf(viaOf(r));
+      if (s === "lost") this.o.ledger.put({ ...r, state: "superseded", doneAt: now });
+      else if (s === "live") by.set(viaOf(r), [...(by.get(viaOf(r)) ?? []), r.id]);
+      // waiting: acknowledged once its stream is back
+    }
     let retry = false;
-    for (let i = 0; i < ids.length && !this.stopped; i += 100) {
-      const res = await this.ackChunk(ids.slice(i, i + 100));
-      if (res === "gone") return; // the link no longer works: the transport ends it
-      if (res === "retry") retry = true;
+    for (const [via, ids] of by) {
+      for (let i = 0; i < ids.length && !this.stopped; i += 100) {
+        const res = await this.ackChunk(ids.slice(i, i + 100), via);
+        if (res === "gone") break; // the link no longer works: the transport ends it
+        if (res === "retry") retry = true;
+      }
     }
     if (retry) this.retryAcks();
     else this.ackDelay = 0;
   }
 
   // One chunk: 2xx marks them acked; a 400 splits it to find the bad ID.
-  private async ackChunk(ids: string[]): Promise<"ok" | "retry" | "gone"> {
-    const status = await this.o.ack(ids);
+  private async ackChunk(ids: string[], via: string): Promise<"ok" | "retry" | "gone"> {
+    const status = await this.o.ack(ids, via);
     if (status >= 200 && status < 300) {
       const now = this.now();
       for (const id of ids) {
@@ -406,8 +537,8 @@ export class Conversation {
         return "ok";
       }
       const half = Math.ceil(ids.length / 2);
-      const a = await this.ackChunk(ids.slice(0, half));
-      const b = await this.ackChunk(ids.slice(half));
+      const a = await this.ackChunk(ids.slice(0, half), via);
+      const b = await this.ackChunk(ids.slice(half), via);
       return a === "gone" || b === "gone" ? "gone" : a === "retry" || b === "retry" ? "retry" : "ok";
     }
     // Gone only as the transport counts it (401, 410; a 403 or 404 that's

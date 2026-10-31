@@ -97,9 +97,9 @@ func TestPlantedBeaconInText(t *testing.T) {
 		t.Fatalf("evil's beacon replaced chat's link: %s", out)
 	}
 	// A rotated link keeps its app.
-	h.Links.Save(conv, link+"-rotated")
-	if h.Links.AppOf(conv) != "chat" {
-		t.Fatal("rotation lost the app")
+	h.Links.Rotate(conv, link, link+"-rotated")
+	if got := h.Links.All(conv); len(got) != 1 || got[0].App != "chat" || got[0].Link != link+"-rotated" {
+		t.Fatalf("rotation: %+v", got)
 	}
 }
 

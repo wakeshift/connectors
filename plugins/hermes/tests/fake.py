@@ -36,16 +36,22 @@ class Keys:
 
 
 class Wakeshift:
-    """Stream link endpoints for one token at a time, plus redeem and JWKS.
+    """Stream link endpoints, plus redeem and JWKS.
 
     Queue frames for the SSE stream with sse.put(frame) (None ends the
-    connection); the poll returns what's in poll_batches."""
+    connection); the poll returns what's in poll_batches. A token made with
+    link_for has a stream of its own, queue(token) (the others read sse), and what
+    each token acknowledged is in acked_by. redeem_answer may be a function
+    of the request's body."""
 
     def __init__(self, sse_takes_bearer=True):
         self.keys = Keys()
         self.tokens = {"tok1"}
         self.sse_takes_bearer = sse_takes_bearer
         self.sse: "queue.Queue" = queue.Queue()
+        self.queues = {"tok1": self.sse}
+        self.acked_by: dict = {}  # token -> IDs it acknowledged
+        self.connected_tokens: set = set()  # tokens with an SSE connection open now
         self.poll_batches: list = []
         self.acked: list = []
         self.ack_fail = 0  # this many acks answer 503
@@ -108,6 +114,8 @@ class Wakeshift:
                 if self.path.startswith("/v1/stream"):
                     if "link=" in self.path or not outer.sse_takes_bearer or self._auth() not in outer.tokens:
                         return self._json(401, {"error": {"code": "invalid_link"}})
+                    token = self._auth()
+                    q = outer.queues.get(token, outer.sse)
                     outer.sse_times.append(time.monotonic())
                     if outer.sse_busy > 0:
                         outer.sse_busy -= 1
@@ -124,21 +132,24 @@ class Wakeshift:
                     self.wfile.write(b"retry: 3000\n\n")
                     self.wfile.flush()
                     outer.connected.set()
+                    outer.connected_tokens.add(token)
                     if outer.sse_end_at_once:
                         self.close_connection = True
                         return
                     while True:
                         try:
-                            f = outer.sse.get(timeout=0.2)
+                            f = q.get(timeout=0.2)
                         except queue.Empty:
                             try:
                                 self.wfile.write(b": keepalive\n\n")
                                 self.wfile.flush()
                             except OSError:
+                                outer.connected_tokens.discard(token)
                                 return
                             continue
                         if f is None:
                             outer.connected.clear()
+                            outer.connected_tokens.discard(token)
                             self.close_connection = True
                             return
                         typ = f.get("type", "message")
@@ -152,7 +163,8 @@ class Wakeshift:
                             self.wfile.write((head + f"event: {typ}\ndata: {json.dumps(f)}\n\n").encode())
                             self.wfile.flush()
                         except OSError:
-                            outer.sse.put(f)  # for the next connection, as the server releases it
+                            q.put(f)  # for the next connection, as the server releases it
+                            outer.connected_tokens.discard(token)
                             return
                 return self._json(404, {})
 
@@ -171,10 +183,12 @@ class Wakeshift:
                     if not ids or len(ids) > 100 or outer.ack_bad & set(ids):
                         return self._json(400, {"error": {"code": "bad_request"}})
                     outer.acked.extend(ids)
+                    outer.acked_by.setdefault(self._auth(), []).extend(ids)
                     return self._json(200, {"acked": body.get("delivery_ids")})
                 if self.path == "/v1/connector/redeem":
                     outer.redeems.append(body)
-                    code, out = outer.redeem_answer
+                    a = outer.redeem_answer
+                    code, out = a(body) if callable(a) else a
                     return self._json(code, out)
                 return self._json(404, {})
 
@@ -185,6 +199,16 @@ class Wakeshift:
         self.redeem_answer = (200, {"url": self.link})
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 
+    def queue(self, token: str) -> "queue.Queue":
+        """token's SSE frames (tok1's is sse)."""
+        return self.queues.setdefault(token, queue.Queue())
+
+    def link_for(self, token: str) -> str:
+        """A link for token, which the fake then serves."""
+        self.tokens.add(token)
+        self.queue(token)
+        return self.link.replace("link=tok1", "link=" + token)
+
     def beacon(self, **over) -> str:
         now = int(time.time())
         c = {"iss": self.url, "aud": "wakeshift-connector", "thread": "", "app": "try", "tool": "watch",
@@ -193,7 +217,8 @@ class Wakeshift:
         return self.keys.sign(c)
 
     def close(self):
-        self.sse.put(None)
+        for q in list(self.queues.values()):
+            q.put(None)
         self.srv.shutdown()
         self.srv.server_close()
 
@@ -237,6 +262,10 @@ def until(cond, within=5.0):
     return False
 
 
-def event(i: str, subject="hello") -> dict:
-    return {"type": "event", "delivery_id": i, "attempt": 1, "subscription_id": "s1", "app": "Try",
-            "event": {"id": "ev_" + i, "subject": subject, "attrs": {"topic": "u/ada/hook"}, "from": {"kind": "app", "id": "try"}}}
+def event(i: str, subject="hello", app=None, publish=None) -> dict:
+    """A delivery frame. With app, an app's topic copy as the core sends it
+    (source app:<app>, the publish's ID as the event's)."""
+    ev = {"id": "ev_" + i, "subject": subject, "attrs": {"topic": "u/ada/hook"}, "from": {"kind": "app", "id": app or "try"}}
+    if app:
+        ev.update(source="app:" + app, id=publish or "ev_" + i)
+    return {"type": "event", "delivery_id": i, "attempt": 1, "subscription_id": "s1", "app": (app or "try").title(), "event": ev}

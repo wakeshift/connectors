@@ -55,16 +55,28 @@ func (h *Hook) connect(ctx context.Context, in Input, token string, carried Carr
 		} else if err != nil {
 			return fmt.Sprintf(NoteFailed, "its server couldn't be recorded")
 		}
-	} else if app := h.Links.AppOf(in.Conversation); app != "" && app != claims.App {
-		return fmt.Sprintf(NoteOtherApp, app, claims.App)
+	} else {
+		// Where the hook can't tell which server a result came from, a
+		// conversation stays with the app it was connected to: a beacon for
+		// another app could have been planted in any result.
+		for _, app := range h.Links.Apps(in.Conversation) {
+			if app != "" && app != claims.App {
+				return fmt.Sprintf(NoteOtherApp, app, claims.App)
+			}
+		}
 	}
 	call := ""
 	if claims.Thread == "" { // bound to the call or to nothing: Wakeshift binds the conversation
 		call = in.ToolCallID
 	}
-	// The link the conversation has now goes along: Wakeshift won't move a
-	// connected conversation to another workspace's session.
-	held := h.Links.Load(in.Conversation)
+	// The link the conversation has now for this app goes along: Wakeshift
+	// won't move a connected conversation to another workspace's session.
+	// Another app's link stays as it is, and isn't sent: each app the
+	// conversation watches has its own (Links), and every one wakes it.
+	held := h.Links.LoadFor(in.Conversation, claims.App)
+	if held == "" {
+		held = h.Links.LoadFor(in.Conversation, "") // saved before links named their app
+	}
 	link, app, err := redeemHeld(ctx, h.HTTP, h.Harness, claims, conv, call, held, h.WaitCommand)
 	var outdated *UpdateRequired
 	if errors.As(err, &outdated) {

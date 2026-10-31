@@ -56,13 +56,14 @@ type Hook struct {
 	Settings Settings
 	HTTP     *http.Client
 	Socket   string
-	// Start starts the connector for a thread with its stream link,
-	// detached from the hook (why: for its log).
+	// Start starts the connector for a thread with one app's stream link,
+	// detached from the hook (why: for its log). A thread watching several
+	// apps has a connector for each.
 	// rearm: started again without a beacon (Config.Exclusive).
-	Start func(thread, link, why string, rearm bool) error
-	// Running reports whether a thread's connector is running (default:
-	// its RunLock is held).
-	Running func(thread string) bool
+	Start func(thread, link, app, why string, rearm bool) error
+	// Running reports whether the connector for a thread's app is running
+	// (default: its AppRunLock is held).
+	Running func(thread, app string) bool
 	Now     func() time.Time
 	// Pins: which app's beacons each MCP server carries (default: in the
 	// settings directory).
@@ -145,35 +146,33 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 		return
 	}
 	// Kept for re-arming (below); a link the hook can't keep only means
-	// the next start needs a tool call, as before.
+	// the next start needs a tool call, as before. Per app: another app's
+	// link, and its connector, stay as they are.
 	h.links().SaveFor(in.SessionID, link, claims.App)
-	if err := h.Start(in.SessionID, link, "a beacon in "+in.ToolName+"'s result", false); err != nil {
+	if err := h.Start(in.SessionID, link, claims.App, "a beacon in "+in.ToolName+"'s result", false); err != nil {
 		note(fmt.Sprintf(NoteFailed, "the connector didn't start"))
 		return
 	}
 	note(NoteConnected)
 }
 
-// rearm starts the thread's connector again with its kept link, if it has
-// one and no connector is running for it. It says nothing to the model: a
-// connector the link no longer works for (unwatched, revoked, out of date)
-// stops at once and forgets the link.
+// rearm starts the thread's connectors again with their kept links (one
+// per app it watches), each that isn't running. It says nothing to the
+// model: a connector the link no longer works for (unwatched, revoked, out
+// of date) stops at once and forgets the link.
 func (h *Hook) rearm(thread, event string) {
 	if !uuidRE.MatchString(thread) {
 		return
 	}
-	link := h.links().Load(thread)
-	if link == "" {
-		return
-	}
 	running := h.Running
 	if running == nil {
-		running = func(thread string) bool { return Running(RunLock(thread)) }
+		running = func(thread, app string) bool { return Running(AppRunLock(thread, app)) }
 	}
-	if running(thread) {
-		return
+	for _, k := range h.links().All(thread) {
+		if !running(thread, k.App) {
+			h.Start(thread, k.Link, k.App, "re-armed at "+event, true)
+		}
 	}
-	h.Start(thread, link, "re-armed at "+event, true)
 }
 
 func (h *Hook) links() connector.Links {

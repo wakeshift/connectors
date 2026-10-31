@@ -106,7 +106,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	event := fs.String("event", "", "hook: the event, for harnesses whose hook input doesn't say (antigravity)")
 	wait := fs.Duration("wait", 0, "hook: how long a stop hook listens (default: the harness's)")
 	yes := fs.Bool("yes", false, "install: trust --issuer without asking (the install script from that Wakeshift passes it)")
-	app := fs.String("app", "", "allow: the app whose tools to allow")
+	app := fs.String("app", "", "allow: the app whose tools to allow; run: the app whose link it holds")
 	tools := fs.String("tools", "", "allow: the app's tools the user agreed to allow without asking, comma-separated")
 	none := fs.Bool("none", false, "allow: the user said no: remove the app's tool rules and don't offer them again")
 	switch cmd {
@@ -203,8 +203,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 				return 0 // uninstalled: a session that read its hooks before keeps calling them
 			}
 			h := &codexconnector.Hook{Settings: set, Socket: codexconnector.Socket(),
-				Start: func(thread, link, why string, rearm bool) error {
-					return codexconnector.StartDetached(bin, thread, link, why, rearm)
+				Start: func(thread, link, app, why string, rearm bool) error {
+					return codexconnector.StartDetached(bin, thread, link, app, why, rearm)
 				}}
 			h.Run(ctx, stdin, stdout)
 			return 0
@@ -268,7 +268,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		links := connector.LinksFor(codexconnector.LoadSettings())
 		err := codexconnector.Run(ctx, codexconnector.Config{Stream: link, Thread: *thread, Socket: codexconnector.Socket(),
 			Lease: lease, Window: &codexconnector.Window{Thread: *thread}, Links: &links,
-			Lock: codexconnector.RunLock(*thread), Exclusive: *rearm, StartGrace: 15 * time.Second, CodexGrace: time.Minute, Log: log})
+			Lock: codexconnector.AppRunLock(*thread, *app), Exclusive: *rearm, StartGrace: 15 * time.Second, CodexGrace: time.Minute, Log: log})
 		log.Info("connector: stopped", "why", err)
 		return 0
 	case "status":

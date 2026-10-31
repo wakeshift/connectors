@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wakeshift/connectors/internal/connectorversion"
@@ -143,11 +144,27 @@ var waitEnv = []struct{ env, harness string }{
 }
 
 // WaitTarget is the conversation a `wakeshift wait` waits for, and the
-// link the hooks keep for it.
+// links the hooks keep for it: one per app it watches (Links), Link the
+// first of them.
 type WaitTarget struct {
 	Harness      string
 	Conversation string
 	Link         string
+	// More are its other apps' links, waited on too.
+	More []string
+}
+
+// waitTarget is the conversation's target, if the hooks keep a link for it.
+func waitTarget(harness, conv string) (WaitTarget, bool) {
+	all := LinksFor(LoadSettings(harness)).All(conv)
+	if len(all) == 0 {
+		return WaitTarget{}, false
+	}
+	t := WaitTarget{Harness: harness, Conversation: conv, Link: all[0].Link}
+	for _, k := range all[1:] {
+		t.More = append(t.More, k.Link)
+	}
+	return t, true
 }
 
 // FindWaitTarget finds the conversation the command runs in, among those
@@ -159,14 +176,14 @@ func FindWaitTarget(env func(string) string) (WaitTarget, bool) {
 		if conv == "" || len(conv) > 200 {
 			continue
 		}
-		if link := LinksFor(LoadSettings(e.harness)).Load(conv); link != "" {
-			return WaitTarget{Harness: e.harness, Conversation: conv, Link: link}, true
+		if t, ok := waitTarget(e.harness, conv); ok {
+			return t, true
 		}
 	}
 	if harness, conv, ok := LookupProcess(); ok {
 		if _, known := Lookup(harness); known {
-			if link := LinksFor(LoadSettings(harness)).Load(conv); link != "" {
-				return WaitTarget{Harness: harness, Conversation: conv, Link: link}, true
+			if t, ok := waitTarget(harness, conv); ok {
+				return t, true
 			}
 		}
 	}
@@ -231,6 +248,9 @@ func (w *Waiter) Run(ctx context.Context) int {
 	// While it runs, the hooks can see it does (Links.WaitRunning): the
 	// core's "already running" can be a dead one for up to 80s.
 	defer w.Links.HoldWait(w.Target.Conversation)()
+	if len(w.Target.More) > 0 {
+		return w.runMany(ctx, append([]string{w.Target.Link}, w.Target.More...))
+	}
 	link := w.Target.Link
 	cursor := ""
 	printed := 0
@@ -264,7 +284,7 @@ func (w *Waiter) Run(ctx context.Context) int {
 			// Only a 200 hands out messages; a refusal's only line is why.
 			r.events, r.cursor = nil, ""
 			if r.status == http.StatusUnauthorized {
-				w.Links.Forget(w.Target.Conversation)
+				w.Links.ForgetLink(w.Target.Conversation, link)
 			}
 		}
 		// The cursor names what this round printed: confirmed only once
@@ -304,8 +324,8 @@ func (w *Waiter) Run(ctx context.Context) int {
 		}
 		if n := nextLink(link, r.next); n != "" {
 			if n != link {
+				w.Links.Rotate(w.Target.Conversation, link, n)
 				link = n
-				w.Links.Save(w.Target.Conversation, link)
 			}
 		} else if r.status != http.StatusOK || r.next == "" {
 			// Cut short, or Wakeshift busy: wait a little, then the same again.
@@ -314,6 +334,121 @@ func (w *Waiter) Run(ctx context.Context) int {
 			}
 		}
 	}
+}
+
+// runMany is Run for a conversation that watches several apps: each app's
+// link is waited on at once, and what any prints is printed (whole lines,
+// one at a time). Without Loop the command ends once one has printed
+// messages (the others stop and print nothing more: what they took comes
+// again); with it, after Max messages in all. A link that closes is dropped,
+// and its hub.closed line printed only when it's the last. A link that ends
+// because another did confirms what it printed first.
+func (w *Waiter) runMany(ctx context.Context, links []string) int {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	retry := w.Retry
+	if retry <= 0 {
+		retry = 5 * time.Second
+	}
+	var mu sync.Mutex
+	open, printed, ended := len(links), 0, false
+	var wg sync.WaitGroup
+	for _, link := range links {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cursor := ""
+			// stop ends this link's wait: what it printed is confirmed
+			// (by a round, or here), unless nobody reads the output.
+			stop := func() {
+				if cursor != "" && (w.Alive == nil || w.Alive()) {
+					w.confirm(ctx, link, cursor)
+				}
+			}
+			for {
+				if ctx.Err() != nil || w.Alive != nil && !w.Alive() {
+					stop()
+					return
+				}
+				r, err := w.round(ctx, link, cursor)
+				if w.uninstalled() {
+					cancel()
+					return
+				}
+				if err != nil {
+					if !sleepCtx(ctx, retry) {
+						stop()
+						return
+					}
+					continue
+				}
+				if r.status != http.StatusOK {
+					r.events, r.cursor = nil, ""
+					if r.status == http.StatusUnauthorized {
+						w.Links.ForgetLink(w.Target.Conversation, link)
+					}
+				}
+				printedCursor := cursor
+				if r.cursor != "" {
+					printedCursor = r.cursor
+				}
+				mu.Lock()
+				if ended {
+					mu.Unlock()
+					stop() // this round's messages aren't printed: they come again
+					return
+				}
+				if !w.print(r.events...) {
+					ended = true
+					mu.Unlock()
+					cancel()
+					return
+				}
+				printed += len(r.events)
+				last := false
+				if r.closed != "" {
+					open--
+					last = open == 0
+					if last {
+						w.print(r.closed)
+					}
+				}
+				end := last || !w.Loop && len(r.events) > 0 || w.Loop && w.Max > 0 && printed >= w.Max
+				if end {
+					ended = true
+					if w.Loop && !last && w.Max > 0 && printed >= w.Max {
+						w.confirm(ctx, link, printedCursor)
+						w.print(restartLine)
+						printedCursor = ""
+					}
+				}
+				mu.Unlock()
+				if end || r.closed != "" {
+					if printedCursor != "" {
+						w.confirm(context.WithoutCancel(ctx), link, printedCursor)
+					}
+					if end {
+						cancel()
+					}
+					return
+				}
+				cursor = printedCursor
+				if n := nextLink(link, r.next); n != "" {
+					if n != link {
+						w.Links.Rotate(w.Target.Conversation, link, n)
+						link = n
+					}
+				} else if r.status != http.StatusOK || r.next == "" {
+					if !sleepCtx(ctx, retry) {
+						stop()
+						return
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return 0
 }
 
 // uninstalled: the harness's directory (the one its links are in) is gone.

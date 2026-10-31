@@ -36,11 +36,11 @@ func TestHookRearms(t *testing.T) {
 	var started []string
 	running := false
 	h := &Hook{Settings: Settings{Dir: t.TempDir(), Issuers: []string{ws.URL}}, Socket: fakeAppServer(t, thread),
-		Start: func(th, link, why string, _ bool) error {
+		Start: func(th, link, _, why string, _ bool) error {
 			started = append(started, th+" "+link+" ("+why+")")
 			return nil
 		},
-		Running: func(string) bool { return running }}
+		Running: func(string, string) bool { return running }}
 	run := func(in *bytes.Reader) string {
 		var out bytes.Buffer
 		h.Run(context.Background(), in, &out)
@@ -181,7 +181,7 @@ func TestConnectorKeepsTheLink(t *testing.T) {
 		defer close(release)
 		for range 1000 {
 			if l := links.Load(thread); l == next {
-				saved <- links.AppOf(thread)
+				saved <- links.All(thread)[0].App
 				return
 			}
 			time.Sleep(5 * time.Millisecond)
@@ -242,4 +242,34 @@ func TestRearmIsExclusive(t *testing.T) {
 	}
 	cancel()
 	<-first
+}
+
+// A thread watching two apps has a link and a connector for each: a re-arm
+// starts each one that isn't running (and only those), and their run locks
+// are their own.
+func TestHookRearmsEveryApp(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("WAKESHIFT_HOME", t.TempDir())
+	var started []string
+	running := map[string]bool{"chat": true}
+	h := &Hook{Settings: Settings{Dir: t.TempDir()},
+		Start: func(th, link, app, why string, rearm bool) error {
+			if !rearm {
+				t.Fatal("a re-arm that isn't exclusive")
+			}
+			started = append(started, app+" "+link)
+			return nil
+		},
+		Running: func(th, app string) bool { return running[app] }}
+	h.links().SaveFor(thread, "ws://h/chat", "chat")
+	h.links().SaveFor(thread, "ws://h/try", "try")
+	var out bytes.Buffer
+	h.Run(context.Background(), eventInput(thread, EventSessionStart), &out)
+	if out.Len() != 0 || len(started) != 1 || started[0] != "try ws://h/try" {
+		t.Fatalf("started %v, said %q", started, out.String())
+	}
+	if a, b := AppRunLock(thread, "chat"), AppRunLock(thread, "try"); a == b || a == RunLock(thread) || AppRunLock(thread, "") != RunLock(thread) ||
+		filepath.Dir(a) != filepath.Dir(RunLock(thread)) {
+		t.Fatalf("locks %q %q", a, b)
+	}
 }

@@ -548,13 +548,14 @@ func (c *conn) stream(ctx context.Context) {
 			c.cancel(err)
 			return
 		case next != "":
-			link, wait = next, time.Second
 			if c.cfg.Links != nil {
-				if err := c.cfg.Links.Save(c.cfg.Thread, link); err != nil {
+				// In place of this app's link (the thread's other apps' stay).
+				if err := c.cfg.Links.Rotate(c.cfg.Thread, link, next); err != nil {
 					// The hook would re-arm with the old link, which then stops at once.
 					c.cfg.Log.Warn("stream: couldn't keep the rotated link", "err", err)
 				}
 			}
+			link, wait = next, time.Second
 			continue
 		case err != nil && ctx.Err() == nil:
 			c.cfg.Log.Warn("stream: disconnected", "err", redact(err))
@@ -574,10 +575,10 @@ func (c *conn) stream(ctx context.Context) {
 }
 
 // forget drops the kept link if it's still link (a newer one, from a
-// connector that replaced this one, stays).
+// connector that replaced this one, stays, and so do other apps' links).
 func (c *conn) forget(link string) {
-	if c.cfg.Links != nil && c.cfg.Links.Load(c.cfg.Thread) == link {
-		c.cfg.Links.Forget(c.cfg.Thread)
+	if c.cfg.Links != nil {
+		c.cfg.Links.ForgetLink(c.cfg.Thread, link)
 	}
 }
 

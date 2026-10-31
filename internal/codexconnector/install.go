@@ -2,12 +2,15 @@ package codexconnector
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -27,12 +30,13 @@ func LoadSettings() Settings { return connector.LoadSettings("codex") }
 // again: each start appends, so a thread's restarts stay in one account.
 const maxLog = 1 << 20
 
-// StartDetached starts `bin run --thread <thread>` in its own session, so it
-// outlives the hook, with the stream link on its stdin (never in its
-// arguments, which other users can see) and its log in codex/logs, after a
-// line saying why it started. A re-arm (rearm) runs only if no connector
-// holds the thread's lock (Config.Exclusive).
-func StartDetached(bin, thread, link, why string, rearm bool) error {
+// StartDetached starts `bin run --thread <thread> --app <app>` in its own
+// session, so it outlives the hook, with the stream link on its stdin
+// (never in its arguments, which other users can see) and its log in
+// codex/logs, after a line saying why it started. A thread watching several
+// apps has a connector for each app's link. A re-arm (rearm) runs only if no
+// connector holds the lock for the thread and app (Config.Exclusive).
+func StartDetached(bin, thread, link, app, why string, rearm bool) error {
 	if !uuidRE.MatchString(thread) {
 		return errors.New("not a Codex thread ID")
 	}
@@ -52,6 +56,9 @@ func StartDetached(bin, thread, link, why string, rearm bool) error {
 	defer logf.Close()
 	fmt.Fprintf(logf, "== %s started: %s\n", time.Now().UTC().Format(time.RFC3339), why)
 	args := []string{"run", "--thread", thread}
+	if app != "" {
+		args = append(args, "--app", app)
+	}
 	if rearm {
 		args = append(args, "--rearm")
 	}
@@ -68,6 +75,17 @@ func StartDetached(bin, thread, link, why string, rearm bool) error {
 	io.WriteString(stdin, link+"\n")
 	stdin.Close()
 	return cmd.Process.Release()
+}
+
+// AppRunLock is RunLock for the connector of one app's link in the thread
+// (RunLock itself for a link that names no app).
+func AppRunLock(thread, app string) string {
+	base := RunLock(thread)
+	if base == "" || app == "" {
+		return base
+	}
+	sum := sha256.Sum256([]byte(app))
+	return strings.TrimSuffix(base, ".lock") + "." + hex.EncodeToString(sum[:8]) + ".lock"
 }
 
 // RunLock is the file a thread's connector holds a lock on while it runs,

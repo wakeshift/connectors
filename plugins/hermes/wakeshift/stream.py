@@ -129,7 +129,12 @@ class Listener:
     them, now or before, and that's recorded durably): only those are
     acknowledged, and the rest are offered again later. on_link(url) saves a
     rotated link; on_gone() forgets it. After stop() nothing more is handed
-    over or acknowledged."""
+    over or acknowledged.
+
+    A listener that replaces another for the same app (a newer link) adopts
+    what the old one took but never handed over (undelivered, after its
+    stop): those are handed over like its own but never acknowledged on this
+    link, which doesn't carry them, unless they arrive on it too."""
 
     def __init__(self, link: str, deliver: Callable[[list], list], *, on_link: Callable[[str], None] = lambda u: None,
                  on_gone: Callable[[], None] = lambda: None, spawn: Callable = None, poll_wait: float = 25,
@@ -149,6 +154,7 @@ class Listener:
         self._stop = threading.Event()
         self._lock = threading.Condition()
         self._pending: dict[str, dict] = {}  # delivery ID -> delivery, in arrival order
+        self._adopted: set = set()  # pending IDs from a replaced listener, not from this link
         self._threads: list = []
         self._resp = None
         self.last_event_id = ""
@@ -184,6 +190,21 @@ class Listener:
     @property
     def stopped(self) -> bool:
         return self._stop.is_set()
+
+    def adopt(self, ds: list) -> None:
+        """Deliveries a replaced listener took and never handed over: handed
+        over by this one, acknowledged only if they also arrive on its link."""
+        with self._lock:
+            for d in ds:
+                if isinstance(d, dict) and isinstance(d.get("delivery_id"), str) and d["delivery_id"] not in self._pending:
+                    self._pending[d["delivery_id"]] = d
+                    self._adopted.add(d["delivery_id"])
+            self._lock.notify_all()
+
+    def undelivered(self) -> list:
+        """What it took and didn't hand over (call after stop)."""
+        with self._lock:
+            return list(self._pending.values())
 
     def _end(self, state: str) -> None:
         self.state = state
@@ -386,6 +407,7 @@ class Listener:
         with self._lock:
             for d in ds:
                 self._pending.setdefault(d["delivery_id"], d)
+                self._adopted.discard(d["delivery_id"])  # on this link after all: acknowledged here
             self._lock.notify_all()
 
     def _work(self) -> None:
@@ -405,7 +427,15 @@ class Listener:
             except Exception:
                 log.warning("wakeshift: handing a message to Hermes failed", exc_info=True)
                 done = []
-            todo = done
+            with self._lock:
+                # An adopted one isn't this link's to acknowledge: done with
+                # now, so a copy arriving on this link later is its own (and
+                # acknowledged), and one that arrived already was un-adopted.
+                todo = [i for i in done if i not in self._adopted]
+                for i in done:
+                    if i in self._adopted:
+                        self._adopted.discard(i)
+                        self._pending.pop(i, None)
             while todo and not self.stopped:
                 todo = self._ack(todo)
                 if todo:
@@ -416,6 +446,7 @@ class Listener:
             with self._lock:
                 for i in done:
                     self._pending.pop(i, None)
+                    self._adopted.discard(i)
                 left = bool(self._pending)
                 self._lock.notify_all()
             if done:

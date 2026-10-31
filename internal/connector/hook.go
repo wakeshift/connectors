@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -488,15 +489,72 @@ func (h *Hook) listen(ctx context.Context, in Input, wait time.Duration) (Output
 	return out, ok
 }
 
-// take polls the conversation's link once (immediate), or until there are
-// deliveries or wait runs out (0: until ctx ends), and returns them framed,
-// with a func that acknowledges them (call it once they're handed over).
+// take polls the conversation's links once (immediate), or until there
+// are deliveries or wait runs out (0: until ctx ends), and returns them
+// framed, with a func that acknowledges them (call it once they're handed
+// over). A conversation connected to several apps has a link for each:
+// every one is polled at once, and the first to hand out messages ends the
+// others' waits (each acknowledged on its own link).
 func (h *Hook) take(ctx context.Context, conversation string, wait time.Duration, immediate bool) (string, func()) {
-	link := h.Links.Load(conversation)
-	if link == "" {
+	links := h.Links.All(conversation)
+	if len(links) == 0 {
 		h.why = "no link for the conversation"
 		return "", nil
 	}
+	if len(links) == 1 {
+		ds, ack, why := h.takeOne(ctx, conversation, links[0].Link, wait, immediate)
+		h.why = why
+		if len(ds) == 0 {
+			return "", nil
+		}
+		return Prompt(ds), ack
+	}
+	type got struct {
+		ds  []Delivery
+		ack func()
+		why string
+	}
+	out := make([]got, len(links))
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var wg sync.WaitGroup
+	for i, k := range links {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ds, ack, why := h.takeOne(cctx, conversation, k.Link, wait, immediate)
+			out[i] = got{ds, ack, why}
+			if len(ds) > 0 && !immediate {
+				cancel() // the others stop waiting: these are handed over now
+			}
+		}()
+	}
+	wg.Wait()
+	var ds []Delivery
+	var acks []func()
+	h.why = out[0].why
+	for _, g := range out {
+		if len(g.ds) > 0 {
+			ds = append(ds, g.ds...)
+			acks = append(acks, g.ack)
+			h.why = g.why
+		}
+	}
+	if len(ds) == 0 {
+		return "", nil
+	}
+	return Prompt(ds), func() {
+		for _, a := range acks {
+			a()
+		}
+	}
+}
+
+// takeOne is take on one of the conversation's links: its deliveries (none
+// if it stopped first), the func that acknowledges them, and why it
+// stopped listening otherwise (the waiter's log).
+func (h *Hook) takeOne(ctx context.Context, conversation, link string, wait time.Duration, immediate bool) ([]Delivery, func(), string) {
+	var why string
 	deadline := time.Time{}
 	if wait > 0 {
 		deadline = time.Now().Add(wait)
@@ -520,8 +578,8 @@ func (h *Hook) take(ctx context.Context, conversation string, wait time.Duration
 		if !deadline.IsZero() {
 			w = min(w, time.Until(deadline).Truncate(time.Millisecond))
 			if w < minPoll && !first { // the first poll always looks once
-				h.why = "listened as long as it may"
-				return "", nil
+				why = "listened as long as it may"
+				return nil, nil, why
 			}
 		}
 		if immediate || w < 0 {
@@ -534,38 +592,38 @@ func (h *Hook) take(ctx context.Context, conversation string, wait time.Duration
 		if errors.As(err, &outdated) {
 			// Kept: the updated hooks use the same link. The app's tool
 			// results ask the agent for the update meanwhile.
-			h.why = "Wakeshift's hooks are out of date"
-			return "", nil
+			why = "Wakeshift's hooks are out of date"
+			return nil, nil, why
 		}
 		switch err {
 		case ErrLinkGone:
-			h.Links.Forget(conversation)
-			h.why = "the link was revoked or expired"
-			return "", nil
+			h.Links.ForgetLink(conversation, link)
+			why = "the link was revoked or expired"
+			return nil, nil, why
 		case ErrReplaced:
 			switch {
 			case h.stale != nil && h.stale():
-				h.why = "a newer waiter took over"
-				return "", nil
+				why = "a newer waiter took over"
+				return nil, nil, why
 			case !h.patient || h.stale == nil || h.Alive != nil && !h.Alive():
 				// Another hook of this conversation is listening.
-				h.why = "another poll took the stream (a newer hook)"
-				return "", nil
+				why = "another poll took the stream (a newer hook)"
+				return nil, nil, why
 			}
 			// The newest waiter: another hook polled for a moment (a turn's
 			// tool hook); take the stream back after a pause, so the
 			// conversation isn't left with nothing listening.
 		}
 		if b.Link != "" && b.Link != link && SameOrigin(b.Link, link) {
+			h.Links.Rotate(conversation, link, b.Link)
 			link = b.Link
-			h.Links.Save(conversation, link)
 		}
 		if err == nil && b.Background && !patient {
 			// The agent's own wait command wakes it. A waiter keeps
 			// listening: the server waited, and takes the stream for it as
 			// soon as that command stops counting as live.
-			h.why = "the agent's wait command holds the stream"
-			return "", nil
+			why = "the agent's wait command holds the stream"
+			return nil, nil, why
 		}
 		if err == nil && len(b.Deliveries) > 0 {
 			ids := make([]string, len(b.Deliveries))
@@ -573,28 +631,28 @@ func (h *Hook) take(ctx context.Context, conversation string, wait time.Duration
 				ids[i] = d.ID
 			}
 			l := link
-			return Prompt(b.Deliveries), func() {
+			return b.Deliveries, func() {
 				actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 				defer cancel()
 				h.Poller.Ack(actx, l, ids) // unacknowledged, they come back: at least once
-			}
+			}, ""
 		}
 		switch {
 		case immediate:
-			h.why = "nothing waiting"
-			return "", nil
+			why = "nothing waiting"
+			return nil, nil, why
 		case ctx.Err() != nil:
-			h.why = "stopped by the harness"
-			return "", nil
+			why = "stopped by the harness"
+			return nil, nil, why
 		case !deadline.IsZero() && !time.Now().Before(deadline):
-			h.why = "listened as long as it may"
-			return "", nil
+			why = "listened as long as it may"
+			return nil, nil, why
 		case h.stale != nil && h.stale():
-			h.why = "a newer waiter took over"
-			return "", nil
+			why = "a newer waiter took over"
+			return nil, nil, why
 		case h.Alive != nil && !h.Alive():
-			h.why = "the harness quit"
-			return "", nil
+			why = "the harness quit"
+			return nil, nil, why
 		}
 		// Wakeshift unreachable, or answering at once with nothing when asked
 		// to wait: don't spin.
@@ -606,14 +664,14 @@ func (h *Hook) take(ctx context.Context, conversation string, wait time.Duration
 				// Past the deadline once paused (or with too little left to
 				// poll): stop now rather than wait for nothing.
 				if !deadline.IsZero() && time.Until(deadline)-pause < minPoll {
-					h.why = "Wakeshift was busy until the end of its listening time"
-					return "", nil
+					why = "Wakeshift was busy until the end of its listening time"
+					return nil, nil, why
 				}
 			}
 			select {
 			case <-ctx.Done():
-				h.why = "stopped by the harness"
-				return "", nil
+				why = "stopped by the harness"
+				return nil, nil, why
 			case <-time.After(pause):
 			}
 			backoff = min(backoff*2, 30*time.Second)

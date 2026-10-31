@@ -1,7 +1,9 @@
 """Wakeshift's plugin for Hermes Agent: lets Wakeshift messages wake your Hermes
-conversations (API server and CLI ones). Written by
-``wakeshift install --harness hermes``; remove it with
-``wakeshift uninstall --harness hermes``. See plugin.py for what it does.
+conversations (API server and CLI ones). Installed by
+``hermes plugins install wakeshift``, by Wakeshift's installer
+(``/install/hermes.sh``) or by ``wakeshift install --harness hermes``; remove
+it with ``hermes plugins remove wakeshift``. See plugin.py for what it does,
+and plugin.trusted_issuers for which Wakeshifts it trusts.
 """
 from __future__ import annotations
 
@@ -23,12 +25,27 @@ def _hermes_home() -> Path:
         return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
 
 
-def _issuers() -> list:
+def _pinned(d: Path = None) -> list:
+    """The Wakeshifts Wakeshift's installer pinned in config.json (in the plugin's
+    directory, d), if it wrote one."""
     try:
-        cfg = json.loads((Path(__file__).parent / "config.json").read_text())
-    except Exception:
+        cfg = json.loads(((d or Path(__file__).parent) / "config.json").read_text())
+    except FileNotFoundError:
         return []
-    return [i for i in cfg.get("issuers") or [] if isinstance(i, str)]
+    except Exception:
+        log.warning("wakeshift: config.json can't be read; ignoring it")
+        return []
+    issuers = cfg.get("issuers") if isinstance(cfg, dict) else None
+    return [i for i in issuers if isinstance(i, str)] if isinstance(issuers, list) else []
+
+
+def _setting(ctx):
+    """The issuers plugin setting (plugins.entries.wakeshift.settings.issuers), or
+    None when it isn't set (or this Hermes has no plugin settings)."""
+    try:
+        return ctx.get_config("issuers", None)
+    except Exception:
+        return None
 
 
 def _spawn(target, name):
@@ -54,7 +71,7 @@ def _gateway() -> bool:
 
 
 def register(ctx) -> None:
-    from .plugin import ApiRuns, Wakeshift
+    from .plugin import ApiRuns, Wakeshift, trusted_issuers
 
     try:
         port = int(os.environ.get("API_SERVER_PORT") or 8642)
@@ -64,7 +81,7 @@ def register(ctx) -> None:
     # its API server; a CLI's sessions, its input queue.
     wakers = {"api_server": ApiRuns(port, _api_key),
               "cli": lambda session, text, batch: bool(ctx.inject_message(text))}
-    ws = Wakeshift(state_dir=_hermes_home() / "wakeshift", issuers=_issuers(), wakers=wakers, spawn=_spawn)
+    ws = Wakeshift(state_dir=_hermes_home() / "wakeshift", issuers=trusted_issuers(_setting(ctx), _pinned()), wakers=wakers, spawn=_spawn)
     ctx.register_hook("transform_tool_result", ws.transform)
     ctx.register_hook("pre_llm_call", ws.turn_started)
     ctx.register_hook("on_session_end", ws.turn_ended)

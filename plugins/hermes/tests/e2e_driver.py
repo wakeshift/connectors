@@ -1,8 +1,10 @@
 """The plugin against a real Wakeshift (Wakeshift's own repository runs
 this): stdin's first line is {"issuer", "session", "result"} (an app's
-tool result as Hermes hands it to transform_tool_result); prints {"result"}
-(what the model would see), then {"run": text} for each turn it starts, as
-Hermes would run it. Stops when stdin closes."""
+tool result as Hermes hands it to transform_tool_result, from "tool" if it
+says, else mcp__app__watch); prints {"result"} (what the model would see),
+then {"run": text} for each turn it starts, as Hermes would run it. Each
+later line ({"result", "tool"}) is another tool result in the same
+conversation, answered with {"result"}. Stops when stdin closes."""
 import json
 import sys
 import tempfile
@@ -39,11 +41,19 @@ def run(session, text, batch):
 
 p = plugin.Wakeshift(state_dir=Path(tempfile.mkdtemp()), issuers=[first["issuer"]], wakers={"api_server": run},
                      listener_args={"poll_wait": 1, "backoff_max": 1})
-p.turn_started(session_id=sid, platform="api_server")
-res = p.transform(tool_name="mcp__app__watch", result=first["result"], session_id=sid, tool_call_id="call_1")
-p.turn_ended(session_id=sid)
-say({"result": res})
-listener = p.sessions[sid].listener
+calls = [0]
+
+
+def call(line):  # a turn with one tool call
+    calls[0] += 1
+    p.turn_started(session_id=sid, platform="api_server")
+    res = p.transform(tool_name=line.get("tool") or "mcp__app__watch", result=line["result"], session_id=sid, tool_call_id="call_%d" % calls[0])
+    p.turn_ended(session_id=sid)
+    say({"result": res})
+
+
+call(first)
+listener = next(iter(p.sessions[sid].listeners.values()), None)
 
 
 def report():  # once it's listening: how
@@ -53,5 +63,7 @@ def report():  # once it's listening: how
 
 
 threading.Thread(target=report, daemon=True).start()
-sys.stdin.read()
+for line in iter(sys.stdin.readline, ""):
+    if line.strip():
+        call(json.loads(line))
 p.stop()

@@ -30,14 +30,18 @@ type codexDaemon struct {
 	// unloadAtTurn: the next turn/start finds the thread unloaded (a window
 	// resuming it just then), and is refused.
 	unloadAtTurn bool
-	turns        chan struct{}
-	onTurn       func(send func(method string, params any))
-	outputs      []string // each turn/start's tool output
-	conns        []*websocket.Conn
-	reads        int // thread/read requests, failed or not
-	failedReads  int // thread/read requests answered with readErr
-	starts       int // turn/start requests, refused or not
-	refused      int // turn/start requests refused (the thread wasn't loaded)
+	// oneTurn: turn/start is refused while a turn runs (status active), as
+	// Codex refuses a second turn; busy counts those refusals.
+	oneTurn     bool
+	busy        int
+	turns       chan struct{}
+	onTurn      func(send func(method string, params any))
+	outputs     []string // each turn/start's tool output
+	conns       []*websocket.Conn
+	reads       int // thread/read requests, failed or not
+	failedReads int // thread/read requests answered with readErr
+	starts      int // turn/start requests, refused or not
+	refused     int // turn/start requests refused (the thread wasn't loaded)
 }
 
 // waitFor waits up to 10s for cond, checked under d.mu.
@@ -160,7 +164,17 @@ func (d *codexDaemon) serve(t *testing.T) string {
 				if unloaded {
 					d.refused++
 				}
+				inTurn := d.oneTurn && d.status == "active"
+				if inTurn {
+					d.busy++
+				} else if d.oneTurn && !unloaded {
+					d.status = "active" // this turn's, until it ends
+				}
 				d.mu.Unlock()
+				if inTurn {
+					send(map[string]any{"id": *m.ID, "error": map[string]any{"code": -32600, "message": "a turn is already in progress for thread " + thread}})
+					continue
+				}
 				if unloaded {
 					send(map[string]any{"id": *m.ID, "error": map[string]any{"code": -32600, "message": "thread not loaded: " + thread}})
 					continue
@@ -986,4 +1000,74 @@ func TestQueuedPastOneTurnAllDelivered(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// A thread watching two apps has a connector for each app's link: both run
+// on the one thread, a turn at a time (a turn/start while the other's turn
+// runs is refused and tried again once the thread is idle), and every
+// event from either starts a turn once and is confirmed on its own link.
+func TestTwoAppsShareTheThread(t *testing.T) {
+	d := &codexDaemon{status: "idle", turns: make(chan struct{}, 20), oneTurn: true}
+	d.onTurn = func(send func(string, any)) {
+		d.broadcast("thread/status/changed", statusNote("active"))
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			d.set(func(d *codexDaemon) { d.status = "idle" })
+			d.broadcast("thread/status/changed", statusNote("idle"))
+		}()
+	}
+	sock := d.serve(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	acksA, acksB := make(chan string, 10), make(chan string, 10)
+	nextA, nextB := make(chan struct{}, 10), make(chan struct{}, 10)
+	for range 2 {
+		nextA <- struct{}{}
+		nextB <- struct{}{}
+	}
+	done := make(chan error, 2)
+	quiet := slog.New(slog.DiscardHandler)
+	go func() {
+		done <- Run(ctx, Config{Stream: pacedStream(t, 3, nextA, acksA), Thread: thread, Socket: sock, Log: quiet})
+	}()
+	go func() {
+		done <- Run(ctx, Config{Stream: pacedStream(t, 3, nextB, acksB), Thread: thread, Socket: sock, Log: quiet})
+	}()
+	got := map[string]int{}
+	for len(got) < 6 {
+		select {
+		case id := <-acksA:
+			got["a "+id]++
+		case id := <-acksB:
+			got["b "+id]++
+		case <-time.After(15 * time.Second):
+			t.Fatalf("confirmed %v", got)
+		}
+	}
+	time.Sleep(300 * time.Millisecond) // nothing more comes
+	cancel()
+	<-done
+	<-done
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	seen := map[string]int{}
+	for _, o := range d.outputs {
+		for i := range 3 {
+			if strings.Contains(o, fmt.Sprintf("hi %d", i)) {
+				seen[fmt.Sprintf("hi %d", i)]++
+			}
+		}
+	}
+	// The two streams send the same bodies: each in exactly two turns, one
+	// per app's connector.
+	for i := range 3 {
+		if n := seen[fmt.Sprintf("hi %d", i)]; n != 2 {
+			t.Fatalf("event %d in %d turns: %v", i, n, d.outputs)
+		}
+	}
+	for k, n := range got {
+		if n != 1 {
+			t.Fatalf("%s confirmed %d times", k, n)
+		}
+	}
 }

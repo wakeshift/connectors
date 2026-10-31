@@ -103,14 +103,15 @@ class Plugin(unittest.TestCase):
 
     def test_a_superseded_listener_doesnt_save_its_rotated_link(self):
         self.connect()
+        key = (self.ws.url, "try")
         s = self.p._session("sess-1")
-        old = s.listener
-        had = self.p._load_link("sess-1")["link"]
-        self.p._listen("sess-1", "api_server", had)  # a new listener takes over
+        old = s.listeners[key]
+        had = self.p._load_link("sess-1", key)["link"]
+        self.p._listen("sess-1", "api_server", had, key)  # a new listener takes over
         old.on_link(self.ws.link.replace("tok1", "tok-old"))
-        self.assertEqual(self.p._load_link("sess-1")["link"], had)
-        s.listener.on_link(self.ws.link.replace("tok1", "tok-new"))
-        self.assertTrue(self.p._load_link("sess-1")["link"].endswith("link=tok-new"))
+        self.assertEqual(self.p._load_link("sess-1", key)["link"], had)
+        s.listeners[key].on_link(self.ws.link.replace("tok1", "tok-new"))
+        self.assertTrue(self.p._load_link("sess-1", key)["link"].endswith("link=tok-new"))
 
     def test_untrusted_beacons_are_stripped_silently(self):
         other = Wakeshift()
@@ -241,7 +242,7 @@ class Plugin(unittest.TestCase):
                                  wakers={"api_server": plugin.ApiRuns(self.api.port, lambda: "k")})
         try:
             self.assertEqual(again.resume(("api_server",)), 1)
-            self.assertTrue(until(lambda: again.sessions["sess-1"].listener and again.sessions["sess-1"].listener.state == "sse"))
+            self.assertTrue(until(lambda: [l.state for l in again.sessions["sess-1"].listeners.values()] == ["sse"]))
             self.ws.sse.put(event("d9"))
             self.assertTrue(until(lambda: self.ws.acked == ["d9"]))  # idle since the restart
             self.assertEqual(again.resume(("cli",)), 0)
@@ -304,7 +305,7 @@ class Plugin(unittest.TestCase):
         s = self.p._session("cli-2")
         s.platform = "cli"
         l = types.SimpleNamespace(stopped=False, stop=lambda: None)
-        s.listener = l
+        s.listeners[plugin.LEGACY] = l
         results = []
 
         def hand_over(ds):  # as a listener does: offered again until done
@@ -343,7 +344,7 @@ class Plugin(unittest.TestCase):
             s = self.p._session("shared-1")
             s.platform = "api_server"
             l = types.SimpleNamespace(stopped=False, stop=lambda: None)
-            s.listener = l
+            s.listeners[plugin.LEGACY] = l
             t = threading.Thread(target=lambda: self.p._deliver(s, l, [event("d1")]))
             t.start()
             self.assertFalse(until(lambda: woken, within=1.5))  # the other process's turn is running
@@ -370,7 +371,7 @@ class Plugin(unittest.TestCase):
         s = self.p._session("cli-3")
         s.platform = "cli"
         l = types.SimpleNamespace(stopped=False, stop=lambda: None)
-        s.listener = l
+        s.listeners[plugin.LEGACY] = l
         results = []
         ts = [threading.Thread(target=lambda: results.append(self.p._deliver(s, l, [event("d1")]))) for _ in range(2)]
         for t in ts:
@@ -433,6 +434,170 @@ class Plugin(unittest.TestCase):
         self.connect()
         self.connect()
         self.assertEqual(len([r for r in self.ws.requests if r[1] == "/oauth/jwks"]), 1)
+
+
+class TwoApps(unittest.TestCase):
+    """One Hermes conversation connected to two Wakeshift apps ("try" through
+    the MCP server try, "chat" through chat): each has its own link, any of
+    them wakes it, and nothing one app's beacon does touches the other's."""
+
+    def setUp(self):
+        self.ws = Wakeshift()
+        self.api = HermesAPI()
+        self.dir = Path(tempfile.mkdtemp())
+        self.links = {"try": ["tok1"], "chat": ["tokc"]}  # the tokens each app's redeems hand out, in turn
+        self.ws.redeem_answer = self.answer
+        self.p = self.plugin()
+
+    def plugin(self):
+        return plugin.Wakeshift(state_dir=self.dir, issuers=[self.ws.url], listener_args={"poll_wait": 0.2, "backoff_max": 0.2},
+                                wakers={"api_server": plugin.ApiRuns(self.api.port, lambda: "api-key")})
+
+    def answer(self, body):
+        app = "chat" if body["ticket"].startswith("chat") else "try"
+        toks = self.links[app]
+        tok = toks.pop(0) if len(toks) > 1 else toks[0]
+        return 200, {"url": self.ws.link_for(tok)}
+
+    def tearDown(self):
+        self.p.stop()
+        self.ws.close()
+        self.api.close()
+
+    def watch(self, app, sid="sess-1", ticket=None):
+        self.p.turn_started(session_id=sid, platform="api_server")
+        b = self.ws.beacon(app=app, ticket=ticket or app + "-t")
+        return json.loads(self.p.transform(tool_name=f"mcp__{app}__watch", result=result(b), session_id=sid, tool_call_id="c"))
+
+    def idle(self, sid="sess-1"):
+        self.p.turn_ended(session_id=sid)
+
+    def ran(self, n):
+        """Runs started so far, n of them, each ended (as Hermes reports) before the next."""
+        return until(lambda: len(self.api.runs) >= n, within=8) and len(self.api.runs) == n
+
+    def test_both_apps_wake_the_conversation(self):
+        self.assertIn("Wakeshift: connected", self.watch("try")["result"])
+        self.assertIn("Wakeshift: connected", self.watch("chat")["result"])
+        # The second app's redeem doesn't hand back (or even name) the first's link.
+        self.assertEqual([r.get("supersedes") for r in self.ws.redeems], [None, None])
+        self.assertEqual(len(list((self.dir / "links").glob("*.json"))), 2)
+        self.assertTrue(until(lambda: self.ws.connected_tokens == {"tok1", "tokc"}))
+        self.ws.queue("tok1").put(event("t1", "from try", app="try"))
+        self.ws.queue("tokc").put(event("c1", "from chat", app="chat"))
+        self.idle()
+        # One turn at a time, whichever app's message starts it.
+        self.assertTrue(self.ran(1))
+        self.assertFalse(until(lambda: len(self.api.runs) > 1, within=0.6))
+        self.p.turn_started(session_id="sess-1", platform="api_server")
+        self.idle()
+        self.assertTrue(self.ran(2))
+        inputs = " ".join(r["body"]["input"] for r in self.api.runs)
+        self.assertIn("from try", inputs)
+        self.assertIn("from chat", inputs)
+        # Each acknowledged on its own link only.
+        self.assertTrue(until(lambda: self.ws.acked_by.get("tok1") == ["t1"] and self.ws.acked_by.get("tokc") == ["c1"]))
+
+    def test_one_app_connecting_again_leaves_the_other_listening(self):
+        self.watch("try")
+        self.watch("chat")
+        chat = self.p._session("sess-1").listeners[(self.ws.url, "chat")]
+        self.links["try"] = ["tok2"]
+        self.watch("try", ticket="try-t2")  # a new session of try's (its call didn't pass its key)
+        self.assertEqual(self.ws.redeems[2].get("supersedes"), self.ws.link_for("tok1"))  # try's own link, only
+        listeners = self.p._session("sess-1").listeners
+        self.assertIs(listeners[(self.ws.url, "chat")], chat)
+        self.assertFalse(chat.stopped)
+        self.assertTrue(listeners[(self.ws.url, "try")].origin and listeners[(self.ws.url, "try")].token == "tok2")
+        self.idle()
+        self.assertTrue(until(lambda: {"tok2", "tokc"} <= self.ws.connected_tokens))
+        self.ws.queue("tokc").put(event("c1", "still chat", app="chat"))
+        self.assertTrue(self.ran(1))
+        self.assertTrue(until(lambda: self.ws.acked_by.get("tokc") == ["c1"]))
+
+    def test_another_apps_link_is_never_handed_back(self):
+        self.watch("chat")
+        self.watch("try")
+        self.watch("try", ticket="try-t2")
+        self.watch("chat", ticket="chat-t2")
+        chat = self.ws.link_for("tokc")
+        for r in self.ws.redeems:
+            want = chat if r["ticket"].startswith("chat") else self.ws.link_for("tok1")
+            self.assertIn(r.get("supersedes"), (None, want))
+
+    def test_what_a_replaced_listener_took_is_handed_over_once(self):
+        # A message the old link handed over while the turn that connects again
+        # was running: Wakeshift ends the superseded session's deliveries, so
+        # the new listener hands it over, once, without acknowledging it on a
+        # link that doesn't carry it.
+        self.watch("try")
+        self.assertTrue(until(lambda: "tok1" in self.ws.connected_tokens))
+        self.ws.queue("tok1").put(event("t1", "taken before the switch", app="try", publish="pub-1"))
+        old = self.p._session("sess-1").listeners[(self.ws.url, "try")]
+        self.assertTrue(until(lambda: old.undelivered()))  # taken, waiting for the turn to end
+        self.links["try"] = ["tok2"]
+        self.watch("try", ticket="try-t2")
+        self.assertTrue(old.stopped)
+        self.idle()
+        self.assertTrue(self.ran(1))
+        self.assertIn("taken before the switch", self.api.runs[0]["body"]["input"])
+        # The same publish through the new session (it subscribed in that turn): done, not run again.
+        self.p.turn_started(session_id="sess-1", platform="api_server")
+        self.idle()
+        self.assertTrue(until(lambda: "tok2" in self.ws.connected_tokens))
+        self.ws.queue("tok2").put(event("t2", "taken before the switch", app="try", publish="pub-1"))
+        self.assertTrue(until(lambda: self.ws.acked_by.get("tok2") == ["t2"]))
+        self.assertEqual(len(self.api.runs), 1)
+        self.assertNotIn("t1", self.ws.acked_by.get("tok2", []))
+        self.assertNotIn("t1", self.ws.acked_by.get("tok1", []))
+
+    def test_a_handed_over_message_that_comes_again_is_acknowledged_where_it_comes(self):
+        # Connecting again to the same session: Wakeshift hands what the old
+        # link hadn't confirmed to the new one, which acknowledges it.
+        self.watch("try")
+        self.assertTrue(until(lambda: "tok1" in self.ws.connected_tokens))
+        self.ws.queue("tok1").put(event("t1", "once", app="try"))
+        old = self.p._session("sess-1").listeners[(self.ws.url, "try")]
+        self.assertTrue(until(lambda: old.undelivered()))
+        self.links["try"] = ["tok2"]
+        self.watch("try", ticket="try-t2")
+        self.assertTrue(until(lambda: "tok2" in self.ws.connected_tokens))
+        self.ws.queue("tok2").put(event("t1", "once", app="try"))
+        self.idle()
+        self.assertTrue(until(lambda: self.ws.acked_by.get("tok2") == ["t1"]))
+        self.assertEqual(len(self.api.runs), 1)
+
+    def test_a_link_from_before_links_named_their_app_is_replaced(self):
+        self.p._save_link("sess-1", "api_server", self.ws.link_for("tokold"))
+        self.watch("try")
+        self.assertEqual(self.ws.redeems[0].get("supersedes"), self.ws.link_for("tokold"))
+        stored = self.p._links_of("sess-1")
+        self.assertEqual([(d.get("app"), d["link"]) for d in stored], [("try", self.ws.link_for("tok1"))])
+        self.assertEqual(list(self.p._session("sess-1").listeners), [(self.ws.url, "try")])
+
+    def test_both_listen_again_after_a_restart(self):
+        self.watch("try")
+        self.watch("chat")
+        self.p.stop()
+        self.p = self.plugin()
+        self.assertEqual(self.p.resume(("api_server",)), 2)
+        self.assertTrue(until(lambda: self.ws.connected_tokens >= {"tok1", "tokc"}))
+        self.ws.queue("tokc").put(event("c9", app="chat"))
+        self.assertTrue(until(lambda: self.ws.acked_by.get("tokc") == ["c9"]))
+
+    def test_a_revoked_link_forgets_only_its_app(self):
+        self.watch("try")
+        self.watch("chat")
+        self.assertTrue(until(lambda: self.ws.connected_tokens == {"tok1", "tokc"}))
+        self.ws.queue("tok1").put({"type": "hub.closed", "reason": "revoked"})
+        self.assertTrue(until(lambda: [d.get("app") for d in self.p._links_of("sess-1")] == ["chat"]))
+        self.assertEqual(list(self.p._session("sess-1").listeners), [(self.ws.url, "chat")])
+
+    def test_a_link_file_under_another_name_is_not_read(self):
+        self.watch("try")
+        f = next((self.dir / "links").glob("*.json"))
+        (self.dir / "links" / ("0" * 32 + ".json")).write_text(f.read_text())
+        self.assertEqual(len(self.p._stored()), 1)
 
 
 if __name__ == "__main__":
