@@ -30,6 +30,15 @@ be tested without them (``__init__.register`` wires it in).
    state is shared), and a publish that reaches the conversation through two
    of one app's sessions (a superseded one and its successor) starts a turn
    once (_publish).
+5. tool_request middleware (fill_harness): every call to a Wakeshift app's
+   tool (an MCP tool that takes Wakeshift's three arguments) says it comes from
+   Hermes (harness "hermes"), so Wakeshift gives its result a beacon whether or
+   not the model said so, even where the app never sees Hermes's client name.
+   It names the program only: what a beacon is redeemed for, and for which
+   conversation, is checked as before.
+6. A beacon it should act on but can't (Wakeshift unreachable for its keys or
+   the redeem, after a few quick tries) is logged and the result says so, with
+   how to retry: never dropped silently.
 """
 from __future__ import annotations
 
@@ -38,6 +47,7 @@ import hashlib
 import json
 import logging
 import os
+import socket
 import threading
 import tempfile
 import time
@@ -61,6 +71,8 @@ NOTE_CONNECTED = "Wakeshift: connected. New messages for this conversation will 
 NOTE_FAILED = ("Wakeshift: couldn't connect this conversation ({}), so new messages won't reach it yet. "
                "To retry, call the app's tool that started watching again.")
 NOTE_OUTDATED = "Wakeshift: couldn't connect this conversation. {}"
+MISSING_CRYPTOGRAPHY = ("Hermes's Python environment is missing the cryptography package, which Wakeshift's plugin "
+                        "needs to check Wakeshift's signatures; ask the user to install it there")
 NOTE_UNSUPPORTED = ("Wakeshift: Hermes can't wake {} conversations yet (only API server and CLI ones), "
                     "so new messages wait until you next use this app's tools.")
 NOTE_PINNED = ("Wakeshift: didn't connect this conversation: {}. If that's the server you use for this app "
@@ -144,6 +156,44 @@ def _origin(raw) -> Optional[str]:
     return f"{p.scheme}://{p.netloc.lower()}"
 
 
+# The program the plugin runs in, as Wakeshift's harness argument names it,
+# and the arguments every Wakeshift app's tool takes (the SDKs' attach adds
+# all three to a wrapped tool's input schema).
+HARNESS = "hermes"
+HARNESS_ARG = "harness"
+WAKE_ARGS = ("session_key", HARNESS_ARG, "conversation_id")
+
+
+def takes_wake_args(schema) -> bool:
+    """Whether a tool's schema (Hermes's registry entry, its input schema under
+    "parameters", or a bare input schema) has Wakeshift's three arguments."""
+    if not isinstance(schema, dict):
+        return False
+    params = schema.get("parameters")
+    props = (params if isinstance(params, dict) else schema).get("properties")
+    return isinstance(props, dict) and all(isinstance(props.get(k), dict) for k in WAKE_ARGS)
+
+
+def fill_harness(schema_of: Callable[[str], Optional[dict]]) -> Callable:
+    """Hermes's tool_request middleware: a call to an MCP tool that takes
+    Wakeshift's arguments gets harness "hermes", whatever the model passed (the
+    plugin knows where it runs; the model may not say, or say something else).
+    Any other tool's arguments are left alone (None). schema_of(tool name) is
+    the tool's schema from Hermes's registry."""
+    def middleware(tool_name: str = "", args=None, **_):
+        if not isinstance(args, dict) or args.get(HARNESS_ARG) == HARNESS or not wire.mcp_server(tool_name or ""):
+            return None
+        try:
+            schema = schema_of(tool_name)
+        except Exception:
+            return None
+        if not takes_wake_args(schema):
+            return None
+        return {"args": {**args, HARNESS_ARG: HARNESS}, "source": "wakeshift",
+                "reason": "names the program this conversation runs in, so Wakeshift can wake it"}
+    return middleware
+
+
 def _loopback(host: str) -> bool:
     import ipaddress
     if host.lower() == "localhost":
@@ -202,13 +252,16 @@ class Wakeshift:
     (session, framed text, batch id) -> accepted."""
 
     def __init__(self, *, state_dir: Path, issuers: list[str], wakers: dict, spawn: Callable = None,
-                 http_get: Callable = None, now: Callable[[], float] = time.time, listener_args: Optional[dict] = None):
+                 http_get: Callable = None, now: Callable[[], float] = time.time, listener_args: Optional[dict] = None,
+                 sleep: Callable[[float], None] = time.sleep):
         self.dir = Path(state_dir)
         self.issuers = [i.rstrip("/") for i in issuers if isinstance(i, str)]
         self.wakers = wakers
         self.spawn = spawn or (lambda target, name: threading.Thread(target=target, name=name, daemon=True))
         self.http_get = http_get or _get
         self.now = now
+        self.sleep = sleep
+        self.told_missing: set = set()  # sessions told cryptography is missing
         self.listener_args = listener_args or {}
         self.lock = threading.Condition()
         self.sessions: dict[str, Session] = {}
@@ -343,7 +396,12 @@ class Wakeshift:
     # -- keys --
     def _key_for(self, issuer: str, kid: str) -> Optional[bytes]:
         """The issuer's Ed25519 key for kid, from a cache refreshed from
-        <issuer>/oauth/jwks when the kid isn't known (at most once a minute)."""
+        <issuer>/oauth/jwks when the kid isn't known (not again within
+        KEYS_REFETCH_AFTER, so made-up kids can't make it fetch on every result).
+        Raises KeysUnavailable when the issuer can't be reached for them, after
+        a few quick tries (a Wakeshift mid-deploy answers again in seconds),
+        and KeyUnknown when its keys, fetched again over those tries (a key
+        being rotated in), don't have kid."""
         if issuer not in self.issuers:
             return None
         path = self.dir / "keys" / (hashlib.sha256(issuer.encode()).hexdigest()[:16] + ".json")
@@ -351,15 +409,23 @@ class Wakeshift:
         if k is not None:
             return k
         try:
-            if self.now() - path.stat().st_mtime < 60:
-                return None
+            if self.now() - path.stat().st_mtime < KEYS_REFETCH_AFTER:
+                raise KeyUnknown(issuer, checked=False)  # fetched just now, without it: not checked again
         except FileNotFoundError:
             pass
-        body = self.http_get(issuer + "/oauth/jwks")
-        if body is None:
-            return None
-        self._write(path, body)
-        return _key_in(path, kid)
+        fetched = False
+        for wait in (0,) + RETRY_WAITS:
+            if wait:
+                self.sleep(wait)
+            body = self.http_get(issuer + "/oauth/jwks")
+            if body is None:
+                continue
+            fetched = True
+            self._write(path, body)
+            k = _key_in(path, kid)
+            if k is not None:
+                return k
+        raise KeyUnknown(issuer, checked=True) if fetched else KeysUnavailable(issuer)
 
     # -- sessions --
     def _session(self, sid: str) -> Session:
@@ -401,6 +467,7 @@ class Wakeshift:
         if not token:
             return None
         if not session_id:
+            log.warning("wakeshift: a beacon in %s's result came with no session, so no conversation was connected", tool_name or "a tool")
             return stripped
         # A beacon proves Wakeshift minted it, not that this result is its
         # app's: one an attacker minted (Hermes tells servers nothing, so it's
@@ -410,14 +477,41 @@ class Wakeshift:
         # beacon's app.
         server = wire.mcp_server(tool_name)
         if not server or wire.result_beacon(result) != token:
+            log.info("wakeshift: ignored a beacon outside an MCP server's own result (%s)", tool_name or "a tool")
             return stripped
         try:
             claims = wire.verify_bound(token, conversation=session_id, call=tool_call_id or "", unbound=True,
                                        issuers=self.issuers, key_for=self._key_for, now=self.now())
-        except (wire.Untrusted, wire.Invalid):
-            return stripped  # not ours to act on; say nothing
+        except ImportError:
+            # Hermes's own environment has cryptography (a core dependency
+            # since it pinned it), so this is a broken or unusual install:
+            # logged every time, and each conversation is told once.
+            log.warning("wakeshift: the cryptography package can't be imported, so beacons can't be checked; "
+                        "install it into the Python environment Hermes runs in")
+            with self.lock:
+                told = session_id in self.told_missing
+                self.told_missing.add(session_id)
+            return stripped if told else wire.add_note(stripped, NOTE_FAILED.format(MISSING_CRYPTOGRAPHY))
+        except KeysUnavailable as e:
+            # Ours to act on (a trusted issuer), but its keys couldn't be
+            # fetched: said, so the conversation isn't left unconnected unawares.
+            log.warning("wakeshift: couldn't reach %s for its keys, so %s's beacon wasn't checked", e, tool_name)
+            return wire.add_note(stripped, NOTE_FAILED.format("Wakeshift couldn't be reached to check it"))
+        except KeyUnknown as e:
+            # A beacon naming a trusted issuer, signed with a key it doesn't
+            # list. Said only once its keys were fetched again to check (a key
+            # being rotated in shows up within those tries), so the chat isn't
+            # left unconnected unawares; a forged beacon gets that note and
+            # nothing else. Against keys fetched moments ago, only logged.
+            log.warning("wakeshift: %s doesn't list the key %s's beacon was signed with", e, tool_name)
+            if not e.checked:
+                return stripped
+            return wire.add_note(stripped, NOTE_FAILED.format("its signing key wasn't one Wakeshift lists"))
+        except (wire.Untrusted, wire.Invalid) as e:
+            log.info("wakeshift: ignored a beacon in %s's result (%s)", tool_name, e)
+            return stripped  # not ours to act on; say nothing to the model
         except Exception:
-            log.debug("wakeshift: checking a beacon failed", exc_info=True)
+            log.warning("wakeshift: checking a beacon failed", exc_info=True)
             return stripped
         # From the tool it names, where it names one (apps on SDKs from before
         # beacons did name none; this is the result's own _meta all the same).
@@ -446,12 +540,15 @@ class Wakeshift:
         held = prior or legacy
         supersedes = held["link"] if held and _same_origin(held["link"], claims.get("iss", "")) else ""
         try:
-            link = _redeem(claims, session_id, call, supersedes)
+            link = _redeem(claims, session_id, call, supersedes, sleep=self.sleep)
         except Outdated as e:
+            log.warning("wakeshift: Wakeshift refused this plugin's version: %s", e)
             return wire.add_note(stripped, NOTE_OUTDATED.format(e))
         except Taken:
+            log.warning("wakeshift: Wakeshift kept a conversation connected where it was (another workspace's session)")
             return wire.add_note(stripped, NOTE_TAKEN)  # the link it had stays
         except RedeemError as e:
+            log.warning("wakeshift: couldn't connect a conversation: %s", e)
             return wire.add_note(stripped, NOTE_FAILED.format(e))
         if not _same_origin(link, claims.get("iss", "")):
             # A link on another host would get the token: refused, unused.
@@ -725,8 +822,52 @@ def _same_origin(link: str, issuer: str) -> bool:
     return bool(b.scheme and b.netloc) and (a.scheme, a.netloc.lower()) == (b.scheme, b.netloc.lower())
 
 
-def _redeem(claims: dict, conversation: str, call: str, supersedes: str = "") -> str:
-    """POST <redeem> {"ticket", "thread"[, "call", "supersedes"]} -> the conversation's stream link."""
+class KeysUnavailable(Exception):
+    """A trusted Wakeshift couldn't be reached for its keys (its argument is
+    the issuer)."""
+
+
+class KeyUnknown(Exception):
+    """A trusted Wakeshift's (issuer's) keys don't have the one a beacon names.
+    checked: they were fetched again (over RETRY_WAITS) to check, rather than
+    read from keys fetched moments ago."""
+
+    def __init__(self, issuer: str, *, checked: bool):
+        super().__init__(issuer)
+        self.issuer = issuer
+        self.checked = checked
+
+
+# Waits before each further try of a request to Wakeshift that couldn't
+# reach it (its keys, a redeem): a deploy's brief unavailability passes.
+RETRY_WAITS = (0.5, 1.5)
+# Keys fetched this recently aren't fetched again for an unknown kid: short
+# enough that a retry after a key rotation finds it, long enough that a
+# made-up kid can't make every result a fetch.
+KEYS_REFETCH_AFTER = 10
+# Answers that mean the request never reached a Wakeshift that could act on it.
+UNAVAILABLE = {502, 503, 504}
+
+
+def _redeem(claims: dict, conversation: str, call: str, supersedes: str = "", sleep: Callable[[float], None] = time.sleep) -> str:
+    """POST <redeem> {"ticket", "thread"[, "call", "supersedes"]} -> the conversation's
+    stream link, tried again (RETRY_WAITS) when Wakeshift couldn't be reached or
+    answered that it's unavailable."""
+    for wait in RETRY_WAITS + (None,):
+        try:
+            return _redeem_once(claims, conversation, call, supersedes)
+        except Unavailable:
+            if wait is None:
+                raise
+            sleep(wait)
+    raise Unavailable("Wakeshift couldn't be reached")  # not reached
+
+
+class Unavailable(RedeemError):
+    """Wakeshift couldn't be reached, or answered that it's unavailable."""
+
+
+def _redeem_once(claims: dict, conversation: str, call: str, supersedes: str = "") -> str:
     body = {"ticket": claims["ticket"], "thread": conversation}
     if call:
         body["call"] = call
@@ -749,9 +890,20 @@ def _redeem(claims: dict, conversation: str, call: str, supersedes: str = "") ->
                            "Wakeshift's hooks for Hermes Agent are out of date. Ask the user whether to update them; only if they agree, run the install command again.")
         if code == "conversation_taken":
             raise Taken("this conversation is connected to another workspace's session")
+        if e.code in UNAVAILABLE and not code:
+            raise Unavailable(f"Wakeshift answered {e.code}")
         raise RedeemError({"unknown_ticket": "the ticket expired or was used",
                            "no_grant": "the app isn't allowed for this agent any more",
                            "wrong_thread": "the ticket was for another conversation"}.get(code, f"Wakeshift answered {e.code}"))
+    except ValueError:  # an answer that isn't JSON: it was redeemed (or refused) all the same
+        raise RedeemError("Wakeshift's answer had no link")
+    except urllib.error.URLError as e:
+        # Tried again only when the request can't have reached Wakeshift (no
+        # connection, no address): after a timeout or a dropped answer the
+        # ticket may be used up already.
+        if isinstance(e.reason, (ConnectionRefusedError, socket.gaierror)):
+            raise Unavailable("Wakeshift couldn't be reached")
+        raise RedeemError("Wakeshift couldn't be reached")
     except Exception:
         raise RedeemError("Wakeshift couldn't be reached")
     url = out.get("url") if isinstance(out, dict) else None

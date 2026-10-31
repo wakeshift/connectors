@@ -73,11 +73,14 @@ class TrustedIssuers(unittest.TestCase):
 class Ctx:
     """Enough of Hermes's PluginContext for register()."""
 
-    def __init__(self, settings=None, get_config=True):
+    def __init__(self, settings=None, get_config=True, middleware=False):
         self.hooks = {}
+        self.middleware = {}
         self.settings = settings or {}
         if get_config:
             self.get_config = lambda key, default=None: self.settings.get(key, default)
+        if middleware:  # Hermes with middleware (0.22.5)
+            self.register_middleware = lambda kind, fn: self.middleware.setdefault(kind, []).append(fn)
 
     def register_hook(self, name, fn):
         self.hooks[name] = fn
@@ -113,6 +116,17 @@ class Register(unittest.TestCase):
 
     def test_a_hermes_without_plugin_settings(self):
         self.assertEqual(self.issuers(Ctx(get_config=False)), [DEFAULT])
+
+    def test_the_harness_middleware(self):
+        ctx = Ctx(middleware=True)
+        wakeshift.register(ctx)
+        ctx.unload()
+        self.assertEqual(list(ctx.middleware), ["tool_request"])
+        (mw,) = ctx.middleware["tool_request"]
+        # Outside Hermes there's no registry: no schema, so nothing changes.
+        self.assertIsNone(mw(tool_name="mcp__try__watch", args={}))
+        # A Hermes without middleware still loads the plugin.
+        self.assertEqual(self.issuers(Ctx()), [DEFAULT])
 
     def test_settings(self):
         self.assertEqual(self.issuers(Ctx({"issuers": ["https://app.staging.wakeshift.ai"]})), ["https://app.staging.wakeshift.ai"])

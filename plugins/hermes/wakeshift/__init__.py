@@ -70,8 +70,17 @@ def _gateway() -> bool:
     return os.environ.get("_HERMES_GATEWAY") == "1" or "gateway" in sys.argv[1:3]
 
 
+def _schema_of(tool_name: str):
+    """A tool's schema from Hermes's registry (None if it has none)."""
+    try:
+        from tools.registry import registry
+        return registry.get_schema(tool_name)
+    except Exception:
+        return None
+
+
 def register(ctx) -> None:
-    from .plugin import ApiRuns, Wakeshift, trusted_issuers
+    from .plugin import ApiRuns, Wakeshift, fill_harness, trusted_issuers
 
     try:
         port = int(os.environ.get("API_SERVER_PORT") or 8642)
@@ -82,9 +91,24 @@ def register(ctx) -> None:
     wakers = {"api_server": ApiRuns(port, _api_key),
               "cli": lambda session, text, batch: bool(ctx.inject_message(text))}
     ws = Wakeshift(state_dir=_hermes_home() / "wakeshift", issuers=trusted_issuers(_setting(ctx), _pinned()), wakers=wakers, spawn=_spawn)
+    try:
+        import cryptography  # noqa: F401  (Hermes's own dependency: checks beacons' signatures)
+    except ImportError:
+        log.warning("wakeshift: the cryptography package can't be imported here, so no conversation can be "
+                    "connected; install it into the Python environment Hermes runs in")
     ctx.register_hook("transform_tool_result", ws.transform)
     ctx.register_hook("pre_llm_call", ws.turn_started)
     ctx.register_hook("on_session_end", ws.turn_ended)
+    # Every Wakeshift app's tool is told it's Hermes, so its results carry a
+    # beacon whether or not the model says so (a Hermes without middleware
+    # still works, as before: the model passes it, or the app sees Hermes's
+    # client name).
+    middleware = getattr(ctx, "register_middleware", None)
+    if callable(middleware):
+        try:
+            middleware("tool_request", fill_harness(_schema_of))
+        except Exception:
+            log.warning("wakeshift: couldn't register the tool_request middleware", exc_info=True)
     try:
         ctx.on_unload(ws.stop)
     except Exception:

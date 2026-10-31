@@ -48,6 +48,9 @@ func TestExactClient(t *testing.T) {
 		"Codex":                   "codex",
 		"Cursor (wakebench)":      "cursor",
 		"codex-mcp-client":        "codex",
+		"hermes-agent":            "hermes",
+		"hermes-agent (x)":        "hermes", // its own name, tagged: still exact
+		"mcp":                     "hermes", // as sent, though Unsure
 	} {
 		h, ok := ExactClient(name)
 		if !ok || h.ID != id {
@@ -73,6 +76,7 @@ func TestForClient(t *testing.T) {
 		"copilot-cli":           "copilot",
 		"antigravity-client":    "antigravity",
 		"mcp":                   "hermes", // the MCP Python SDK's default (Unsure)
+		"hermes-agent":          "hermes", // Hermes Agent 0.22.5's own
 		"goose-cli":             "goose",
 		"Visual Studio Code":    "vscode",
 		"openai-mcp":            "chatgpt", // from OpenAI's developer forum, not captured
@@ -414,6 +418,62 @@ func TestUnsure(t *testing.T) {
 	for _, other := range All() {
 		if other.ID != "hermes" && strings.HasPrefix(SubscribeNote(other, "https://x.test"), "If you're") {
 			t.Errorf("%s: unsure", other.ID)
+		}
+	}
+}
+
+// Hermes Agent 0.22.5 names itself, "hermes-agent": a call with that name is
+// surely Hermes (its notes don't hedge, and a claim can't move it), but its
+// agent keeps the client's own name, as before Wakeshift knew it, so a
+// conversation keeps its session key.
+func TestSurelyHermes(t *testing.T) {
+	for _, client := range []string{"hermes-agent", "Hermes-Agent", " hermes-agent "} {
+		h, via, ok := Recognize(client, nil, "python-httpx2/2.12.0")
+		if !ok || h.ID != "hermes" || via != ByClient || h.Unsure != "" {
+			t.Fatalf("%q: %+v %v %v", client, h, via, ok)
+		}
+		for _, n := range []string{InstallNote(h, "https://x.test"), SubscribeNote(h, "https://x.test"), RepeatNote(h, "https://x.test")} {
+			if strings.Contains(n, "If you're") || strings.Contains(n, "If not") || !strings.Contains(n, "$HERMES_HOME/plugins/wakeshift") {
+				t.Errorf("%q: %s", client, n)
+			}
+		}
+		if got, o := Refine(h, true, "claude-code"); got.ID != "hermes" || o != Ignored {
+			t.Errorf("%q: a claim moved it: %q %q", client, got.ID, o)
+		}
+		if got, o := Refine(h, true, "hermes"); got.ID != "hermes" || o != Confirmed {
+			t.Errorf("%q: %q %q", client, got.ID, o)
+		}
+	}
+	if id := AgentID("hermes-agent"); id != "hermes-agent" {
+		t.Fatalf("agent %q", id)
+	}
+	// "mcp" stays Unsure, and Surely changes only Hermes's own names.
+	h, _ := Get("hermes")
+	for _, c := range []string{"mcp", "MCP", "", "hermes", "Hermes Agent", "claude-code"} {
+		if Surely(h, c).Unsure == "" {
+			t.Errorf("%q made Hermes sure", c)
+		}
+	}
+	if got, o := Refine(Surely(h, "mcp"), true, "claude-code"); got.ID != "claude-code" || o != Decided {
+		t.Errorf("mcp: %q %q", got.ID, o)
+	}
+	claude, _ := Get("claude-code")
+	if Surely(claude, "hermes-agent").ID != "claude-code" || Surely(claude, "claude-code").Unsure != "" {
+		t.Error("Surely changed another harness")
+	}
+}
+
+// A harness is Unsure exactly when it has client names others send too,
+// and those are among its own.
+func TestSharedClients(t *testing.T) {
+	for _, h := range All() {
+		if (h.Unsure != "") != (len(h.Shared) > 0) || NamedByClient(h) != (len(h.Shared) > 0) {
+			t.Errorf("%s: Unsure %q, Shared %v", h.ID, h.Unsure, h.Shared)
+		}
+		for _, s := range h.Shared {
+			if !containsFold(h.Clients, s) {
+				t.Errorf("%s: shared %q isn't one of its clients", h.ID, s)
+			}
 		}
 	}
 }

@@ -170,6 +170,143 @@ class Plugin(unittest.TestCase):
         self.assertIn("couldn't connect this conversation (the ticket was for another conversation)", out["result"])
         self.assertEqual(list((self.dir / "links").glob("*.json")) if (self.dir / "links").exists() else [], [])
 
+    def test_redeem_is_tried_again_while_wakeshift_is_unavailable(self):
+        # A deploy: the load balancer answers 503 (no error code) for a moment.
+        answers = [(503, {}), (502, {}), (200, {"url": self.ws.link})]
+        self.ws.redeem_answer = lambda body: answers.pop(0)
+        waits = []
+        self.p.sleep = waits.append
+        out = json.loads(self.connect())
+        self.assertTrue(out["result"].endswith(plugin.NOTE_CONNECTED))
+        self.assertEqual(len(self.ws.redeems), 3)
+        self.assertEqual(waits, list(plugin.RETRY_WAITS))
+
+    def test_redeem_unavailable_throughout_is_said_and_logged(self):
+        self.ws.redeem_answer = (503, {})
+        self.p.sleep = lambda s: None
+        with self.assertLogs("wakeshift", "WARNING") as logs:
+            out = json.loads(self.connect())
+        self.assertIn("couldn't connect this conversation (Wakeshift answered 503)", out["result"])
+        self.assertIn("call the app's tool that started watching again", out["result"])
+        self.assertEqual(len(self.ws.redeems), 1 + len(plugin.RETRY_WAITS))
+        self.assertNotIn("t-1", "\n".join(logs.output))  # never the ticket
+
+    def test_redeem_retries_only_what_cant_have_reached_wakeshift(self):
+        import socket as so
+        s = so.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()  # nothing listens there: refused
+        waits = []
+        with self.assertRaises(plugin.RedeemError):
+            plugin._redeem({"ticket": "t", "redeem": f"http://127.0.0.1:{port}/v1/connector/redeem"}, "c", "", sleep=waits.append)
+        self.assertEqual(waits, list(plugin.RETRY_WAITS))
+        # A connection that's accepted but never answered may have used the
+        # ticket: not tried again.
+        srv = so.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        old = plugin.opener.open
+        try:
+            plugin.opener.open = lambda req, timeout=10: old(req, timeout=0.3)
+            waits.clear()
+            with self.assertRaises(plugin.RedeemError) as e:
+                plugin._redeem({"ticket": "t", "redeem": f"http://127.0.0.1:{srv.getsockname()[1]}/r"}, "c", "", sleep=waits.append)
+            self.assertNotIsInstance(e.exception, plugin.Unavailable)
+            self.assertEqual(waits, [])
+        finally:
+            plugin.opener.open = old
+            srv.close()
+
+    def test_a_refusal_is_not_tried_again(self):
+        # An answer with an error code is Wakeshift's own: the ticket is spent or refused.
+        self.ws.redeem_answer = (503, {"error": {"code": "unknown_ticket"}})
+        self.p.sleep = lambda s: self.fail("tried again")
+        out = json.loads(self.connect())
+        self.assertIn("the ticket expired or was used", out["result"])
+        self.assertEqual(len(self.ws.redeems), 1)
+
+    def test_keys_out_of_reach_are_said_not_dropped(self):
+        # A trusted Wakeshift's beacon whose keys can't be fetched (mid-deploy):
+        # tried a few times, then the result says it didn't connect, and why.
+        gets = []
+        self.p.http_get = lambda url: gets.append(url)  # always None
+        self.p.sleep = lambda s: None
+        with self.assertLogs("wakeshift", "WARNING") as logs:
+            out = json.loads(self.connect())
+        self.assertIn("couldn't connect this conversation (Wakeshift couldn't be reached to check it)", out["result"])
+        self.assertNotIn("_meta", out)
+        self.assertEqual(gets, [self.ws.url + "/oauth/jwks"] * (1 + len(plugin.RETRY_WAITS)))
+        self.assertEqual(self.ws.redeems, [])
+        self.assertTrue(any("keys" in line for line in logs.output))
+        # Once it answers again, the next result connects.
+        self.p.http_get = plugin._get
+        self.assertTrue(json.loads(self.connect())["result"].endswith(plugin.NOTE_CONNECTED))
+
+    def test_a_key_being_rotated_in_is_fetched_again(self):
+        other = json.dumps({"keys": [{"kid": "old", "kty": "OKP", "crv": "Ed25519", "x": "AAAA"}]}).encode()
+        bodies = [other, self.ws.keys.jwks()]
+        self.p.http_get = lambda url: bodies.pop(0)
+        self.p.sleep = lambda s: None
+        self.assertTrue(json.loads(self.connect())["result"].endswith(plugin.NOTE_CONNECTED))
+
+    def test_a_key_never_listed_is_said(self):
+        other = json.dumps({"keys": []}).encode()
+        gets = []
+        self.p.http_get = lambda url: gets.append(url) or other
+        self.p.sleep = lambda s: None
+        with self.assertLogs("wakeshift", "WARNING"):
+            out = json.loads(self.connect())
+        self.assertIn("couldn't connect this conversation (its signing key wasn't one Wakeshift lists)", out["result"])
+        self.assertEqual(len(gets), 1 + len(plugin.RETRY_WAITS))
+        self.assertEqual(self.ws.redeems, [])
+        # Fetched just now: not again at once (only logged), but again a little later.
+        with self.assertLogs("wakeshift", "WARNING"):
+            self.assertNotIn("Wakeshift:", json.loads(self.connect())["result"])
+        self.assertEqual(len(gets), 1 + len(plugin.RETRY_WAITS))
+        later = time.time() + plugin.KEYS_REFETCH_AFTER + 1
+        self.p.now = lambda: later
+        self.p.http_get = lambda url: gets.append(url) or self.ws.keys.jwks()
+        self.ws.redeem_answer = (200, {"url": self.ws.link})
+        out = json.loads(self.p.transform(tool_name="mcp__try__watch", result=result(self.ws.beacon(exp=int(later) + 60)),
+                                          session_id="sess-1", tool_call_id="call_2"))
+        self.assertTrue(out["result"].endswith(plugin.NOTE_CONNECTED), out)
+
+    def test_missing_cryptography_is_logged_and_said_once_per_conversation(self):
+        blocked = {k: sys.modules.get(k) for k in list(sys.modules) if k == "cryptography" or k.startswith("cryptography.")}
+        try:
+            for k in blocked:
+                sys.modules[k] = None  # import fails, as without the package
+            sys.modules["cryptography"] = None
+            for sid, want in (("sess-1", True), ("sess-1", False), ("sess-2", True)):
+                self.p.turn_started(session_id=sid, platform="api_server")
+                with self.assertLogs("wakeshift", "WARNING"):  # logged every time
+                    out = json.loads(self.p.transform(tool_name="mcp__try__watch", result=result(self.ws.beacon()),
+                                                      session_id=sid, tool_call_id="c"))
+                self.assertNotIn("_meta", out)
+                self.assertEqual("missing the cryptography package" in out["result"], want, sid)
+            self.assertEqual(self.ws.redeems, [])
+        finally:
+            sys.modules.pop("cryptography", None)
+            for k, v in blocked.items():
+                if v is None:
+                    sys.modules.pop(k, None)
+                else:
+                    sys.modules[k] = v
+
+    def test_an_untrusted_beacon_stays_unsaid_even_when_keys_are_out_of_reach(self):
+        # Only a trusted issuer's keys are fetched: another's beacon is still
+        # stripped without a word to the model (it's only logged).
+        other = Wakeshift()
+        try:
+            self.p.http_get = lambda url: self.fail("fetched " + url)
+            self.p.turn_started(session_id="sess-1", platform="api_server")
+            with self.assertLogs("wakeshift", "INFO"):
+                out = self.p.transform(tool_name="mcp__try__watch", result=result(other.beacon()), session_id="sess-1", tool_call_id="c")
+            self.assertEqual(json.loads(out), {"result": "Watching u/ada/hook."})
+        finally:
+            other.close()
+
     def test_redeem_outdated(self):
         msg = "Wakeshift's hooks for Hermes Agent are out of date. Ask the user whether to update them; only if they agree, run `curl -fsSL x/install/hermes.sh | sh`."
         self.ws.redeem_answer = (426, {"error": {"code": "update_required", "message": msg}})
@@ -598,6 +735,51 @@ class TwoApps(unittest.TestCase):
         f = next((self.dir / "links").glob("*.json"))
         (self.dir / "links" / ("0" * 32 + ".json")).write_text(f.read_text())
         self.assertEqual(len(self.p._stored()), 1)
+
+
+class FillHarness(unittest.TestCase):
+    """The tool_request middleware: a Wakeshift app's tool is told it's
+    Hermes; nothing else changes."""
+
+    WAKE = {"type": "object", "properties": {"q": {"type": "string"}, "session_key": {"type": "string"},
+                                             "harness": {"type": "string"}, "conversation_id": {"type": "string"}}}
+
+    def setUp(self):
+        self.schemas = {
+            "mcp__try__watch": {"name": "mcp__try__watch", "parameters": self.WAKE},
+            "mcp__other__search": {"name": "mcp__other__search", "parameters": {"type": "object", "properties": {"q": {"type": "string"}, "harness": {"type": "string"}}}},
+            "mcp__bare__watch": self.WAKE,  # a bare input schema
+            "terminal": {"name": "terminal", "parameters": self.WAKE},
+        }
+        self.mw = plugin.fill_harness(self.schemas.get)
+
+    def test_a_wakeshift_tool_says_hermes(self):
+        for args in ({}, {"q": "x"}, {"harness": ""}, {"harness": "claude-code"}, {"harness": "Hermes Agent", "session_key": "k"}):
+            with self.subTest(args):
+                out = self.mw(tool_name="mcp__try__watch", args=args, original_args=args, session_id="s", tool_call_id="c")
+                self.assertEqual(out["args"], {**args, "harness": "hermes"})
+                self.assertEqual(out["source"], "wakeshift")
+        self.assertEqual(self.mw(tool_name="mcp__bare__watch", args={})["args"], {"harness": "hermes"})
+
+    def test_everything_else_is_left_alone(self):
+        self.assertIsNone(self.mw(tool_name="mcp__try__watch", args={"harness": "hermes"}))  # already
+        self.assertIsNone(self.mw(tool_name="mcp__other__search", args={"q": "x"}))  # not Wakeshift's three
+        self.assertIsNone(self.mw(tool_name="terminal", args={}))  # not an MCP server's
+        self.assertIsNone(self.mw(tool_name="mcp__gone__tool", args={}))  # no schema
+        self.assertIsNone(self.mw(tool_name="mcp__try__watch", args=None))
+        self.assertIsNone(self.mw(args={}))
+
+    def test_a_failing_registry_changes_nothing(self):
+        def boom(name):
+            raise RuntimeError("registry")
+        self.assertIsNone(plugin.fill_harness(boom)(tool_name="mcp__try__watch", args={}))
+
+    def test_takes_wake_args(self):
+        self.assertTrue(plugin.takes_wake_args({"parameters": self.WAKE}))
+        self.assertTrue(plugin.takes_wake_args(self.WAKE))
+        for bad in (None, {}, {"parameters": "x"}, {"parameters": {"properties": {"harness": {}}}},
+                    {"properties": {"session_key": {}, "harness": "string", "conversation_id": {}}}):
+            self.assertFalse(plugin.takes_wake_args(bad), bad)
 
 
 if __name__ == "__main__":
