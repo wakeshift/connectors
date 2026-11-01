@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
 )
 
 // Wake is how Wakeshift's messages reach a harness's conversation.
@@ -138,6 +139,17 @@ type Harness struct {
 	// for it (plugins/ID).
 	Installable bool
 	Plugin      bool
+	// Repo, if set, is the public repository (owner/repo) the harness's own
+	// plugin installer takes Wakeshift's plugin from (Hermes: `hermes plugins
+	// install`): the install offers give that command (OfferCommand) rather
+	// than Wakeshift's installer. Updates still run Wakeshift's installer
+	// (InstallCommand), which replaces the plugin however it was installed.
+	Repo string
+	// Allow, if set, is a command OfferCommand runs after a Repo install to
+	// turn on a setting the install needs, which its Changes disclose (Hermes:
+	// allow_gateway_injection, without which Hermes 0.22.3 and later refuse
+	// the plugin's turns in `hermes chat` conversations).
+	Allow string
 	// Changes says what the install changes, for the user.
 	Changes string
 	// AskAlso, if set, is what the agent also tells the user in the same
@@ -384,16 +396,19 @@ var all = []Harness{
 		// Python SDK's default, which other Python clients send too. The
 		// User-Agent, python-httpx2/2.12.0, is the SDK's either way. Its
 		// plugin also passes the harness argument to every Wakeshift app's
-		// tool (plugins/hermes, fill_harness), for an app that never sees
+		// tool (plugins/hermes, fill_args), for an app that never sees
 		// the client name (a stateless server on a protocol before
 		// 2026-07-28).
 		ID: "hermes", Name: "Hermes Agent", Claim: "hermes", Aliases: []string{"hermes-agent"},
 		Clients: []string{"hermes-agent", "mcp"}, Shared: []string{"mcp"}, Unsure: "you're Hermes Agent (Nous Research)",
 		Wake: Plugin, Ack: "at least once, acknowledged once Hermes accepts the run",
 		Binding: Unbound, Carrier: Meta, Installable: true,
-		Changes:     "adds Wakeshift's plugin, $HERMES_HOME/plugins/wakeshift, and enables it",
-		Run:         "Run it where Hermes runs (inside its container, if it's in one). If Hermes blocks the command, give it to the user to run there.",
-		Trust:       "There's nothing to approve in Hermes, but Hermes loads plugins only when a chat starts or is resumed, so Wakeshift can't wake this chat until they resume it: exit and run `hermes chat --continue` (through Hermes's gateway or API server, restart the gateway and continue the session). A new chat works too. If the installer couldn't enable the plugin, first run `hermes plugins enable wakeshift` where Hermes runs.",
+		Repo:    "wakeshift/hermes-plugin",
+		Changes: "installs Wakeshift's plugin from its public repository, github.com/wakeshift/hermes-plugin, with Hermes's own plugin installer, into $HERMES_HOME/plugins/wakeshift, enables it, and lets it start turns in your Hermes chats (Hermes's allow_gateway_injection setting for it, which Hermes 0.22.3 and later need to wake `hermes chat` conversations); it starts them only in conversations connected to Wakeshift",
+		Allow:   "hermes config set plugins.entries.wakeshift.allow_gateway_injection true",
+		Run: "It runs where Hermes runs (inside its container, if it's in one). Your terminal there may not have `hermes` on its PATH (Hermes's Docker image doesn't): then run each `hermes` in it as `\"$HERMES_PYTHON\" -m hermes_cli.main` (Hermes sets HERMES_PYTHON for its tools), or as /opt/hermes/bin/hermes in Hermes's Docker image. Hermes may hold the command for approval, and in a chat through Hermes's API server nobody can approve it, so put the exact command in your question too, for the user to run where Hermes runs themselves. " +
+			"If Hermes blocks the command, running it fails, or you can't run commands, tell them so in your reply and give them the command to run there: never end your reply without it.",
+		Trust:       "There's nothing to approve in Hermes after the install, but Hermes loads plugins only when a chat starts or is resumed, so Wakeshift can't wake this chat until they resume it: through Hermes's gateway or API server, restart the gateway and continue the session; in `hermes chat`, exit and run `hermes chat --continue`. A new chat works too. If the plugin isn't enabled, first run `hermes plugins enable wakeshift` where Hermes runs.",
 		Resume:      "Then send any message (\"done\" is enough), so I can connect it.",
 		Restart:     "After a later restart of hermes chat, send any message once you've resumed it, so I can reconnect it (conversations through Hermes's gateway reconnect by themselves).",
 		AfterUpdate: "There's nothing to approve again, but Hermes loads plugins only when a chat starts or is resumed: ask them to resume this chat (exit and run `hermes chat --continue`, or restart Hermes's gateway) or start a new one, so it loads the new plugin.",
@@ -674,6 +689,29 @@ func slug(name string) string {
 // toShell is how InstallCommand runs the script it downloads.
 const toShell = " | sh"
 
+// installerURL, when set, is where install commands fetch the scripts
+// from: a published release of the installers (WAKESHIFT_INSTALLER_URL;
+// docs/dependencies.md, "Signed installers").
+var installerURL atomic.Pointer[string]
+
+// SetInstallerURL makes install commands fetch each script, <harness>.sh,
+// from u instead of the Wakeshift's own /install. The scripts there must
+// pin this Wakeshift as their issuer, so only the Wakeshift the release was
+// built for sets it. "" goes back to /install.
+func SetInstallerURL(u string) {
+	u = strings.TrimSuffix(u, "/")
+	installerURL.Store(&u)
+}
+
+// ScriptURL is where a harness's install script is fetched from: the
+// installers' release (SetInstallerURL), else the Wakeshift at base.
+func ScriptURL(h Harness, base string) string {
+	if u := installerURL.Load(); u != nil && *u != "" {
+		return *u + "/" + h.ID + ".sh"
+	}
+	return strings.TrimSuffix(base, "/") + "/install/" + h.ID + ".sh"
+}
+
 // InstallCommand is the command that installs Wakeshift's hooks for a
 // harness from the Wakeshift at base ("" if it has none).
 func InstallCommand(h Harness, base string) string {
@@ -684,7 +722,39 @@ func InstallCommand(h Harness, base string) string {
 	if h.allowTools != "" {
 		sh = " | " + h.allowTools + " sh"
 	}
-	return "curl -fsSL " + strings.TrimSuffix(base, "/") + "/install/" + h.ID + ".sh" + sh
+	return "curl -fsSL " + ScriptURL(h, base) + sh
+}
+
+// pluginIssuer is the Wakeshift a plugin installed from its public
+// repository trusts when nothing says otherwise (plugins/hermes,
+// DEFAULT_ISSUER).
+const pluginIssuer = "https://app.wakeshift.ai"
+
+// originRE is a Wakeshift's address that can go into a shell command and a
+// YAML list as it is.
+var originRE = regexp.MustCompile(`^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?$`)
+
+// OfferCommand is the command an install offer gives for a harness: for
+// one with a Repo, its own plugin installer (`hermes plugins install
+// wakeshift/hermes-plugin --enable`) and its Allow command, followed, for a Wakeshift other than
+// the one the plugin trusts by default, by the setting that makes it trust
+// the Wakeshift at base instead; otherwise InstallCommand.
+func OfferCommand(h Harness, base string) string {
+	if h.Repo == "" || !h.Installable {
+		return InstallCommand(h, base)
+	}
+	cmd := h.ID + " plugins install " + h.Repo + " --enable"
+	if h.Allow != "" {
+		cmd += " && " + h.Allow
+	}
+	origin := strings.TrimSuffix(base, "/")
+	if origin == pluginIssuer || origin == "" {
+		return cmd
+	}
+	if !originRE.MatchString(origin) {
+		return InstallCommand(h, base)
+	}
+	return cmd + " && " + h.ID + ` config set plugins.entries.wakeshift.settings.issuers '["` + origin + `"]'`
 }
 
 // AllowToolsEnv is the variable an install command sets for the installer
@@ -769,7 +839,7 @@ const TermsLine = "Wakeshift's Connector Terms (https://wakeshift.ai/connector-t
 // it can't be woken yet (for a retired harness: at all, and what replaced
 // it).
 func InstallNote(h Harness, base string) string {
-	return unsure(h, installNote(h, InstallCommand(h, base)))
+	return unsure(h, installNote(h, OfferCommand(h, base)))
 }
 
 // unsure is a note for a harness recognized by a client name others send
@@ -929,7 +999,7 @@ func TaskUpgradeNote(h Harness, base string) string {
 // told while Wakeshift's hooks haven't connected it: that the hooks say so
 // in a note if they're installed, and otherwise how to install them.
 func SubscribeNote(h Harness, base string) string {
-	return SubscribeNoteFor(h, InstallCommand(h, base))
+	return SubscribeNoteFor(h, OfferCommand(h, base))
 }
 
 // SubscribeNoteFor is SubscribeNote with the install command given.
@@ -946,7 +1016,7 @@ func SubscribeNoteFor(h Harness, install string) string {
 
 // RepeatNote is SubscribeNote for a conversation that's been told it once
 // already (it subscribed before): short, and without asking the user again.
-func RepeatNote(h Harness, base string) string { return RepeatNoteFor(h, InstallCommand(h, base)) }
+func RepeatNote(h Harness, base string) string { return RepeatNoteFor(h, OfferCommand(h, base)) }
 
 // RepeatNoteFor is RepeatNote with the install command given.
 func RepeatNoteFor(h Harness, install string) string {

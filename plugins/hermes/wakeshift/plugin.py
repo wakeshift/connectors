@@ -14,9 +14,16 @@ be tested without them (``__init__.register`` wires it in).
    - API server sessions: a new run in the same session (POST /v1/runs with its
      session_id, an Idempotency-Key per batch, and author is_bot), on the
      loopback API server with its own key. Acknowledged once the run is accepted.
-   - CLI sessions: ctx.inject_message (the REPL's input queue), framed.
-     Acknowledged only once a turn starts after it (pre_llm_call), so a
-     message still in the queue when the CLI quits comes back.
+   - CLI sessions: ctx.inject_message, framed. Up to Hermes 0.22.2 each
+     `hermes chat` loads its own plugins, and that goes to its REPL's input
+     queue. From 0.22.3 one gateway runs every CLI chat's turns and loads the
+     plugins, so it names the chat (its route key, read in the chat's own
+     hooks) and is a plugin turn in that session, which Hermes allows only
+     with plugins.entries.<plugin>.allow_gateway_injection: true (the user's
+     setting; Wakeshift's installer sets it, saying so). Without it the chat
+     is told when it connects, with the exact fix (cant_wake), and its
+     messages wait. Acknowledged only once a turn starts after it
+     (pre_llm_call), so a message still queued when the chat ends comes back.
    Other platforms (Telegram, Discord…) aren't woken: Hermes's only way to start
    a turn there marks it internal (as if the user's own), which we never use.
 3. Approvals stay as Hermes sets them: a woken run is unattended, so what needs
@@ -30,12 +37,16 @@ be tested without them (``__init__.register`` wires it in).
    state is shared), and a publish that reaches the conversation through two
    of one app's sessions (a superseded one and its successor) starts a turn
    once (_publish).
-5. tool_request middleware (fill_harness): every call to a Wakeshift app's
+5. tool_request middleware (fill_args): every call to a Wakeshift app's
    tool (an MCP tool that takes Wakeshift's three arguments) says it comes from
    Hermes (harness "hermes"), so Wakeshift gives its result a beacon whether or
    not the model said so, even where the app never sees Hermes's client name.
    It names the program only: what a beacon is redeemed for, and for which
-   conversation, is checked as before.
+   conversation, is checked as before. A call that passes no session_key gets
+   this conversation's own for that app (session_key_for): the one Wakeshift
+   gave it in the result whose beacon connected it, from the MCP server
+   pinned to that app, checked against the session the redeem answered,
+   never another conversation's or another app's.
 6. A beacon it should act on but can't (Wakeshift unreachable for its keys or
    the redeem, after a few quick tries) is logged and the result says so, with
    how to retry: never dropped silently.
@@ -73,6 +84,9 @@ NOTE_FAILED = ("Wakeshift: couldn't connect this conversation ({}), so new messa
 NOTE_OUTDATED = "Wakeshift: couldn't connect this conversation. {}"
 MISSING_CRYPTOGRAPHY = ("Hermes's Python environment is missing the cryptography package, which Wakeshift's plugin "
                         "needs to check Wakeshift's signatures; ask the user to install it there")
+# The chat connected, but this Hermes won't let the plugin start its turns
+# (cant_wake says why, and the fix).
+NOTE_CANT_WAKE = "Wakeshift: connected, but new messages can't wake this conversation yet. {}"
 NOTE_UNSUPPORTED = ("Wakeshift: Hermes can't wake {} conversations yet (only API server and CLI ones), "
                     "so new messages wait until you next use this app's tools.")
 NOTE_PINNED = ("Wakeshift: didn't connect this conversation: {}. If that's the server you use for this app "
@@ -174,14 +188,23 @@ def takes_wake_args(schema) -> bool:
     return isinstance(props, dict) and all(isinstance(props.get(k), dict) for k in WAKE_ARGS)
 
 
-def fill_harness(schema_of: Callable[[str], Optional[dict]]) -> Callable:
+SESSION_ARG = "session_key"
+
+
+def fill_args(schema_of: Callable[[str], Optional[dict]], session_key_for: Callable[[str, str], str] = None) -> Callable:
     """Hermes's tool_request middleware: a call to an MCP tool that takes
     Wakeshift's arguments gets harness "hermes", whatever the model passed (the
-    plugin knows where it runs; the model may not say, or say something else).
-    Any other tool's arguments are left alone (None). schema_of(tool name) is
-    the tool's schema from Hermes's registry."""
-    def middleware(tool_name: str = "", args=None, **_):
-        if not isinstance(args, dict) or args.get(HARNESS_ARG) == HARNESS or not wire.mcp_server(tool_name or ""):
+    plugin knows where it runs; the model may not say, or say something else),
+    and, when it passes no session_key, this conversation's own for that app
+    (session_key_for(session, tool name), "" if there's none); a session_key
+    the model passed is left as it is. Any other tool's arguments are left
+    alone (None). schema_of(tool name) is the tool's schema from Hermes's
+    registry."""
+    def middleware(tool_name: str = "", args=None, session_id: str = "", **_):
+        if not isinstance(args, dict) or not wire.mcp_server(tool_name or ""):
+            return None
+        missing_key = not (isinstance(args.get(SESSION_ARG), str) and args[SESSION_ARG].strip())
+        if args.get(HARNESS_ARG) == HARNESS and not (missing_key and session_key_for and session_id):
             return None
         try:
             schema = schema_of(tool_name)
@@ -189,8 +212,21 @@ def fill_harness(schema_of: Callable[[str], Optional[dict]]) -> Callable:
             return None
         if not takes_wake_args(schema):
             return None
-        return {"args": {**args, HARNESS_ARG: HARNESS}, "source": "wakeshift",
-                "reason": "names the program this conversation runs in, so Wakeshift can wake it"}
+        out, why = dict(args), []
+        if args.get(HARNESS_ARG) != HARNESS:
+            out[HARNESS_ARG] = HARNESS
+            why.append("names the program this conversation runs in, so Wakeshift can wake it")
+        if missing_key and session_key_for and session_id:
+            try:
+                key = session_key_for(session_id, tool_name)
+            except Exception:
+                key = ""
+            if key:
+                out[SESSION_ARG] = key
+                why.append("passes this conversation's own session_key for this app, which the call left out")
+        if not why:
+            return None
+        return {"args": out, "source": "wakeshift", "reason": "; ".join(why)}
     return middleware
 
 
@@ -239,6 +275,10 @@ class Session:
     def __init__(self, sid: str):
         self.id = sid
         self.platform = ""
+        # Hermes's route key for the session (agent:main:local:dm:…), read in
+        # its own hooks, where Hermes has one (0.22.3 and later): how a CLI
+        # chat is named to start a turn in it.
+        self.route = ""
         self.listeners: dict[tuple, Listener] = {}  # (issuer, app) -> its link's listener
         # Delivery ID -> its publish key (or ""), for what's in the input
         # queue with no turn started since.
@@ -249,11 +289,15 @@ class Wakeshift:
     """The plugin's state in one Hermes process.
 
     wakers maps a platform ("api_server", "cli") to a function
-    (session, framed text, batch id) -> accepted."""
+    (session, framed text, batch id) -> accepted. route() is Hermes's route
+    key for the session whose hook is running ("" if it has none);
+    cant_wake(platform) says why this Hermes won't let the plugin start that
+    platform's turns, and the fix ("" when it will)."""
 
     def __init__(self, *, state_dir: Path, issuers: list[str], wakers: dict, spawn: Callable = None,
                  http_get: Callable = None, now: Callable[[], float] = time.time, listener_args: Optional[dict] = None,
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep, route: Callable[[], str] = None,
+                 cant_wake: Callable[[str], str] = None):
         self.dir = Path(state_dir)
         self.issuers = [i.rstrip("/") for i in issuers if isinstance(i, str)]
         self.wakers = wakers
@@ -265,6 +309,12 @@ class Wakeshift:
         self.listener_args = listener_args or {}
         self.lock = threading.Condition()
         self.sessions: dict[str, Session] = {}
+        self.route = route or (lambda: "")
+        self.cant_wake = cant_wake or (lambda platform: "")
+        # (session, (issuer, app)) -> the session_key Wakeshift gave the
+        # conversation for that app (its redeem's answer), kept after its link
+        # ends (the key outlives a subscription).
+        self.handles: dict[tuple, str] = {}
 
     # -- files --
     def _link_path(self, sid: str, key: tuple = LEGACY) -> Path:
@@ -310,10 +360,12 @@ class Wakeshift:
                 pass
             raise
 
-    def _save_link(self, sid: str, platform: str, link: str, key: tuple = LEGACY) -> None:
+    def _save_link(self, sid: str, platform: str, link: str, key: tuple = LEGACY, handle: str = "") -> None:
         d = {"session": sid, "platform": platform, "link": link}
         if key != LEGACY:
             d.update(issuer=key[0], app=key[1])
+            if handle:
+                d["session_key"] = handle
         self._write(self._link_path(sid, key), json.dumps(d).encode())
 
     def _forget_link(self, sid: str, key: tuple = LEGACY) -> None:
@@ -337,7 +389,7 @@ class Wakeshift:
                 continue
             if not isinstance(d, dict) or not all(isinstance(d.get(k), str) and d.get(k) for k in ("session", "platform", "link")):
                 continue
-            if not all(isinstance(d.get(k, ""), str) for k in ("issuer", "app")):
+            if not all(isinstance(d.get(k, ""), str) for k in ("issuer", "app", "session_key")):
                 continue
             if self._link_path(d["session"], self._key_of(d)).name == p.name:
                 out.append(d)
@@ -434,6 +486,41 @@ class Wakeshift:
             s = self.sessions[sid] = Session(sid)
         return s
 
+    def _note_route(self, s: Session) -> None:
+        """Records Hermes's route key for s, read in its own hook (call under self.lock)."""
+        try:
+            r = self.route()
+        except Exception:
+            r = ""
+        if isinstance(r, str) and r:
+            s.route = r
+
+    def route_of(self, sid: str) -> str:
+        """Hermes's route key for the session, "" if none was seen."""
+        with self.lock:
+            s = self.sessions.get(sid)
+            return s.route if s is not None else ""
+
+    def session_key_for(self, sid: str, tool_name: str) -> str:
+        """This conversation's session_key for the app whose MCP server tool_name
+        is on: the one Wakeshift gave this conversation (sid) for the app pinned
+        to that server; "" if there's none, or more than one (two Wakeshifts'
+        apps of one name). Never another conversation's, nor another app's."""
+        server = wire.mcp_server(tool_name or "")
+        if not sid or not server:
+            return ""
+        try:
+            pins = json.loads(self._pins_path().read_text()).get("servers")
+        except Exception:
+            return ""
+        app = pins.get(server) if isinstance(pins, dict) else None
+        if not isinstance(app, str) or not app:
+            return ""
+        with self.lock:
+            found = {h for (s, k), h in self.handles.items() if s == sid and k[1] == app and h}
+        found |= {d["session_key"] for d in self._links_of(sid) if d.get("app") == app and d.get("session_key")}
+        return next(iter(found)) if len(found) == 1 else ""
+
     def turn_started(self, session_id: str = "", platform: str = "", **_) -> None:
         """pre_llm_call: the session is busy; resume its stream if it was connected."""
         if not session_id:
@@ -442,6 +529,7 @@ class Wakeshift:
             s = self._session(session_id)
             if platform:
                 s.platform = platform
+            self._note_route(s)
             listening = {k for k, l in s.listeners.items() if not l.stopped}
         self._set_busy(session_id, self.now() + BUSY_FOR, started=True)
         for d in self._links_of(session_id):
@@ -523,7 +611,9 @@ class Wakeshift:
         if pinned:
             return wire.add_note(stripped, NOTE_PINNED.format(pinned, self._pins_path()))
         with self.lock:
-            platform = self._session(session_id).platform
+            s = self._session(session_id)
+            self._note_route(s)
+            platform = s.platform
         if platform not in self.wakers:
             return wire.add_note(stripped, NOTE_UNSUPPORTED.format(platform or "these"))
         call = "" if claims.get("thread") else (tool_call_id or "")
@@ -540,7 +630,7 @@ class Wakeshift:
         held = prior or legacy
         supersedes = held["link"] if held and _same_origin(held["link"], claims.get("iss", "")) else ""
         try:
-            link = _redeem(claims, session_id, call, supersedes, sleep=self.sleep)
+            link, session = _redeem(claims, session_id, call, supersedes, sleep=self.sleep)
         except Outdated as e:
             log.warning("wakeshift: Wakeshift refused this plugin's version: %s", e)
             return wire.add_note(stripped, NOTE_OUTDATED.format(e))
@@ -553,14 +643,33 @@ class Wakeshift:
         if not _same_origin(link, claims.get("iss", "")):
             # A link on another host would get the token: refused, unused.
             return wire.add_note(stripped, NOTE_FAILED.format("its stream link wasn't on the Wakeshift this plugin trusts"))
+        # The session_key Wakeshift gave the conversation for this app: the
+        # one this result tells it to pass back that names the session the
+        # redeem just answered for this conversation (wire.session_key_in),
+        # never a line the tool's own text may carry.
+        handle = wire.session_key_in(stripped, session)
+        with self.lock:
+            if handle:
+                self.handles[(session_id, key)] = handle
+            handle = self.handles.get((session_id, key), "")
         try:
-            self._save_link(session_id, platform, link, key)
+            self._save_link(session_id, platform, link, key, handle)
         except OSError:
             return wire.add_note(stripped, NOTE_FAILED.format("its link couldn't be saved"))
         if legacy is not None:
             self._forget_link(session_id)
         self._set_busy(session_id, self.now() + BUSY_FOR)  # this turn is still running
         self._listen(session_id, platform, link, key, replaces=(LEGACY,) if legacy is not None else ())
+        try:
+            why = self.cant_wake(platform)
+        except Exception:
+            log.warning("wakeshift: couldn't check whether Hermes lets the plugin wake this conversation", exc_info=True)
+            why = ""
+        if why:
+            # Connected (its messages wait, and arrive once Hermes allows it),
+            # but never silently unwoken.
+            log.warning("wakeshift: connected a %s conversation that can't be woken yet: %s", platform, why)
+            return wire.add_note(stripped, NOTE_CANT_WAKE.format(why))
         return wire.add_note(stripped, NOTE_CONNECTED)
 
     def resume(self, platforms: tuple = ("api_server",)) -> int:
@@ -571,6 +680,8 @@ class Wakeshift:
             if d["platform"] in platforms and d["platform"] in self.wakers:
                 with self.lock:
                     self._session(d["session"]).platform = d["platform"]
+                    if d.get("app") and d.get("session_key"):
+                        self.handles.setdefault((d["session"], self._key_of(d)), d["session_key"])
                 if d["session"] not in idle:
                     # A turn this process had running when it stopped ended with it.
                     self._set_busy(d["session"], 0.0)
@@ -607,7 +718,7 @@ class Wakeshift:
         superseded one must not overwrite the new link)."""
         with self.lock:
             if s.listeners.get(key) is l:
-                self._save_link(s.id, platform, link, key)
+                self._save_link(s.id, platform, link, key, self.handles.get((s.id, key), ""))
 
     def _gone(self, s: Session, key: tuple, l: Listener) -> None:
         with self.lock:
@@ -849,9 +960,10 @@ KEYS_REFETCH_AFTER = 10
 UNAVAILABLE = {502, 503, 504}
 
 
-def _redeem(claims: dict, conversation: str, call: str, supersedes: str = "", sleep: Callable[[float], None] = time.sleep) -> str:
+def _redeem(claims: dict, conversation: str, call: str, supersedes: str = "", sleep: Callable[[float], None] = time.sleep) -> tuple:
     """POST <redeem> {"ticket", "thread"[, "call", "supersedes"]} -> the conversation's
-    stream link, tried again (RETRY_WAITS) when Wakeshift couldn't be reached or
+    stream link and its session's handle (<agent>@<label>; "" if the answer
+    has none), tried again (RETRY_WAITS) when Wakeshift couldn't be reached or
     answered that it's unavailable."""
     for wait in RETRY_WAITS + (None,):
         try:
@@ -867,7 +979,7 @@ class Unavailable(RedeemError):
     """Wakeshift couldn't be reached, or answered that it's unavailable."""
 
 
-def _redeem_once(claims: dict, conversation: str, call: str, supersedes: str = "") -> str:
+def _redeem_once(claims: dict, conversation: str, call: str, supersedes: str = "") -> tuple:
     body = {"ticket": claims["ticket"], "thread": conversation}
     if call:
         body["call"] = call
@@ -913,7 +1025,8 @@ def _redeem_once(claims: dict, conversation: str, call: str, supersedes: str = "
         wire.link_parts(url)
     except ValueError:
         raise RedeemError("Wakeshift's answer had no link")
-    return url
+    session = out.get("session")
+    return url, (session if isinstance(session, str) and len(session) <= 512 else "")
 
 
 def _get(url: str) -> Optional[bytes]:

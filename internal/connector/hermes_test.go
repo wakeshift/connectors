@@ -2,6 +2,8 @@ package connector
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -22,7 +24,14 @@ func TestHermesInstall(t *testing.T) {
 	t.Setenv("WAKESHIFT_HOME", t.TempDir())
 	var ran [][]string
 	old := HermesCommand
-	HermesCommand = func(out io.Writer, args ...string) error { ran = append(ran, args); return nil }
+	HermesCommand = func(out io.Writer, args ...string) error {
+		ran = append(ran, args)
+		if args[0] == "config" && args[1] == "get" {
+			fmt.Fprintln(out, "Config key not set: "+args[2])
+			return errors.New("exit status 1")
+		}
+		return nil
+	}
 	t.Cleanup(func() { HermesCommand = old })
 
 	spec, ok := Lookup("hermes")
@@ -50,12 +59,19 @@ func TestHermesInstall(t *testing.T) {
 	if json.Unmarshal(b, &cfg) != nil || len(cfg.Issuers) != 1 || cfg.Issuers[0] != "https://app.wakeshift.test" {
 		t.Fatalf("config: %s", b)
 	}
-	if len(ran) != 1 || strings.Join(ran[0], " ") != "plugins enable wakeshift" || !strings.Contains(out.String(), "Enabled it in Hermes") {
+	// Enabled, and let start turns (CLI chats need it since Hermes 0.22.3), saying so.
+	want := []string{"plugins enable wakeshift", "config get " + HermesAllowKey, "config set " + HermesAllowKey + " true"}
+	if got := joined(ran); strings.Join(got, "; ") != strings.Join(want, "; ") || !strings.Contains(out.String(), "Enabled it in Hermes") ||
+		!strings.Contains(out.String(), "Let it start turns in your Hermes chats ("+HermesAllowKey+": true)") ||
+		!strings.Contains(out.String(), "only in conversations connected to Wakeshift") {
 		t.Fatalf("ran %v: %s", ran, out.String())
 	}
 	// Again: the same files, no error.
 	if err := spec.Install("/bin/wakeshift", "https://app.wakeshift.test", io.Discard); err != nil {
 		t.Fatal(err)
+	}
+	if !exists(filepath.Join(dir, HermesAllowedMarker)) {
+		t.Fatal("no record that the install set it")
 	}
 	// Its state, as the plugin keeps it.
 	state := filepath.Join(home, "wakeshift", "links")
@@ -66,11 +82,22 @@ func TestHermesInstall(t *testing.T) {
 	if err := spec.Uninstall("/bin/wakeshift", &out); err != nil {
 		t.Fatal(err)
 	}
-	if exists(dir) || exists(filepath.Join(home, "wakeshift")) || len(ran) != 1 || strings.Join(ran[0], " ") != "plugins disable wakeshift" {
+	if exists(dir) || exists(filepath.Join(home, "wakeshift")) ||
+		strings.Join(joined(ran), "; ") != "plugins disable wakeshift; config unset "+HermesAllowKey {
 		t.Fatalf("after uninstall: %v %v", ran, out.String())
 	}
 	if !exists(filepath.Join(home, "plugins")) {
 		t.Fatal("removed Hermes's plugins directory")
+	}
+
+	// An install that found it set already doesn't mark it, so uninstalling leaves the user's setting.
+	if err := spec.Install("/bin/wakeshift", "https://app.wakeshift.test", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(filepath.Join(dir, HermesAllowedMarker))
+	ran = nil
+	if err := spec.Uninstall("/bin/wakeshift", io.Discard); err != nil || strings.Join(joined(ran), "; ") != "plugins disable wakeshift" {
+		t.Fatalf("uninstall of an install that didn't set it: %v %v", err, ran)
 	}
 
 	// Without the plugin, its state (if any) is left alone: it may be
@@ -92,6 +119,69 @@ func TestHermesInstall(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(dir, "__init__.py")); string(b) != "def register(ctx): pass\n" {
 		t.Fatal("changed another plugin")
+	}
+}
+
+func joined(ran [][]string) []string {
+	out := make([]string, len(ran))
+	for i, r := range ran {
+		out[i] = strings.Join(r, " ")
+	}
+	return out
+}
+
+// The setting that lets the plugin start turns is set only when it isn't:
+// one the user turned off stays off, and the install says how to turn it on.
+func TestHermesAllowWakes(t *testing.T) {
+	for _, c := range []struct {
+		name, got string
+		getErr    bool
+		set       bool
+		says      string
+	}{
+		{"unset", "Config key not set: x", true, true, "Let it start turns"},
+		{"already on", "true", false, false, "already lets it"},
+		{"turned off", "false", false, false, "Left " + HermesAllowKey + " off"},
+		{"noisy output", "warning: something\ntrue", false, false, "already lets it"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var ran [][]string
+			old := HermesCommand
+			HermesCommand = func(out io.Writer, args ...string) error {
+				ran = append(ran, args)
+				if args[1] == "get" {
+					fmt.Fprintln(out, c.got)
+					if c.getErr {
+						return errors.New("exit status 1")
+					}
+				}
+				return nil
+			}
+			t.Cleanup(func() { HermesCommand = old })
+			var out strings.Builder
+			dir := t.TempDir()
+			hermesAllowWakes(dir, &out)
+			if exists(filepath.Join(dir, HermesAllowedMarker)) != c.set {
+				t.Fatalf("marked %v, set %v", exists(filepath.Join(dir, HermesAllowedMarker)), c.set)
+			}
+			set := len(ran) == 2 && strings.Join(ran[1], " ") == "config set "+HermesAllowKey+" true"
+			if set != c.set || !strings.Contains(out.String(), c.says) {
+				t.Fatalf("ran %v: %s", ran, out.String())
+			}
+			if c.name == "turned off" && !strings.Contains(out.String(), HermesAllowCommand) {
+				t.Fatalf("doesn't say how to turn it on: %s", out.String())
+			}
+		})
+	}
+	// Hermes's command failing: the exact command to run.
+	old := HermesCommand
+	HermesCommand = func(io.Writer, ...string) error { return errors.New("no hermes") }
+	t.Cleanup(func() { HermesCommand = old })
+	var out strings.Builder
+	dir := t.TempDir()
+	hermesAllowWakes(dir, &out)
+	if !strings.Contains(out.String(), "run `"+HermesAllowCommand+"` where Hermes runs") || exists(filepath.Join(dir, HermesAllowedMarker)) {
+		t.Fatal(out.String())
 	}
 }
 

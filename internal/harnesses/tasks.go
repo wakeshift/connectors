@@ -72,9 +72,20 @@ func TaskResult(app, handle string, lines []string) string {
 }
 
 // TaskEnded is a wait's result once the conversation has nothing left to
-// wait for (its last subscription ended): note says why.
-func TaskEnded(note string) string {
-	return "Wakeshift: this wait has ended for good. " + strings.TrimSpace(note) + " Don't call " + WaitTool + " again unless you subscribe again."
+// wait for (its last subscription ended): note says why. It names the
+// conversation's session key, which stays the same: a conversation that
+// subscribes again without it would start a second session.
+func TaskEnded(note, handle string) string {
+	return "Wakeshift: this wait has ended for good. " + strings.TrimSpace(note) + " Don't call " + WaitTool + " again unless you subscribe again. " +
+		"If you do, pass " + SessionArg + "=" + strconv.Quote(handle) + " to this app's tools as before: it's still this conversation's key."
+}
+
+// KeepSessionNote is said in the result of a tool call that unsubscribed
+// the conversation from something: its session key stays the same, so
+// subscribing again (or anything else) passes it as before.
+func KeepSessionNote(handle string) string {
+	return "This conversation's " + SessionArg + " stays " + strconv.Quote(handle) + " after unsubscribing: keep passing it to this app's tools, " +
+		"including when you subscribe again, so Wakeshift treats it as the same conversation (keep it to this conversation; don't share or log it)."
 }
 
 // TaskHooks is a wait's result once Wakeshift's hooks connect the

@@ -79,18 +79,122 @@ def _schema_of(tool_name: str):
         return None
 
 
+def _one_gateway() -> bool:
+    """Whether this Hermes runs every CLI chat's turns in one gateway, which
+    loads the plugins (0.22.3 and later), rather than in each `hermes chat`."""
+    import importlib.util
+    try:
+        return importlib.util.find_spec("hermes_cli.plugin_session") is not None
+    except Exception:
+        return False
+
+
+def _route() -> str:
+    """Hermes's route key for the session whose hook or tool is running here
+    ("" outside one, or on a Hermes without it)."""
+    try:
+        from hermes_cli.plugin_session import session_key
+        r = session_key()
+    except Exception:
+        return ""
+    return r if isinstance(r, str) else ""
+
+
+def _plugin_id(ctx) -> str:
+    pid = getattr(ctx, "plugin_id", None)
+    return pid if isinstance(pid, str) and pid else "wakeshift"
+
+
+def _injection_allowed(ctx) -> bool:
+    """Whether the user lets this plugin start turns in Hermes's sessions
+    (plugins.entries.<plugin>.allow_gateway_injection: true): Hermes's own
+    check where it has one, else its config read the same way. Fails closed."""
+    check = getattr(ctx, "_gateway_injection_allowed", None)
+    if callable(check):
+        try:
+            return check() is True
+        except Exception:
+            return False
+    try:
+        from hermes_cli.config import load_config_readonly as load
+    except ImportError:
+        try:
+            from hermes_cli.config import load_config as load
+        except ImportError:
+            return False
+    try:
+        cfg = load() or {}
+        entry = ((cfg.get("plugins") or {}).get("entries") or {}).get(_plugin_id(ctx))
+    except Exception:
+        return False
+    return isinstance(entry, dict) and entry.get("allow_gateway_injection") is True
+
+
+def allow_command(plugin_id: str) -> str:
+    return f"hermes config set plugins.entries.{plugin_id}.allow_gateway_injection true"
+
+
+def cant_wake_cli(plugin_id: str) -> str:
+    """What the chat is told when this Hermes won't let the plugin start a CLI
+    chat's turns, with the fix."""
+    return ("Since Hermes 0.22.3, Hermes lets a plugin start turns in CLI chats only once the user allows it, and "
+            f"it isn't allowed for Wakeshift's plugin yet. Ask the user to run this where Hermes runs: `{allow_command(plugin_id)}` "
+            f"(in Docker: `docker exec -u hermes <container> hermes config set plugins.entries.{plugin_id}.allow_gateway_injection true`). "
+            "It lets the plugin start turns in this Hermes's chats; Wakeshift starts them only in conversations connected "
+            "to it. It takes effect at once, without a restart, and messages that arrived meanwhile then reach this "
+            "conversation, as long as Hermes is running.")
+
+
+def cli_waker(ctx, ws, one_gateway: bool, allowed):
+    """The CLI's waker: (session, framed text, batch) -> accepted. In a
+    `hermes chat` that loads its own plugins (up to 0.22.2), its REPL's input
+    queue. Where one gateway runs every CLI chat (0.22.3 and later), a plugin
+    turn in the session named by its route key, only while the user allows it
+    (allowed()); never key-less there, which Hermes may hand to another chat."""
+    told: dict = {}  # session -> why it was last refused, logged once (offered again every few seconds)
+
+    def refuse(session: str, why: str) -> bool:
+        if told.get(session) != why:
+            told[session] = why
+            log.warning("wakeshift: can't wake a CLI conversation yet: %s", why)
+        return False
+
+    def wake(session: str, text: str, batch: str) -> bool:
+        if not one_gateway:
+            return bool(ctx.inject_message(text))
+        route = ws.route_of(session)
+        if not route:
+            return refuse(session, "Hermes hasn't named its session to the plugin (it will on the conversation's next turn)")
+        if not allowed():
+            return refuse(session, "Hermes doesn't allow the plugin to start turns; run: " + allow_command(_plugin_id(ctx)))
+        told.pop(session, None)
+        return bool(ctx.inject_message(text, session_key=route))
+    return wake
+
+
 def register(ctx) -> None:
-    from .plugin import ApiRuns, Wakeshift, fill_harness, trusted_issuers
+    from .plugin import ApiRuns, Wakeshift, fill_args, trusted_issuers
 
     try:
         port = int(os.environ.get("API_SERVER_PORT") or 8642)
     except ValueError:
         port = 8642
+    one_gateway = _one_gateway()
+
+    def allowed() -> bool:
+        return _injection_allowed(ctx)
+
+    def cant_wake(platform: str) -> str:
+        if platform == "cli" and one_gateway and not allowed():
+            return cant_wake_cli(_plugin_id(ctx))
+        return ""
+
     # By the session's platform: a gateway's API server sessions get a run on
-    # its API server; a CLI's sessions, its input queue.
-    wakers = {"api_server": ApiRuns(port, _api_key),
-              "cli": lambda session, text, batch: bool(ctx.inject_message(text))}
-    ws = Wakeshift(state_dir=_hermes_home() / "wakeshift", issuers=trusted_issuers(_setting(ctx), _pinned()), wakers=wakers, spawn=_spawn)
+    # its API server; CLI sessions, a turn through inject_message (cli_waker).
+    wakers = {"api_server": ApiRuns(port, _api_key)}
+    ws = Wakeshift(state_dir=_hermes_home() / "wakeshift", issuers=trusted_issuers(_setting(ctx), _pinned()), wakers=wakers,
+                   spawn=_spawn, route=_route, cant_wake=cant_wake)
+    wakers["cli"] = cli_waker(ctx, ws, one_gateway, allowed)
     try:
         import cryptography  # noqa: F401  (Hermes's own dependency: checks beacons' signatures)
     except ImportError:
@@ -102,11 +206,12 @@ def register(ctx) -> None:
     # Every Wakeshift app's tool is told it's Hermes, so its results carry a
     # beacon whether or not the model says so (a Hermes without middleware
     # still works, as before: the model passes it, or the app sees Hermes's
-    # client name).
+    # client name), and gets this conversation's session_key for that app
+    # when the model leaves it out.
     middleware = getattr(ctx, "register_middleware", None)
     if callable(middleware):
         try:
-            middleware("tool_request", fill_harness(_schema_of))
+            middleware("tool_request", fill_args(_schema_of, ws.session_key_for))
         except Exception:
             log.warning("wakeshift: couldn't register the tool_request middleware", exc_info=True)
     try:

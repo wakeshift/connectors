@@ -5,6 +5,30 @@ import (
 	"testing"
 )
 
+// With an installers' release set, install commands fetch each script from
+// it, by name, instead of the Wakeshift's /install; unset, from /install.
+func TestInstallerURL(t *testing.T) {
+	t.Cleanup(func() { SetInstallerURL("") })
+	codex, _ := Get("codex")
+	if got := InstallCommand(codex, "https://x.test/"); got != "curl -fsSL https://x.test/install/codex.sh | sh" {
+		t.Fatalf("default: %q", got)
+	}
+	SetInstallerURL("https://installers.example/releases/latest/download/")
+	if got := InstallCommand(codex, "https://x.test"); got != "curl -fsSL https://installers.example/releases/latest/download/codex.sh | sh" {
+		t.Fatalf("release: %q", got)
+	}
+	if got := ScriptURL(codex, "https://x.test"); got != "https://installers.example/releases/latest/download/codex.sh" {
+		t.Fatalf("script URL: %q", got)
+	}
+	if got := UpgradeNote(codex, "https://x.test"); strings.Contains(got, "x.test/install") || !strings.Contains(got, "releases/latest/download/codex.sh") {
+		t.Fatalf("upgrade note: %q", got)
+	}
+	SetInstallerURL("")
+	if got := ScriptURL(codex, "https://x.test"); got != "https://x.test/install/codex.sh" {
+		t.Fatalf("reset: %q", got)
+	}
+}
+
 // A client's agent is named after its harness, whether it's known by its
 // clientInfo name, its registered name or a variant of the harness's ID;
 // anything else keeps its own name as an ID.
@@ -320,7 +344,7 @@ func TestRepeatNote(t *testing.T) {
 		}
 		first, again := SubscribeNote(h, "https://x.test"), RepeatNote(h, "https://x.test")
 		if len(again) >= len(first) || strings.Contains(again, "Ask the user now") || !strings.Contains(again, "If you haven't asked the user yet") || !strings.Contains(again, "Don't ask again if they said no") ||
-			!strings.Contains(again, agreed(h, InstallCommand(h, "https://x.test"))) {
+			!strings.Contains(again, agreed(h, OfferCommand(h, "https://x.test"))) {
 			t.Errorf("%s: %d vs %d: %s", h.ID, len(again), len(first), again)
 		}
 	}
@@ -409,8 +433,8 @@ func TestUnsure(t *testing.T) {
 		t.Errorf("repeat: %s", n)
 	}
 	n := SubscribeNote(h, "https://x.test")
-	for _, want := range []string{"Ask the user", "Only if they agree", "`curl -fsSL https://x.test/install/hermes.sh | sh`", "$HERMES_HOME/plugins/wakeshift",
-		"inside its container", "give it to the user", `"Wakeshift: connected"`, "even while it's idle"} {
+	for _, want := range []string{"Ask the user", "Only if they agree", "`hermes plugins install wakeshift/hermes-plugin --enable && hermes config set plugins.entries.wakeshift.allow_gateway_injection true && hermes config set plugins.entries.wakeshift.settings.issuers '[\"https://x.test\"]'`", "$HERMES_HOME/plugins/wakeshift",
+		"inside its container", "put the exact command in your question", "never end your reply without it", `"Wakeshift: connected"`, "even while it's idle"} {
 		if !strings.Contains(n, want) {
 			t.Errorf("missing %q: %s", want, n)
 		}
@@ -418,6 +442,53 @@ func TestUnsure(t *testing.T) {
 	for _, other := range All() {
 		if other.ID != "hermes" && strings.HasPrefix(SubscribeNote(other, "https://x.test"), "If you're") {
 			t.Errorf("%s: unsure", other.ID)
+		}
+	}
+}
+
+// Hermes's install offer gives Hermes's own plugin installer, from the
+// plugin's public repository, not a script piped into sh: through Hermes's
+// API server nobody can approve the command, so the agent puts it in its
+// question for the user to run. A Wakeshift other than the one the plugin
+// trusts by default adds the setting that trusts it. Updates still run
+// Wakeshift's installer, which replaces the plugin however it was installed.
+func TestHermesOffer(t *testing.T) {
+	h, _ := Get("hermes")
+	// It also turns on allow_gateway_injection (CLI chats need it since Hermes 0.22.3), as its Changes say.
+	const install = "hermes plugins install wakeshift/hermes-plugin --enable && hermes config set plugins.entries.wakeshift.allow_gateway_injection true"
+	for base, want := range map[string]string{
+		"https://app.wakeshift.ai":   install,
+		"https://app.wakeshift.ai/":  install,
+		"https://staging.example":    install + ` && hermes config set plugins.entries.wakeshift.settings.issuers '["https://staging.example"]'`,
+		"http://localhost:8370/":     install + ` && hermes config set plugins.entries.wakeshift.settings.issuers '["http://localhost:8370"]'`,
+		"https://x.test/'; rm -rf ~": "curl -fsSL https://x.test/'; rm -rf ~/install/hermes.sh | sh",
+	} {
+		if got := OfferCommand(h, base); got != want {
+			t.Errorf("%s: %s", base, got)
+		}
+	}
+	base := "https://app.wakeshift.ai"
+	sub, repeat := SubscribeNote(h, base), RepeatNote(h, base)
+	for _, n := range []string{sub, repeat} {
+		if !strings.Contains(n, "`"+install+"`") || strings.Contains(n, "curl") || strings.Contains(n, "| sh") || strings.Contains(n, "Terms") {
+			t.Errorf("offer: %s", n)
+		}
+		for _, want := range []string{"put the exact command in your question", "If Hermes blocks the command, running it fails, or you can't run commands", "never end your reply without it", "inside its container", "`\"$HERMES_PYTHON\" -m hermes_cli.main`"} {
+			if !strings.Contains(n, want) {
+				t.Errorf("missing %q: %s", want, n)
+			}
+		}
+	}
+	// Consent: asked first, run only on a yes.
+	if !strings.Contains(sub, "Ask the user now") || !strings.Contains(sub, "Only if they agree, run `"+install+"`") || !strings.Contains(repeat, "Don't ask again if they said no") {
+		t.Errorf("consent: %s\n%s", sub, repeat)
+	}
+	if u := UpdateNote(h, base); !strings.Contains(u, "`"+InstallCommand(h, base)+"`") {
+		t.Errorf("update: %s", u)
+	}
+	for _, other := range All() {
+		if other.ID != "hermes" && OfferCommand(other, base) != InstallCommand(other, base) {
+			t.Errorf("%s: %s", other.ID, OfferCommand(other, base))
 		}
 	}
 }

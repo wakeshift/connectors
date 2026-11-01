@@ -134,5 +134,108 @@ class Register(unittest.TestCase):
             self.assertEqual(self.issuers(Ctx({"issuers": ["http://evil.example"]})), [])
 
 
+class InjectCtx:
+    """PluginContext.inject_message, recorded."""
+
+    def __init__(self, allowed=None, ok=True):
+        self.plugin_id = "wakeshift"
+        self.calls: list = []
+        self.ok = ok
+        if allowed is not None:
+            self._gateway_injection_allowed = lambda: allowed
+
+    def inject_message(self, content, role="user", *, session_key=None, origin=None):
+        self.calls.append((content, session_key))
+        return self.ok
+
+
+class Routes:
+    def __init__(self, routes):
+        self.routes = routes
+
+    def route_of(self, sid):
+        return self.routes.get(sid, "")
+
+
+class CliWaker(unittest.TestCase):
+    """How a CLI chat is woken: its own REPL's queue where each `hermes chat`
+    loads its plugins (0.22.2), a turn in the session its route key names
+    where one gateway runs them all (0.22.3+), only while the user allows it,
+    and never key-less there."""
+
+    def test_a_chat_that_loads_its_own_plugins(self):
+        ctx = InjectCtx()
+        wake = wakeshift.cli_waker(ctx, Routes({}), one_gateway=False, allowed=lambda: False)
+        self.assertTrue(wake("s1", "framed", "b"))
+        self.assertEqual(ctx.calls, [("framed", None)])
+
+    def test_one_gateway_names_the_chat(self):
+        ctx = InjectCtx()
+        wake = wakeshift.cli_waker(ctx, Routes({"s1": "agent:main:local:dm:s1"}), one_gateway=True, allowed=lambda: True)
+        self.assertTrue(wake("s1", "framed", "b"))
+        self.assertEqual(ctx.calls, [("framed", "agent:main:local:dm:s1")])
+        ctx.ok = False
+        self.assertFalse(wake("s1", "framed", "b"))  # Hermes refused: not taken, offered again later
+
+    def test_one_gateway_never_injects_without_a_key_or_the_users_leave(self):
+        ctx = InjectCtx()
+        allowed = [False]
+        wake = wakeshift.cli_waker(ctx, Routes({"s1": "agent:main:local:dm:s1"}), one_gateway=True, allowed=lambda: allowed[0])
+        with self.assertLogs("wakeshift", "WARNING") as logs:
+            self.assertFalse(wake("s2", "framed", "b"))  # no route: never key-less, which may reach another chat
+            self.assertFalse(wake("s1", "framed", "b"))  # not allowed
+            self.assertFalse(wake("s1", "framed", "b"))  # said once
+        self.assertEqual(ctx.calls, [])
+        self.assertEqual(len(logs.output), 2)
+        self.assertIn(wakeshift.allow_command("wakeshift"), logs.output[1])
+        allowed[0] = True  # the user ran the command: no restart needed
+        self.assertTrue(wake("s1", "framed", "b"))
+        self.assertEqual(ctx.calls, [("framed", "agent:main:local:dm:s1")])
+
+    def test_what_the_chat_is_told(self):
+        why = wakeshift.cant_wake_cli("wakeshift")
+        self.assertIn("`hermes config set plugins.entries.wakeshift.allow_gateway_injection true`", why)
+        self.assertIn("docker exec -u hermes", why)
+        self.assertIn("without a restart", why)
+
+    def test_allowed_is_hermess_own_check_and_fails_closed(self):
+        self.assertTrue(wakeshift._injection_allowed(InjectCtx(allowed=True)))
+        self.assertFalse(wakeshift._injection_allowed(InjectCtx(allowed=False)))
+        self.assertFalse(wakeshift._injection_allowed(InjectCtx(allowed="yes")))
+        ctx = InjectCtx()
+
+        def boom():
+            raise RuntimeError("config")
+        ctx._gateway_injection_allowed = boom
+        self.assertFalse(wakeshift._injection_allowed(ctx))
+        self.assertFalse(wakeshift._injection_allowed(InjectCtx()))  # outside Hermes: no config to read
+
+    def test_register_tells_a_cli_chat_only_where_it_cant_be_woken(self):
+        home = tempfile.mkdtemp()
+        old = os.environ.get("HERMES_HOME")
+        os.environ["HERMES_HOME"] = home
+        try:
+            for one_gateway, allowed, blocked in ((False, False, False), (True, True, False), (True, False, True)):
+                ctx = Ctx()
+                ctx.plugin_id = "wakeshift"
+                ctx._gateway_injection_allowed = lambda allowed=allowed: allowed
+                real = wakeshift._one_gateway
+                wakeshift._one_gateway = lambda one_gateway=one_gateway: one_gateway
+                try:
+                    wakeshift.register(ctx)
+                finally:
+                    wakeshift._one_gateway = real
+                ws = ctx.hooks["transform_tool_result"].__self__
+                ctx.unload()
+                self.assertEqual(bool(ws.cant_wake("cli")), blocked, (one_gateway, allowed))
+                self.assertEqual(ws.cant_wake("api_server"), "")
+                self.assertIn("cli", ws.wakers)
+        finally:
+            if old is None:
+                os.environ.pop("HERMES_HOME", None)
+            else:
+                os.environ["HERMES_HOME"] = old
+
+
 if __name__ == "__main__":
     unittest.main()

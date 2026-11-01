@@ -4,7 +4,9 @@ tool result as Hermes hands it to transform_tool_result, from "tool" if it
 says, else mcp__app__watch); prints {"result"} (what the model would see),
 then {"run": text} for each turn it starts, as Hermes would run it. Each
 later line ({"result", "tool"}) is another tool result in the same
-conversation, answered with {"result"}. Stops when stdin closes."""
+conversation, answered with {"result"}; {"session_key_for": tool[,
+"session"]} is answered with {"session_key"}, what the tool_request
+middleware would fill in for that tool. Stops when stdin closes."""
 import json
 import sys
 import tempfile
@@ -64,6 +66,11 @@ def report():  # once it's listening: how
 
 threading.Thread(target=report, daemon=True).start()
 for line in iter(sys.stdin.readline, ""):
-    if line.strip():
-        call(json.loads(line))
+    if not line.strip():
+        continue
+    d = json.loads(line)
+    if "session_key_for" in d:  # what the tool_request middleware would fill in for that tool
+        say({"session_key": p.session_key_for(d.get("session", sid), d["session_key_for"])})
+    else:
+        call(d)
 p.stop()

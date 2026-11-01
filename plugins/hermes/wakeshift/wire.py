@@ -224,6 +224,30 @@ def tool_matches(claim: Any, tool: str) -> bool:
     return isinstance(claim, str) and bool(claim) and bool(tool) and normal_tool(claim) == normal_tool(tool)
 
 
+SESSION_KEY_RE = re.compile(r'Pass session_key="([A-Za-z0-9_@#:.~-]{1,100})"')
+
+
+def session_key_in(result: str, session: str) -> str:
+    """The session_key a Hermes MCP result tells the agent to pass back
+    ('Pass session_key="…"', in the result's own text) that names session,
+    the handle Wakeshift's redeem answered (<agent>@<label>): the handle
+    itself, or wsc_<label> (internal/appapi, handleOf). "" if no line does: a
+    line in the tool's own text (a page it fetched) names no session the
+    redeem answered for this conversation."""
+    if not session:
+        return ""
+    try:
+        doc = json.loads(result)
+    except ValueError:
+        return ""
+    text = doc.get("result") if isinstance(doc, dict) else None
+    label = session.rpartition("@")[2] if "@" in session else ""
+    for k in reversed(SESSION_KEY_RE.findall(text) if isinstance(text, str) else []):
+        if k == session or (label and k == "wsc_" + label):
+            return k
+    return ""
+
+
 def add_note(result: str, note: str) -> str:
     """A Hermes tool result with a note for the model after its text."""
     try:

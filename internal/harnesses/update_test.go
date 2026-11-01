@@ -53,7 +53,7 @@ func TestOffersAskWithoutNotice(t *testing.T) {
 	// agree" (or "want it"), "if they agreed and it hasn't run", the yes
 	// option's description, or the user's own shell after a refusal, or it is
 	// followed by "only if they pick yes".
-	command := regexp.MustCompile("`[^`]*/install/[^`]*`")
+	command := regexp.MustCompile("`([^`]*/install/|[a-z]+ plugins install )[^`]*`") // Wakeshift's installer, or the harness's own (OfferCommand)
 	gate := regexp.MustCompile(`(?i)(only if they (agree|want it)[^.` + "`" + `]*, run |if they agreed and it hasn't run, run |\(description: runs |by typing )$`)
 	if bad := "Install Wakeshift's hooks: run `curl -fsSL https://x/install/codex.sh | sh` now."; gate.MatchString(bad[:strings.Index(bad, "`")]) {
 		t.Errorf("the gate accepts an ungated command: %s", bad)

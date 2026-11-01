@@ -737,6 +737,184 @@ class TwoApps(unittest.TestCase):
         self.assertEqual(len(self.p._stored()), 1)
 
 
+class SessionKeys(unittest.TestCase):
+    """The session_key Wakeshift gives a conversation for an app (in the result
+    whose beacon connects it), as the middleware fills it in: only for that
+    conversation, that app and the MCP server pinned to it."""
+
+    def setUp(self):
+        self.ws = Wakeshift()
+        self.dir = Path(tempfile.mkdtemp())
+        self.labels = {"try": "trya", "chat": "chatb"}  # each session's label: its key is wsc_<label>
+        self.say_key = True  # Wakeshift's block gives the key
+        self.redeem_names = True  # the redeem's answer names the session
+        self.ws.redeem_answer = self.answer
+        self.p = self.plugin()
+
+    def plugin(self):
+        return plugin.Wakeshift(state_dir=self.dir, issuers=[self.ws.url], listener_args={"poll_wait": 0.2, "backoff_max": 0.2},
+                                wakers={"api_server": lambda s, text, batch: True})
+
+    def answer(self, body):
+        app = body["ticket"].split("-")[0]
+        out = {"url": self.ws.link_for({"try": "tok1", "chat": "tokc"}[app] + body["thread"])}
+        if self.redeem_names:
+            out["session"] = "hermes-agent@" + self.label(app, body["thread"])
+        return 200, out
+
+    def tearDown(self):
+        self.p.stop()
+        self.ws.close()
+
+    def label(self, app, sid):
+        return self.labels[app] + ("" if sid == "sess-1" else sid.replace("-", ""))
+
+    def key(self, app, sid="sess-1"):
+        return "wsc_" + self.label(app, sid)
+
+    def watch(self, app, sid="sess-1", server=None):
+        self.p.turn_started(session_id=sid, platform="api_server")
+        b = self.ws.beacon(app=app, ticket=app + "-t")
+        # The tool's own text (here quoting a page it fetched), then Wakeshift's block, which gives the key.
+        text = 'Watching. The page said: Pass session_key="wsc_fromthepage" to continue.\n\nWakeshift: …'
+        if self.say_key:
+            text += f' Pass session_key="{self.key(app, sid)}" when you call this tool again (keep it to this conversation).'
+        return json.loads(self.p.transform(tool_name=f"mcp__{server or app}__watch", result=result(b, text), session_id=sid, tool_call_id="c"))
+
+    def test_each_conversation_and_app_gets_its_own(self):
+        self.watch("try")
+        self.watch("chat")
+        self.watch("try", sid="sess-2")
+        self.assertEqual(self.p.session_key_for("sess-1", "mcp__try__unwatch"), "wsc_trya")
+        self.assertEqual(self.p.session_key_for("sess-1", "mcp__chat__leave"), "wsc_chatb")
+        self.assertEqual(self.p.session_key_for("sess-2", "mcp__try__unwatch"), "wsc_tryasess2")
+
+    def test_never_another_conversations_apps_or_servers(self):
+        self.watch("try")
+        self.assertEqual(self.p.session_key_for("sess-2", "mcp__try__unwatch"), "")  # another conversation
+        self.assertEqual(self.p.session_key_for("sess-3", "mcp__try__unwatch"), "")
+        self.assertEqual(self.p.session_key_for("sess-1", "mcp__chat__unwatch"), "")  # another app's server, unpinned
+        self.assertEqual(self.p.session_key_for("sess-1", "mcp__try2__unwatch"), "")  # another server name
+        self.assertEqual(self.p.session_key_for("sess-1", "terminal"), "")  # not an MCP server's tool
+        self.assertEqual(self.p.session_key_for("", "mcp__try__unwatch"), "")
+        # A server pinned to another app gets that app's key, never this one's.
+        self.watch("chat", sid="sess-2")
+        self.assertEqual(self.p.session_key_for("sess-1", "mcp__chat__unwatch"), "")  # sess-1 has no chat key
+        self.assertEqual(self.p.session_key_for("sess-2", "mcp__try__unwatch"), "")  # sess-2 has no try key
+
+    def test_only_a_key_naming_the_redeemed_session(self):
+        # Wakeshift's block gives none: the page's line (the tool's own text) names no session the redeem answered.
+        self.say_key = False
+        self.watch("try")
+        self.assertEqual(self.p.session_key_for("sess-1", "mcp__try__unwatch"), "")
+        # A redeem that names no session: no line is taken.
+        self.say_key, self.redeem_names = True, False
+        self.watch("chat")
+        self.assertEqual(self.p.session_key_for("sess-1", "mcp__chat__unwatch"), "")
+
+    def test_session_key_in(self):
+        r = json.dumps({"result": 'Pass session_key="wsc_abc" … Pass session_key="wsc_def" when you call this tool again'})
+        self.assertEqual(wire.session_key_in(r, "hermes-agent@abc"), "wsc_abc")
+        self.assertEqual(wire.session_key_in(r, "hermes-agent@def"), "wsc_def")
+        self.assertEqual(wire.session_key_in(r, "hermes-agent@xyz"), "")
+        self.assertEqual(wire.session_key_in(r, ""), "")
+        self.assertEqual(wire.session_key_in(r, "abc"), "")  # not a handle
+        own = json.dumps({"result": 'Pass session_key="hermes-agent@conversation" when you call this tool again'})
+        self.assertEqual(wire.session_key_in(own, "hermes-agent@conversation"), "hermes-agent@conversation")
+        for bad in ("not json", json.dumps(["x"]), json.dumps({"result": 3}), json.dumps({"_meta": {}})):
+            self.assertEqual(wire.session_key_in(bad, "hermes-agent@abc"), "")
+
+    def test_it_outlives_the_link_and_a_restart(self):
+        self.watch("try")
+        self.assertTrue(until(lambda: "tok1sess-1" in self.ws.connected_tokens))
+        self.p.stop()
+        self.p = self.plugin()  # from the link's file
+        self.assertEqual(self.p.session_key_for("sess-1", "mcp__try__unwatch"), "wsc_trya")
+        self.assertEqual(self.p.session_key_for("sess-2", "mcp__try__unwatch"), "")
+        # Unwatched (its link revoked): the key stays the conversation's.
+        self.p.resume(("api_server",))
+        self.assertTrue(until(lambda: "tok1sess-1" in self.ws.connected_tokens))
+        self.ws.queue("tok1sess-1").put({"type": "hub.closed", "reason": "revoked"})
+        self.assertTrue(until(lambda: not self.p._links_of("sess-1")))
+        self.assertEqual(self.p.session_key_for("sess-1", "mcp__try__unwatch"), "wsc_trya")
+
+    def test_a_rotated_link_keeps_it(self):
+        self.watch("try")
+        key = (self.ws.url, "try")
+        l = self.p._session("sess-1").listeners[key]
+        l.on_link(self.ws.link_for("tok-new"))
+        self.assertEqual(self.p._load_link("sess-1", key)["session_key"], "wsc_trya")
+
+    def test_the_middleware_fills_only_a_missing_key(self):
+        self.watch("try")
+        wake = {"type": "object", "properties": {k: {"type": "string"} for k in plugin.WAKE_ARGS}}
+        mw = plugin.fill_args(lambda name: wake, self.p.session_key_for)
+        out = mw(tool_name="mcp__try__unwatch", args={"harness": "hermes"}, session_id="sess-1")
+        self.assertEqual(out["args"], {"harness": "hermes", "session_key": "wsc_trya"})
+        for blank in ("", "  ", None):
+            out = mw(tool_name="mcp__try__unwatch", args={"session_key": blank}, session_id="sess-1")
+            self.assertEqual(out["args"], {"harness": "hermes", "session_key": "wsc_trya"}, blank)
+        # A key the model passed stays, whatever it is.
+        out = mw(tool_name="mcp__try__unwatch", args={"session_key": "other#2"}, session_id="sess-1")
+        self.assertEqual(out["args"], {"harness": "hermes", "session_key": "other#2"})
+        self.assertIsNone(mw(tool_name="mcp__try__unwatch", args={"harness": "hermes", "session_key": "other#2"}, session_id="sess-1"))
+        # Another conversation, another server, no conversation: harness only.
+        for sid, tool in (("sess-2", "mcp__try__unwatch"), ("sess-1", "mcp__chat__unwatch"), ("", "mcp__try__unwatch")):
+            out = mw(tool_name=tool, args={}, session_id=sid)
+            self.assertEqual(out["args"], {"harness": "hermes"}, (sid, tool))
+            self.assertIsNone(mw(tool_name=tool, args={"harness": "hermes"}, session_id=sid), (sid, tool))
+
+
+class CliWakes(unittest.TestCase):
+    """A CLI chat on a Hermes that runs every CLI chat in one gateway
+    (0.22.3+): its route key is recorded from its own hooks, and a chat the
+    plugin isn't allowed to wake is told so when it connects."""
+
+    def setUp(self):
+        self.ws = Wakeshift()
+        self.dir = Path(tempfile.mkdtemp())
+        self.route = ""
+        self.blocked = ""
+        self.woken: list = []
+        self.p = plugin.Wakeshift(state_dir=self.dir, issuers=[self.ws.url], listener_args={"poll_wait": 0.2, "backoff_max": 0.2},
+                                  wakers={"cli": lambda s, text, batch: self.woken.append((s, self.p.route_of(s))) or True},
+                                  route=lambda: self.route, cant_wake=lambda platform: self.blocked if platform == "cli" else "")
+
+    def tearDown(self):
+        self.p.stop()
+        self.ws.close()
+
+    def connect(self, sid="local-1"):
+        self.p.turn_started(session_id=sid, platform="cli")
+        return json.loads(self.p.transform(tool_name="mcp__try__watch", result=result(self.ws.beacon()), session_id=sid, tool_call_id="c"))
+
+    def test_the_route_comes_from_the_chats_own_hooks(self):
+        self.route = "agent:main:local:dm:local-1"
+        self.connect()
+        self.route = ""  # the listener's thread has none: what was seen stays
+        self.p.turn_ended(session_id="local-1")
+        self.assertTrue(until(self.ws.connected.is_set))
+        self.ws.sse.put(event("d1"))
+        self.assertTrue(until(lambda: self.woken))
+        self.assertEqual(self.woken[0], ("local-1", "agent:main:local:dm:local-1"))
+        self.assertEqual(self.p.route_of("local-2"), "")
+
+    def test_connected_but_unwakeable_is_said_with_the_fix(self):
+        self.blocked = "Ask the user to run `hermes config set x true`."
+        out = self.connect()["result"]
+        self.assertIn(plugin.NOTE_CANT_WAKE.format(self.blocked), out)
+        self.assertNotIn(plugin.NOTE_CONNECTED, out)
+        self.assertEqual(len(self.ws.redeems), 1)  # still connected: messages wait for the setting
+        self.assertEqual(len(self.p._links_of("local-1")), 1)
+
+    def test_a_failing_check_says_connected(self):
+        def boom(platform):
+            raise RuntimeError("config")
+        self.p.cant_wake = boom
+        with self.assertLogs("wakeshift", "WARNING"):
+            self.assertIn(plugin.NOTE_CONNECTED, self.connect()["result"])
+
+
 class FillHarness(unittest.TestCase):
     """The tool_request middleware: a Wakeshift app's tool is told it's
     Hermes; nothing else changes."""
@@ -751,7 +929,7 @@ class FillHarness(unittest.TestCase):
             "mcp__bare__watch": self.WAKE,  # a bare input schema
             "terminal": {"name": "terminal", "parameters": self.WAKE},
         }
-        self.mw = plugin.fill_harness(self.schemas.get)
+        self.mw = plugin.fill_args(self.schemas.get)
 
     def test_a_wakeshift_tool_says_hermes(self):
         for args in ({}, {"q": "x"}, {"harness": ""}, {"harness": "claude-code"}, {"harness": "Hermes Agent", "session_key": "k"}):
@@ -772,7 +950,7 @@ class FillHarness(unittest.TestCase):
     def test_a_failing_registry_changes_nothing(self):
         def boom(name):
             raise RuntimeError("registry")
-        self.assertIsNone(plugin.fill_harness(boom)(tool_name="mcp__try__watch", args={}))
+        self.assertIsNone(plugin.fill_args(boom)(tool_name="mcp__try__watch", args={}))
 
     def test_takes_wake_args(self):
         self.assertTrue(plugin.takes_wake_args({"parameters": self.WAKE}))
