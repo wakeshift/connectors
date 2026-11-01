@@ -132,6 +132,29 @@ class Plugin(unittest.TestCase):
         self.assertFalse(out["result"].count("Wakeshift: connected"))
         self.assertEqual(self.ws.redeems, [])  # not redeemed: messages wait in the app's results
 
+    def test_a_plugin_loaded_mid_turn_connects_from_the_next_turn(self):
+        # Installed or enabled during the turn: Hermes makes transform_tool_result
+        # live at once, but that turn's pre_llm_call (which names the platform)
+        # ran before the plugin loaded.
+        out = json.loads(self.p.transform(tool_name="mcp__try__watch", result=result(self.ws.beacon()), session_id="sess-1", tool_call_id="c"))
+        self.assertTrue(out["result"].endswith(plugin.NOTE_JUST_LOADED))
+        self.assertNotIn("only API server and CLI", out["result"])
+        self.assertNotIn("Wakeshift: connected.", out["result"])
+        self.assertEqual(self.ws.redeems, [])
+        # The next turn names it, and the next beacon connects it.
+        self.p.turn_ended(session_id="sess-1")
+        self.p.turn_started(session_id="sess-1", platform="api_server")
+        out = json.loads(self.p.transform(tool_name="mcp__try__watch", result=result(self.ws.beacon()), session_id="sess-1", tool_call_id="c2"))
+        self.assertTrue(out["result"].endswith(plugin.NOTE_CONNECTED))
+        self.assertEqual(len(self.ws.redeems), 1)
+
+    def test_a_turn_with_no_platform_isnt_called_just_loaded(self):
+        # A turn that started after the plugin loaded but named no platform.
+        self.p.turn_started(session_id="sess-1")
+        out = json.loads(self.p.transform(tool_name="mcp__try__watch", result=result(self.ws.beacon()), session_id="sess-1", tool_call_id="c"))
+        self.assertIn("can't wake these conversations", out["result"])
+        self.assertNotIn(plugin.NOTE_JUST_LOADED, out["result"])
+
     def test_a_planted_beacon_is_never_redeemed(self):
         # Signed by the pinned Wakeshift and bound to nothing (Hermes tells
         # servers nothing), so only where it came from tells it apart from one

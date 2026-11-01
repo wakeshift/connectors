@@ -89,6 +89,14 @@ MISSING_CRYPTOGRAPHY = ("Hermes's Python environment is missing the cryptography
 NOTE_CANT_WAKE = "Wakeshift: connected, but new messages can't wake this conversation yet. {}"
 NOTE_UNSUPPORTED = ("Wakeshift: Hermes can't wake {} conversations yet (only API server and CLI ones), "
                     "so new messages wait until you next use this app's tools.")
+# A beacon in a turn that started before the plugin loaded (it was installed
+# or enabled during the turn, and Hermes made its hooks live at once): Hermes
+# names a session's platform only when a turn starts (pre_llm_call), so the
+# plugin can't tell yet whether it can wake this one. It can on the next turn.
+NOTE_JUST_LOADED = ("Wakeshift: not connected yet. Wakeshift's plugin for Hermes was loaded during this turn (it was "
+                    "just installed or enabled), so it can connect this conversation only from its next turn. Ask the "
+                    "user to send any message (\"done\" is enough), then call this app's tool again: a note "
+                    "\"Wakeshift: connected\" confirms it. Until then, new messages wait.")
 NOTE_PINNED = ("Wakeshift: didn't connect this conversation: {}. If that's the server you use for this app "
                "(you renamed or re-added it), remove its line from {} and call the app's tool again.")
 NOTE_PIN_FILE = ("Wakeshift: didn't connect this conversation: {} can't be read, so Wakeshift can't check which MCP "
@@ -275,6 +283,10 @@ class Session:
     def __init__(self, sid: str):
         self.id = sid
         self.platform = ""
+        # Whether a turn has started in this session since the plugin loaded
+        # (pre_llm_call, which names the platform): a session the plugin first
+        # sees in a tool result started its turn before the plugin loaded.
+        self.started = False
         # Hermes's route key for the session (agent:main:local:dm:…), read in
         # its own hooks, where Hermes has one (0.22.3 and later): how a CLI
         # chat is named to start a turn in it.
@@ -527,6 +539,7 @@ class Wakeshift:
             return None
         with self.lock:
             s = self._session(session_id)
+            s.started = True
             if platform:
                 s.platform = platform
             self._note_route(s)
@@ -613,8 +626,11 @@ class Wakeshift:
         with self.lock:
             s = self._session(session_id)
             self._note_route(s)
-            platform = s.platform
+            platform, started = s.platform, s.started
         if platform not in self.wakers:
+            if not platform and not started:
+                log.info("wakeshift: a beacon arrived in a turn that started before the plugin loaded; it connects from the next turn")
+                return wire.add_note(stripped, NOTE_JUST_LOADED)
             return wire.add_note(stripped, NOTE_UNSUPPORTED.format(platform or "these"))
         call = "" if claims.get("thread") else (tool_call_id or "")
         key = (claims.get("iss", "").rstrip("/"), claims.get("app", ""))
