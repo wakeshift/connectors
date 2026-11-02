@@ -26,7 +26,7 @@ class Plugin(unittest.TestCase):
         self.dir = Path(tempfile.mkdtemp())
         self.woken: list = []
         self.p = plugin.Wakeshift(state_dir=self.dir, issuers=[self.ws.url], listener_args={"poll_wait": 0.2, "backoff_max": 0.2},
-                                  wakers={"api_server": plugin.ApiRuns(self.api.port, lambda: "api-key"),
+                                  wakers={"api_server": plugin.ApiRuns(self.api.port, lambda: "api-key", allowed=lambda: True),
                                           "cli": lambda s, text, batch: self.woken.append((s, text)) or True})
 
     def tearDown(self):
@@ -399,7 +399,7 @@ class Plugin(unittest.TestCase):
         self.p.turn_started(session_id="sess-1", platform="api_server")  # stopped mid-turn
         self.p.stop()
         again = plugin.Wakeshift(state_dir=self.dir, issuers=[self.ws.url], listener_args={"poll_wait": 0.2},
-                                 wakers={"api_server": plugin.ApiRuns(self.api.port, lambda: "k")})
+                                 wakers={"api_server": plugin.ApiRuns(self.api.port, lambda: "k", allowed=lambda: True)})
         try:
             self.assertEqual(again.resume(("api_server",)), 1)
             self.assertTrue(until(lambda: [l.state for l in again.sessions["sess-1"].listeners.values()] == ["sse"]))
@@ -425,7 +425,7 @@ class Plugin(unittest.TestCase):
         self.ws.sse.put(None)
         self.ws.ack_fail = 0
         again = plugin.Wakeshift(state_dir=self.dir, issuers=[self.ws.url], listener_args={"poll_wait": 0.2, "backoff_max": 0.2},
-                                 wakers={"api_server": plugin.ApiRuns(self.api.port, lambda: "k")})
+                                 wakers={"api_server": plugin.ApiRuns(self.api.port, lambda: "k", allowed=lambda: True)})
         try:
             again.resume(("api_server",))
             self.assertTrue(until(self.ws.connected.is_set))
@@ -611,7 +611,7 @@ class TwoApps(unittest.TestCase):
 
     def plugin(self):
         return plugin.Wakeshift(state_dir=self.dir, issuers=[self.ws.url], listener_args={"poll_wait": 0.2, "backoff_max": 0.2},
-                                wakers={"api_server": plugin.ApiRuns(self.api.port, lambda: "api-key")})
+                                wakers={"api_server": plugin.ApiRuns(self.api.port, lambda: "api-key", allowed=lambda: True)})
 
     def answer(self, body):
         app = "chat" if body["ticket"].startswith("chat") else "try"
@@ -936,6 +936,187 @@ class CliWakes(unittest.TestCase):
         self.p.cant_wake = boom
         with self.assertLogs("wakeshift", "WARNING"):
             self.assertIn(plugin.NOTE_CONNECTED, self.connect()["result"])
+
+
+class UsersLeave(unittest.TestCase):
+    """No plugin-started turn, on any platform, until the user allows it
+    (allow_gateway_injection): the chat is told so when it connects, its
+    messages wait, and they arrive once it's on, without a restart. Wired
+    as Hermes loads it (register)."""
+
+    def setUp(self):
+        import wakeshift as pkg
+        self.pkg = pkg
+        self.ws = Wakeshift()
+        self.api = HermesAPI()
+        self.allowed = False
+        self.injected: list = []
+        self.env = {k: os.environ.get(k) for k in ("HERMES_HOME", "API_SERVER_PORT")}
+        os.environ["HERMES_HOME"] = tempfile.mkdtemp()
+        os.environ["API_SERVER_PORT"] = str(self.api.port)
+        self.real_one_gateway = pkg._one_gateway
+        self.real_route = pkg._route
+
+    def tearDown(self):
+        self.ctx.unload()
+        self.ws.close()
+        self.api.close()
+        self.pkg._one_gateway = self.real_one_gateway
+        self.pkg._route = self.real_route
+        for k, v in self.env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def load(self, one_gateway=True):
+        test = self
+
+        class Ctx:
+            plugin_id = "wakeshift"
+            hooks: dict = {}
+
+            def get_config(self, key, default=None):
+                return [test.ws.url] if key == "issuers" else default
+
+            def _gateway_injection_allowed(self):
+                return test.allowed
+
+            def register_hook(self, name, fn):
+                self.hooks[name] = fn
+
+            def on_unload(self, fn):
+                self.unload = fn
+
+            def inject_message(self, content, role="user", *, session_key=None, origin=None):
+                test.injected.append((content, session_key))
+                return True
+        self.pkg._one_gateway = lambda: one_gateway
+        self.pkg._route = lambda: "agent:main:local:dm:" + self.sid
+        self.ctx = Ctx()
+        self.pkg.register(self.ctx)
+        self.p = self.ctx.hooks["transform_tool_result"].__self__
+        self.p.listener_args = {"poll_wait": 0.2, "backoff_max": 0.2}
+
+    def connect(self, sid, platform):
+        self.sid = sid
+        self.ctx.hooks["pre_llm_call"](session_id=sid, platform=platform)
+        out = json.loads(self.ctx.hooks["transform_tool_result"](tool_name="mcp__try__watch", result=result(self.ws.beacon()),
+                                                                 session_id=sid, tool_call_id="call_1"))["result"]
+        self.ctx.hooks["on_session_end"](session_id=sid)
+        self.assertTrue(until(self.ws.connected.is_set))
+        return out
+
+    def assert_held_until_allowed(self, sid, platform, woken):
+        out = self.connect(sid, platform)
+        self.assertIn(plugin.NOTE_CANT_WAKE.format(self.pkg.cant_wake_text("wakeshift")), out)
+        self.assertIn("`hermes config set plugins.entries.wakeshift.allow_gateway_injection true`", out)
+        self.assertNotIn(plugin.NOTE_CONNECTED, out)
+        with self.assertLogs("wakeshift", "WARNING") as logs:
+            self.ws.sse.put(event("d1"))
+            self.assertFalse(until(woken, within=1.5))  # no turn while it's off
+        self.assertEqual(sum("can't wake" in line for line in logs.output), 1)  # offered again, said once
+        self.assertEqual(self.ws.acked, [])  # held
+        self.allowed = True  # the user ran the command: no restart
+        self.assertTrue(until(woken))
+
+    def test_an_api_server_chat(self):
+        self.load()
+        self.assert_held_until_allowed("sess-1", "api_server", lambda: self.api.runs)
+        self.assertTrue(until(lambda: self.ws.acked == ["d1"]))
+        self.assertEqual(len(self.api.runs), 1)
+        self.assertEqual(self.injected, [])
+
+    def test_a_cli_chat_in_one_gateway(self):
+        self.load(one_gateway=True)
+        self.assert_held_until_allowed("local-1", "cli", lambda: self.injected)
+        self.assertEqual(self.injected[0][1], "agent:main:local:dm:local-1")
+        self.assertEqual(self.api.runs, [])
+
+    def test_a_cli_chat_that_loads_its_own_plugins(self):
+        self.load(one_gateway=False)
+        self.assert_held_until_allowed("cli-1", "cli", lambda: self.injected)
+        self.assertIsNone(self.injected[0][1])
+
+    def test_allowed_says_connected(self):
+        self.allowed = True
+        self.load()
+        self.assertIn(plugin.NOTE_CONNECTED, self.connect("sess-1", "api_server"))
+        self.ws.sse.put(event("d1"))
+        self.assertTrue(until(lambda: self.ws.acked == ["d1"]))
+        self.assertEqual(len(self.api.runs), 1)
+
+
+class ApiRunsGate(unittest.TestCase):
+    def setUp(self):
+        self.api = HermesAPI()
+
+    def tearDown(self):
+        self.api.close()
+
+    def test_no_request_while_its_off_or_the_check_fails(self):
+        def boom():
+            raise RuntimeError("config")
+        for allowed in (lambda: False, lambda: "yes", boom):
+            runs = plugin.ApiRuns(self.api.port, lambda: "k", allowed=allowed, why="run: x")
+            with self.assertLogs("wakeshift", "WARNING") as logs:
+                self.assertFalse(runs("s1", "framed", "b"))
+                self.assertFalse(runs("s1", "framed", "b"))
+            self.assertEqual(len(logs.output), 1)
+            self.assertIn("run: x", logs.output[0])
+        self.assertEqual(self.api.runs, [])
+        on = [False]
+        runs = plugin.ApiRuns(self.api.port, lambda: "k", allowed=lambda: on[0])
+        with self.assertLogs("wakeshift", "WARNING"):
+            self.assertFalse(runs("s1", "framed", "b"))
+        on[0] = True
+        self.assertTrue(runs("s1", "framed", "b"))
+        self.assertEqual(len(self.api.runs), 1)
+
+
+class UpdateCommand(unittest.TestCase):
+    """The one command the out-of-date note gives: Hermes's own update where
+    Hermes can update the plugin, else installing it again over itself."""
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp()) / "wakeshift"
+        self.d.mkdir()
+
+    def cmd(self, catalog=None, record=None):
+        return plugin.update_command(self.d, catalog_record=lambda p: catalog, install_record=lambda name: record)
+
+    def test_hermes_updates_what_it_installed(self):
+        self.assertEqual(self.cmd(catalog={"sha": "abc"}), "hermes plugins update wakeshift")
+        self.assertEqual(self.cmd(record={"source": "https://github.com/wakeshift/hermes-plugin.git", "pinned": False}),
+                         "hermes plugins update wakeshift")
+        (self.d / ".git").mkdir()
+        self.assertEqual(self.cmd(), "hermes plugins update wakeshift")
+
+    def test_otherwise_it_installs_again(self):
+        reinstall = "hermes plugins install wakeshift/hermes-plugin --enable --force"
+        self.assertEqual(self.cmd(), reinstall)  # Wakeshift's installer: no git, no record
+        (self.d / ".git").mkdir()
+        self.assertEqual(self.cmd(record={"source": "x", "pinned": True}), reinstall)  # Hermes won't move a pin
+
+    def test_outside_hermes_or_failing_records(self):
+        def boom(_):
+            raise RuntimeError("records")
+        self.assertEqual(plugin.update_command(self.d), plugin.REINSTALL_COMMAND)  # no hermes_cli here
+        self.assertEqual(plugin.update_command(self.d, catalog_record=boom, install_record=boom), plugin.REINSTALL_COMMAND)
+
+    def test_the_note_without_wakeshifts_own_message(self):
+        ws = Wakeshift()
+        p = plugin.Wakeshift(state_dir=Path(tempfile.mkdtemp()), issuers=[ws.url], wakers={"api_server": lambda *a: True})
+        try:
+            ws.redeem_answer = (426, {"error": {"code": "update_required"}})
+            p.turn_started(session_id="s", platform="api_server")
+            with self.assertLogs("wakeshift", "WARNING"):
+                out = json.loads(p.transform(tool_name="mcp__try__watch", result=result(ws.beacon()), session_id="s", tool_call_id="c"))
+            self.assertIn("`" + plugin.update_command() + "`", out["result"])
+            self.assertNotIn("install command again", out["result"])
+        finally:
+            p.stop()
+            ws.close()
 
 
 class FillHarness(unittest.TestCase):

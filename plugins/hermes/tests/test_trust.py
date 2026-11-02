@@ -165,7 +165,15 @@ class CliWaker(unittest.TestCase):
 
     def test_a_chat_that_loads_its_own_plugins(self):
         ctx = InjectCtx()
-        wake = wakeshift.cli_waker(ctx, Routes({}), one_gateway=False, allowed=lambda: False)
+        allowed = [False]
+        wake = wakeshift.cli_waker(ctx, Routes({}), one_gateway=False, allowed=lambda: allowed[0])
+        with self.assertLogs("wakeshift", "WARNING") as logs:
+            self.assertFalse(wake("s1", "framed", "b"))  # not allowed: no turn on any surface
+            self.assertFalse(wake("s1", "framed", "b"))  # said once
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn(wakeshift.allow_command("wakeshift"), logs.output[0])
+        self.assertEqual(ctx.calls, [])
+        allowed[0] = True  # the user ran the command: no restart needed
         self.assertTrue(wake("s1", "framed", "b"))
         self.assertEqual(ctx.calls, [("framed", None)])
 
@@ -182,20 +190,22 @@ class CliWaker(unittest.TestCase):
         allowed = [False]
         wake = wakeshift.cli_waker(ctx, Routes({"s1": "agent:main:local:dm:s1"}), one_gateway=True, allowed=lambda: allowed[0])
         with self.assertLogs("wakeshift", "WARNING") as logs:
-            self.assertFalse(wake("s2", "framed", "b"))  # no route: never key-less, which may reach another chat
             self.assertFalse(wake("s1", "framed", "b"))  # not allowed
             self.assertFalse(wake("s1", "framed", "b"))  # said once
         self.assertEqual(ctx.calls, [])
-        self.assertEqual(len(logs.output), 2)
-        self.assertIn(wakeshift.allow_command("wakeshift"), logs.output[1])
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn(wakeshift.allow_command("wakeshift"), logs.output[0])
         allowed[0] = True  # the user ran the command: no restart needed
+        with self.assertLogs("wakeshift", "WARNING"):
+            self.assertFalse(wake("s2", "framed", "b"))  # no route: never key-less, which may reach another chat
         self.assertTrue(wake("s1", "framed", "b"))
         self.assertEqual(ctx.calls, [("framed", "agent:main:local:dm:s1")])
 
     def test_what_the_chat_is_told(self):
-        why = wakeshift.cant_wake_cli("wakeshift")
+        why = wakeshift.cant_wake_text("wakeshift")
         self.assertIn("`hermes config set plugins.entries.wakeshift.allow_gateway_injection true`", why)
-        self.assertIn("docker exec -u hermes", why)
+        self.assertIn("`docker exec -u hermes <container> hermes config set plugins.entries.wakeshift.allow_gateway_injection true`", why)
+        self.assertNotIn("0.22.3", why)  # every chat, whatever the platform or version
         self.assertIn("without a restart", why)
 
     def test_allowed_is_hermess_own_check_and_fails_closed(self):
@@ -210,15 +220,16 @@ class CliWaker(unittest.TestCase):
         self.assertFalse(wakeshift._injection_allowed(ctx))
         self.assertFalse(wakeshift._injection_allowed(InjectCtx()))  # outside Hermes: no config to read
 
-    def test_register_tells_a_cli_chat_only_where_it_cant_be_woken(self):
+    def test_register_tells_every_chat_it_cant_be_woken_until_allowed(self):
         home = tempfile.mkdtemp()
         old = os.environ.get("HERMES_HOME")
         os.environ["HERMES_HOME"] = home
         try:
-            for one_gateway, allowed, blocked in ((False, False, False), (True, True, False), (True, False, True)):
+            for one_gateway in (False, True):
+                allowed = [False]
                 ctx = Ctx()
                 ctx.plugin_id = "wakeshift"
-                ctx._gateway_injection_allowed = lambda allowed=allowed: allowed
+                ctx._gateway_injection_allowed = lambda: allowed[0]
                 real = wakeshift._one_gateway
                 wakeshift._one_gateway = lambda one_gateway=one_gateway: one_gateway
                 try:
@@ -227,9 +238,14 @@ class CliWaker(unittest.TestCase):
                     wakeshift._one_gateway = real
                 ws = ctx.hooks["transform_tool_result"].__self__
                 ctx.unload()
-                self.assertEqual(bool(ws.cant_wake("cli")), blocked, (one_gateway, allowed))
-                self.assertEqual(ws.cant_wake("api_server"), "")
-                self.assertIn("cli", ws.wakers)
+                for platform in ("cli", "api_server"):
+                    self.assertEqual(ws.cant_wake(platform), wakeshift.cant_wake_text("wakeshift"), (one_gateway, platform))
+                self.assertEqual(ws.cant_wake("telegram"), "")  # not woken at all: NOTE_UNSUPPORTED says so
+                with self.assertLogs("wakeshift", "WARNING"):
+                    self.assertFalse(ws.wakers["api_server"]("s1", "framed", "b"))
+                allowed[0] = True  # read again on each check: no restart
+                for platform in ("cli", "api_server"):
+                    self.assertEqual(ws.cant_wake(platform), "", (one_gateway, platform))
         finally:
             if old is None:
                 os.environ.pop("HERMES_HOME", None)

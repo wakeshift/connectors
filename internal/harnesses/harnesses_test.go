@@ -468,7 +468,10 @@ func TestUnsure(t *testing.T) {
 // same command over the installed plugin (TestHermesUpdate).
 func TestHermesOffer(t *testing.T) {
 	h, _ := Get("hermes")
-	// It also turns on allow_gateway_injection (CLI chats need it since Hermes 0.22.3), as its Changes say.
+	// It also turns on allow_gateway_injection (every Hermes chat needs it), as its Changes say.
+	if !strings.Contains(h.Changes, "allow_gateway_injection") || !strings.Contains(h.Changes, "wakes no Hermes chat, through the API server or `hermes chat`") || strings.Contains(h.Changes, "0.22.3") {
+		t.Errorf("Changes: %s", h.Changes)
+	}
 	const install = "hermes plugins install wakeshift/hermes-plugin --enable && hermes config set plugins.entries.wakeshift.allow_gateway_injection true"
 	for base, want := range map[string]string{
 		"https://app.wakeshift.ai":   install,

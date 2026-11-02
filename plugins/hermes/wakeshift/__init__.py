@@ -1,5 +1,6 @@
 """Wakeshift's plugin for Hermes Agent: lets Wakeshift messages wake your Hermes
-conversations (API server and CLI ones). Installed by
+conversations (API server and CLI ones), only once the user allows it
+(plugins.entries.wakeshift.allow_gateway_injection: true). Installed by
 ``hermes plugins install wakeshift``, by Wakeshift's installer
 (``/install/hermes.sh``) or by ``wakeshift install --harness hermes``; remove
 it with ``hermes plugins remove wakeshift``. See plugin.py for what it does,
@@ -131,26 +132,35 @@ def _injection_allowed(ctx) -> bool:
 
 
 def allow_command(plugin_id: str) -> str:
+    """The command that lets the plugin start turns (_injection_allowed)."""
     return f"hermes config set plugins.entries.{plugin_id}.allow_gateway_injection true"
 
 
-def cant_wake_cli(plugin_id: str) -> str:
-    """What the chat is told when this Hermes won't let the plugin start a CLI
-    chat's turns, with the fix."""
-    return ("Since Hermes 0.22.3, Hermes lets a plugin start turns in CLI chats only once the user allows it, and "
-            f"it isn't allowed for Wakeshift's plugin yet. Ask the user to run this where Hermes runs: `{allow_command(plugin_id)}` "
-            f"(in Docker: `docker exec -u hermes <container> hermes config set plugins.entries.{plugin_id}.allow_gateway_injection true`). "
+def cant_wake_text(plugin_id: str) -> str:
+    """What a chat is told when it connects while the user hasn't let the
+    plugin start turns (allow_gateway_injection), with the fix."""
+    return ("Wakeshift's plugin starts turns in Hermes's chats only once the user allows it (Hermes's "
+            "allow_gateway_injection setting for the plugin), and it isn't allowed yet. "
+            f"Ask the user to run this where Hermes runs: `{allow_command(plugin_id)}` "
+            f"(in Docker: `docker exec -u hermes <container> {allow_command(plugin_id)}`). "
             "It lets the plugin start turns in this Hermes's chats; Wakeshift starts them only in conversations connected "
             "to it. It takes effect at once, without a restart, and messages that arrived meanwhile then reach this "
             "conversation, as long as Hermes is running.")
 
 
+def not_allowed(plugin_id: str) -> str:
+    """Why a waker refused while the user hasn't allowed it, for the log."""
+    return "Hermes doesn't allow the plugin to start turns; run: " + allow_command(plugin_id)
+
+
 def cli_waker(ctx, ws, one_gateway: bool, allowed):
-    """The CLI's waker: (session, framed text, batch) -> accepted. In a
-    `hermes chat` that loads its own plugins (up to 0.22.2), its REPL's input
-    queue. Where one gateway runs every CLI chat (0.22.3 and later), a plugin
-    turn in the session named by its route key, only while the user allows it
-    (allowed()); never key-less there, which Hermes may hand to another chat."""
+    """The CLI's waker: (session, framed text, batch) -> accepted, only while
+    the user lets the plugin start turns (allowed(), read on each try, so
+    turning it on needs no restart). In a `hermes chat` that loads its own
+    plugins (up to 0.22.2), its REPL's input queue. Where one gateway runs
+    every CLI chat (0.22.3 and later), a plugin turn in the session named by
+    its route key; never key-less there, which Hermes may hand to another
+    chat."""
     told: dict = {}  # session -> why it was last refused, logged once (offered again every few seconds)
 
     def refuse(session: str, why: str) -> bool:
@@ -160,13 +170,14 @@ def cli_waker(ctx, ws, one_gateway: bool, allowed):
         return False
 
     def wake(session: str, text: str, batch: str) -> bool:
+        if not allowed():
+            return refuse(session, not_allowed(_plugin_id(ctx)))
         if not one_gateway:
+            told.pop(session, None)
             return bool(ctx.inject_message(text))
         route = ws.route_of(session)
         if not route:
             return refuse(session, "Hermes hasn't named its session to the plugin (it will on the conversation's next turn)")
-        if not allowed():
-            return refuse(session, "Hermes doesn't allow the plugin to start turns; run: " + allow_command(_plugin_id(ctx)))
         told.pop(session, None)
         return bool(ctx.inject_message(text, session_key=route))
     return wake
@@ -184,14 +195,17 @@ def register(ctx) -> None:
     def allowed() -> bool:
         return _injection_allowed(ctx)
 
+    # No plugin-started turn on any platform until the user allows it
+    # (plugins.entries.<plugin>.allow_gateway_injection: true): a chat that
+    # connects meanwhile is told so, with the command, and its messages wait.
     def cant_wake(platform: str) -> str:
-        if platform == "cli" and one_gateway and not allowed():
-            return cant_wake_cli(_plugin_id(ctx))
+        if platform in wakers and not allowed():
+            return cant_wake_text(_plugin_id(ctx))
         return ""
 
     # By the session's platform: a gateway's API server sessions get a run on
     # its API server; CLI sessions, a turn through inject_message (cli_waker).
-    wakers = {"api_server": ApiRuns(port, _api_key)}
+    wakers = {"api_server": ApiRuns(port, _api_key, allowed=allowed, why=not_allowed(_plugin_id(ctx)))}
     ws = Wakeshift(state_dir=_hermes_home() / "wakeshift", issuers=trusted_issuers(_setting(ctx), _pinned()), wakers=wakers,
                    spawn=_spawn, route=_route, cant_wake=cant_wake)
     wakers["cli"] = cli_waker(ctx, ws, one_gateway, allowed)

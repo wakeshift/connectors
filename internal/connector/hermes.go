@@ -125,7 +125,7 @@ func (i hermesInstaller) Install(bin string, out io.Writer) error {
 	}
 	if err := HermesCommand(out, "plugins", "enable", "wakeshift"); err != nil {
 		fmt.Fprintln(out, "Couldn't enable it here: run `hermes plugins enable wakeshift` where Hermes runs (in Hermes's Docker image: /opt/hermes/bin/hermes plugins enable wakeshift), "+
-			"then `"+HermesAllowCommand+"`, which lets it wake `hermes chat` conversations.")
+			"then `"+HermesAllowCommand+"`, which lets it start turns in your Hermes chats.")
 		return nil
 	}
 	fmt.Fprintln(out, "Enabled it in Hermes (hermes plugins enable wakeshift).")
@@ -134,11 +134,11 @@ func (i hermesInstaller) Install(bin string, out io.Writer) error {
 }
 
 // HermesAllowKey is Hermes's setting that lets a plugin start turns in its
-// sessions. Since Hermes 0.22.3 one gateway runs every `hermes chat`
-// conversation and loads the plugins, so the plugin wakes a CLI chat with a
-// plugin turn in its session, which Hermes allows only with this setting
-// (a user's setting: a plugin can't set it through Hermes's plugin API). The
-// install sets it, as the install's offer says (harnesses: Hermes's
+// sessions (a user's setting: a plugin can't set it through Hermes's plugin
+// API). The plugin starts no turn in any Hermes chat without it: since
+// Hermes 0.22.3 Hermes itself refuses a plugin's turns in `hermes chat`
+// conversations, and the plugin holds API server chats' messages until it's
+// on. The install sets it, as the install's offer says (harnesses: Hermes's
 // Changes), unless the user turned it off.
 const HermesAllowKey = "plugins.entries.wakeshift.allow_gateway_injection"
 
@@ -161,14 +161,14 @@ func hermesAllowWakes(dir string, out io.Writer) {
 	case err == nil && v == "true":
 		fmt.Fprintf(out, "Hermes already lets it start turns in your chats (%s: true).\n", HermesAllowKey)
 	case err == nil && v == "false":
-		fmt.Fprintf(out, "Left %s off, as it was set: on Hermes 0.22.3 and later, Wakeshift can't wake `hermes chat` conversations until it's on (%s).\n", HermesAllowKey, HermesAllowCommand)
+		fmt.Fprintf(out, "Left %s off, as it was set: Wakeshift can't wake your Hermes chats until it's on (%s).\n", HermesAllowKey, HermesAllowCommand)
 	default:
 		if err := HermesCommand(io.Discard, "config", "set", HermesAllowKey, "true"); err != nil {
-			fmt.Fprintf(out, "Couldn't let it wake `hermes chat` conversations: run `%s` where Hermes runs.\n", HermesAllowCommand)
+			fmt.Fprintf(out, "Couldn't let it start turns in your Hermes chats, which it needs to wake any of them: run `%s` where Hermes runs.\n", HermesAllowCommand)
 			return
 		}
 		os.WriteFile(filepath.Join(dir, HermesAllowedMarker), []byte("set by Wakeshift's installer; uninstalling removes "+HermesAllowKey+"\n"), 0o644)
-		fmt.Fprintf(out, "Let it start turns in your Hermes chats (%s: true), which Hermes 0.22.3 and later need for it to wake `hermes chat` conversations. "+
+		fmt.Fprintf(out, "Let it start turns in your Hermes chats (%s: true), which it needs to wake any of them. "+
 			"It starts them only in conversations connected to Wakeshift. To turn it off: hermes config set %s false.\n", HermesAllowKey, HermesAllowKey)
 	}
 }

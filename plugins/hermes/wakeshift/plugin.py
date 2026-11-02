@@ -10,7 +10,12 @@ be tested without them (``__init__.register`` wires it in).
    "Wakeshift: connected …".
 2. A Listener holds the link (SSE, else long poll) and hands each batch to the
    session once it's idle (between turns: pre_llm_call / on_session_end), framed
-   as outside data (wire.prompt), never as the user speaking:
+   as outside data (wire.prompt), never as the user speaking. No turn starts,
+   on any platform, until the user lets the plugin start them:
+   plugins.entries.<plugin>.allow_gateway_injection: true (the user's setting,
+   read on every try, so turning it on needs no restart; Wakeshift's installer
+   sets it, saying so). Without it the chat is told when it connects, with the
+   exact command (cant_wake), and its messages wait, then arrive once it's on.
    - API server sessions: a new run in the same session (POST /v1/runs with its
      session_id, an Idempotency-Key per batch, and author is_bot), on the
      loopback API server with its own key. Acknowledged once the run is accepted.
@@ -18,12 +23,9 @@ be tested without them (``__init__.register`` wires it in).
      `hermes chat` loads its own plugins, and that goes to its REPL's input
      queue. From 0.22.3 one gateway runs every CLI chat's turns and loads the
      plugins, so it names the chat (its route key, read in the chat's own
-     hooks) and is a plugin turn in that session, which Hermes allows only
-     with plugins.entries.<plugin>.allow_gateway_injection: true (the user's
-     setting; Wakeshift's installer sets it, saying so). Without it the chat
-     is told when it connects, with the exact fix (cant_wake), and its
-     messages wait. Acknowledged only once a turn starts after it
-     (pre_llm_call), so a message still queued when the chat ends comes back.
+     hooks) and is a plugin turn in that session, which Hermes itself also
+     allows only with that setting. Acknowledged only once a turn starts after
+     it (pre_llm_call), so a message still queued when the chat ends comes back.
    Other platforms (Telegram, Discord…) aren't woken: Hermes's only way to start
    a turn there marks it internal (as if the user's own), which we never use.
 3. Approvals stay as Hermes sets them: a woken run is unattended, so what needs
@@ -250,13 +252,29 @@ def _loopback(host: str) -> bool:
 
 class ApiRuns:
     """Starts a run in an API server session: POST /v1/runs on the loopback
-    API server, with its key."""
+    API server, with its key, only while the user lets the plugin start
+    turns (allowed(), read on each try, so turning it on needs no restart;
+    why is logged, once per session, while it's off). A refused message
+    isn't taken: it's offered again, and runs once it's allowed."""
 
-    def __init__(self, port: int, key: Callable[[], str]):
+    def __init__(self, port: int, key: Callable[[], str], *, allowed: Callable[[], bool], why: str = ""):
         self.base = f"http://127.0.0.1:{port}"
         self.key = key
+        self.allowed = allowed
+        self.why = why or "Hermes doesn't allow the plugin to start turns"
+        self.told: set = set()
 
     def __call__(self, session: str, text: str, batch: str) -> bool:
+        try:
+            ok = self.allowed() is True
+        except Exception:
+            ok = False
+        if not ok:
+            if session not in self.told:
+                self.told.add(session)
+                log.warning("wakeshift: can't wake an API server conversation yet: %s", self.why)
+            return False
+        self.told.discard(session)
         body = json.dumps({"input": text, "session_id": session, "author": AUTHOR}).encode()
         req = urllib.request.Request(self.base + "/v1/runs", data=body, method="POST")
         req.add_header("Content-Type", "application/json")
@@ -923,6 +941,54 @@ class Taken(RedeemError):
     (409 conversation_taken): the link it has stays."""
 
 
+# How the plugin is updated: Hermes's own update, for a plugin it installed
+# from the repository or the catalog, else installing it again over itself.
+UPDATE_COMMAND = "hermes plugins update wakeshift"
+REINSTALL_COMMAND = "hermes plugins install wakeshift/hermes-plugin --enable --force"
+
+
+def update_command(d: Path = None, catalog_record: Callable = None, install_record: Callable = None) -> str:
+    """The one command that updates the plugin in its directory (d): `hermes
+    plugins update wakeshift` where Hermes can (a catalog install, or one
+    from the repository that isn't pinned to a commit: a git checkout, or a
+    tree Hermes recorded the source of), else installing it again with
+    --force (Wakeshift's installer writes the plugin itself, so Hermes has
+    nothing to update it from). catalog_record(d) and install_record(name)
+    are Hermes's records (read from Hermes when not given)."""
+    d = Path(d or Path(__file__).parent)
+    if catalog_record is None:
+        def catalog_record(p):
+            from hermes_cli.plugins_cmd_catalog import catalog_install_record
+            return catalog_install_record(p)
+    if install_record is None:
+        def install_record(name):
+            from hermes_cli.plugins_cmd_git import _read_install_metadata
+            return _read_install_metadata().get(name)
+    try:
+        if catalog_record(d):
+            return UPDATE_COMMAND
+    except Exception:
+        pass
+    try:
+        rec = install_record(d.name)
+    except Exception:
+        rec = None
+    rec = rec if isinstance(rec, dict) else {}
+    if rec.get("pinned") is True:
+        return REINSTALL_COMMAND  # Hermes won't move a pinned install
+    if (d / ".git").exists() or (isinstance(rec.get("source"), str) and rec["source"]):
+        return UPDATE_COMMAND
+    return REINSTALL_COMMAND
+
+
+def outdated_message(command: str = None) -> str:
+    """What the chat is told when Wakeshift refuses this plugin's version
+    and doesn't say what to do (its own message comes first)."""
+    return ("Wakeshift's plugin for Hermes Agent is out of date. Ask the user whether to update it; only if they agree, "
+            f"run `{command or update_command()}` where Hermes runs (inside its container, if it's in one), then resume "
+            "this chat or start a new one, so Hermes loads the new plugin.")
+
+
 def _publish(d: dict) -> str:
     """Which of its app's publishes a delivery carries, the same in every
     session it reached ("" if it doesn't say): a topic copy has the
@@ -1014,8 +1080,7 @@ def _redeem_once(claims: dict, conversation: str, call: str, supersedes: str = "
         except Exception:
             code, message = None, None
         if e.code == 426 or code == "update_required":
-            raise Outdated(message if isinstance(message, str) and message else
-                           "Wakeshift's hooks for Hermes Agent are out of date. Ask the user whether to update them; only if they agree, run the install command again.")
+            raise Outdated(message if isinstance(message, str) and message else outdated_message())
         if code == "conversation_taken":
             raise Taken("this conversation is connected to another workspace's session")
         if e.code in UNAVAILABLE and not code:

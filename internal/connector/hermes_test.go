@@ -59,7 +59,7 @@ func TestHermesInstall(t *testing.T) {
 	if json.Unmarshal(b, &cfg) != nil || len(cfg.Issuers) != 1 || cfg.Issuers[0] != "https://app.wakeshift.test" {
 		t.Fatalf("config: %s", b)
 	}
-	// Enabled, and let start turns (CLI chats need it since Hermes 0.22.3), saying so.
+	// Enabled, and let start turns (every Hermes chat needs it), saying so.
 	want := []string{"plugins enable wakeshift", "config get " + HermesAllowKey, "config set " + HermesAllowKey + " true"}
 	if got := joined(ran); strings.Join(got, "; ") != strings.Join(want, "; ") || !strings.Contains(out.String(), "Enabled it in Hermes") ||
 		!strings.Contains(out.String(), "Let it start turns in your Hermes chats ("+HermesAllowKey+": true)") ||

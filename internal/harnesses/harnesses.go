@@ -148,8 +148,9 @@ type Harness struct {
 	Repo string
 	// Allow, if set, is a command OfferCommand (and UpdateCommand) runs after a Repo install to
 	// turn on a setting the install needs, which its Changes disclose (Hermes:
-	// allow_gateway_injection, without which Hermes 0.22.3 and later refuse
-	// the plugin's turns in `hermes chat` conversations).
+	// allow_gateway_injection, without which the plugin starts no turn in
+	// any Hermes chat: Hermes refuses its turns in `hermes chat`
+	// conversations, and the plugin holds API server ones until it's on).
 	Allow string
 	// Changes says what the install changes, for the user.
 	Changes string
@@ -405,7 +406,7 @@ var all = []Harness{
 		Wake: Plugin, Ack: "at least once, acknowledged once Hermes accepts the run",
 		Binding: Unbound, Carrier: Meta, Installable: true,
 		Repo:    "wakeshift/hermes-plugin",
-		Changes: "installs Wakeshift's plugin from its public repository, github.com/wakeshift/hermes-plugin, with Hermes's own plugin installer, into $HERMES_HOME/plugins/wakeshift, enables it, and lets it start turns in your Hermes chats (Hermes's allow_gateway_injection setting for it, which Hermes 0.22.3 and later need to wake `hermes chat` conversations); it starts them only in conversations connected to Wakeshift",
+		Changes: "installs Wakeshift's plugin from its public repository, github.com/wakeshift/hermes-plugin, with Hermes's own plugin installer, into $HERMES_HOME/plugins/wakeshift, enables it, and lets it start turns in your Hermes chats (Hermes's allow_gateway_injection setting for it, without which the plugin wakes no Hermes chat, through the API server or `hermes chat`); it starts them only in conversations connected to Wakeshift",
 		Allow:   "hermes config set plugins.entries.wakeshift.allow_gateway_injection true",
 		Run: "It runs where Hermes runs (inside its container, if it's in one). Your terminal there may not have `hermes` on its PATH (Hermes's Docker image doesn't): then run each `hermes` in it as `\"$HERMES_PYTHON\" -m hermes_cli.main` (Hermes sets HERMES_PYTHON for its tools), or as /opt/hermes/bin/hermes in Hermes's Docker image. Hermes may hold the command for approval, and in a chat through Hermes's API server nobody can approve it, so put the exact command in your question too, for the user to run where Hermes runs themselves. " +
 			"If Hermes blocks the command, running it fails, or you can't run commands, tell them so in your reply and give them the command to run there: never end your reply without it.",

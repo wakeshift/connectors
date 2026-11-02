@@ -88,6 +88,17 @@ func KeepSessionNote(handle string) string {
 		"including when you subscribe again, so Wakeshift treats it as the same conversation (keep it to this conversation; don't share or log it)."
 }
 
+// KeylessUnsubscribeNote is said in the result of an unsubscribe that
+// ended nothing because the call passed no session key, from a
+// conversation that only its key names (Claude Code's calls carry no
+// conversation ID): Wakeshift couldn't tell which conversation called, so
+// the conversation may still be subscribed. Subscribing again without the
+// key would start a second session, and every message would arrive twice.
+const KeylessUnsubscribeNote = "Wakeshift: nothing was unsubscribed, and this conversation may still be subscribed: this call didn't pass " +
+	"this conversation's " + SessionArg + ", so Wakeshift couldn't tell which conversation it came from. Call this tool again now with " +
+	"the " + SessionArg + " you were given when you subscribed (it's in that call's result). Don't subscribe again until you have: " +
+	"subscribing without the key starts a second session, and every message would then reach this conversation twice."
+
 // TaskHooks is a wait's result once Wakeshift's hooks connect the
 // conversation: they deliver instead. It starts with Connected.
 const TaskHooks = Connected + " Wakeshift's hooks deliver this conversation's messages now, as soon as they arrive, so this wait has ended: don't call " + WaitTool + " again."
