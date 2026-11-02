@@ -947,33 +947,28 @@ UPDATE_COMMAND = "hermes plugins update wakeshift"
 REINSTALL_COMMAND = "hermes plugins install wakeshift/hermes-plugin --enable --force"
 
 
-def update_command(d: Path = None, catalog_record: Callable = None, install_record: Callable = None) -> str:
+# Hermes's record of what its plugin installer installed, next to the
+# plugins: {directory name: {"source", "pinned", "catalog", …}}.
+INSTALL_RECORDS = ".install-metadata.json"
+
+
+def update_command(d: Path = None) -> str:
     """The one command that updates the plugin in its directory (d): `hermes
     plugins update wakeshift` where Hermes can (a catalog install, or one
     from the repository that isn't pinned to a commit: a git checkout, or a
     tree Hermes recorded the source of), else installing it again with
     --force (Wakeshift's installer writes the plugin itself, so Hermes has
-    nothing to update it from). catalog_record(d) and install_record(name)
-    are Hermes's records (read from Hermes when not given)."""
+    nothing to update it from). Read from the plugin's directory and
+    Hermes's install record beside it (INSTALL_RECORDS), not Hermes's
+    modules, which aren't a public plugin API."""
     d = Path(d or Path(__file__).parent)
-    if catalog_record is None:
-        def catalog_record(p):
-            from hermes_cli.plugins_cmd_catalog import catalog_install_record
-            return catalog_install_record(p)
-    if install_record is None:
-        def install_record(name):
-            from hermes_cli.plugins_cmd_git import _read_install_metadata
-            return _read_install_metadata().get(name)
     try:
-        if catalog_record(d):
-            return UPDATE_COMMAND
-    except Exception:
-        pass
-    try:
-        rec = install_record(d.name)
+        rec = json.loads((d.parent / INSTALL_RECORDS).read_text(encoding="utf-8-sig")).get(d.name)
     except Exception:
         rec = None
     rec = rec if isinstance(rec, dict) else {}
+    if isinstance(rec.get("catalog"), dict) or rec.get("catalog_name"):
+        return UPDATE_COMMAND  # Hermes re-pins a catalog install to its reviewed commit
     if rec.get("pinned") is True:
         return REINSTALL_COMMAND  # Hermes won't move a pinned install
     if (d / ".git").exists() or (isinstance(rec.get("source"), str) and rec["source"]):

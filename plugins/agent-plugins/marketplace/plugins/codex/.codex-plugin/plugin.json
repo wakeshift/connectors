@@ -1,0 +1,23 @@
+{
+  "name": "wakeshift",
+  "version": "0.0.0",
+  "description": "Lets Wakeshift messages wake your Codex threads, for the apps you connect. Its hooks run Wakeshift's connector, ~/.wakeshift/bin/wakeshift, which it downloads and checks against the SHA-256 it carries.",
+  "author": {
+    "name": "Wakeshift",
+    "url": "https://wakeshift.ai"
+  },
+  "homepage": "https://wakeshift.ai/docs/agents",
+  "repository": "https://github.com/wakeshift/agent-plugins",
+  "license": "Apache-2.0",
+  "extensions": {
+    "com.openai": {
+      "hooks": "./hooks/hooks.json",
+      "interface": {
+        "displayName": "Wakeshift",
+        "shortDescription": "Wake this thread when your apps' events arrive",
+        "developerName": "Wakeshift",
+        "category": "Productivity"
+      }
+    }
+  }
+}

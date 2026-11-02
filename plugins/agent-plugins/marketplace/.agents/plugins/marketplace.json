@@ -1,0 +1,19 @@
+{
+  "name": "wakeshift",
+  "interface": {
+    "displayName": "Wakeshift"
+  },
+  "plugins": [
+    {
+      "name": "wakeshift",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex"
+      },
+      "policy": {
+        "installation": "AVAILABLE"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

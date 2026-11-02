@@ -255,3 +255,30 @@ func TestWaitCommandLine(t *testing.T) {
 		t.Fatal("wrote into the file")
 	}
 }
+
+// install --plugin (what the plugins' launcher runs): trusts the issuer and
+// writes no hooks, says nothing about a trust step (the launcher logs it),
+// still asks before trusting a new issuer without --yes, and takes out the
+// hooks a curl install wrote.
+func TestInstallPlugin(t *testing.T) {
+	home := homes(t)
+	if out, code := run("wakeshift", "install", "--harness", "codex", "--issuer", "https://app.wakeshift.ai", "--plugin"); code != 1 || !strings.Contains(out, "needs your confirmation") {
+		t.Fatalf("without --yes: %d %s", code, out)
+	}
+	if out, code := run("wakeshift", "install", "--harness", "codex", "--issuer", "https://app.wakeshift.ai", "--yes"); code != 0 {
+		t.Fatalf("curl install: %d %s", code, out)
+	}
+	out, code := run("wakeshift", "install", "--harness", "codex", "--issuer", "https://app.wakeshift.ai", "--yes", "--plugin")
+	if code != 0 || strings.Contains(out, "Next: ") || strings.Contains(out, AfterInstall) || !strings.Contains(out, "Removed the hooks an earlier Wakeshift install wrote") {
+		t.Fatalf("--plugin: %d %s", code, out)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".codex", "hooks.json")); err == nil {
+		t.Fatal("hooks.json left")
+	}
+	if b, err := os.ReadFile(filepath.Join(home, ".wakeshift", "codex", connector.PluginIssuerFile)); err != nil || string(b) != "https://app.wakeshift.ai\n" {
+		t.Fatalf("plugin-issuer: %q %v", b, err)
+	}
+	if out, code := run("wakeshift", "install", "--harness", "notepad", "--issuer", "https://app.wakeshift.ai", "--yes", "--plugin"); code != 1 || !strings.Contains(out, "unknown harness") {
+		t.Fatalf("unknown: %d %s", code, out)
+	}
+}

@@ -2,8 +2,11 @@
 // cmd/wakeshift-connector, installed as ~/.wakeshift/bin/wakeshift by
 // /install/<harness>.sh):
 //
-//	wakeshift install --harness NAME --issuer URL [--yes]   trust a Wakeshift and add the harness's hooks
-//	                                                (asks first for an issuer not yet trusted, unless --yes)
+//	wakeshift install --harness NAME --issuer URL [--yes] [--plugin]
+//	                                                trust a Wakeshift and add the harness's hooks
+//	                                                (asks first for an issuer not yet trusted, unless --yes);
+//	                                                with --plugin, for hooks Wakeshift's plugin for the
+//	                                                harness carries: no hooks written, a curl install's removed
 //	wakeshift uninstall --harness NAME              remove them
 //	wakeshift allow --harness NAME --app ID --tools A,B | --none
 //	                                                pre-approve an app's tools the user agreed to (or not: remove them)
@@ -80,7 +83,7 @@ func Main() {
 func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	prog := filepath.Base(args[0])
 	usage := func() int {
-		fmt.Fprintf(stderr, "usage: %s install --harness NAME --issuer URL [--yes] | uninstall --harness NAME | allow --harness NAME --app ID (--tools A,B | --none) | hook --harness NAME [--rewake] | wait | bridge --harness opencode | harnesses | version\n", prog)
+		fmt.Fprintf(stderr, "usage: %s install --harness NAME --issuer URL [--yes] [--plugin] | uninstall --harness NAME | allow --harness NAME --app ID (--tools A,B | --none) | hook --harness NAME [--rewake] | wait | bridge --harness opencode | harnesses | version\n", prog)
 		fmt.Fprintf(stderr, "harnesses: %s\n", strings.Join(connector.Names(), ", "))
 		return 2
 	}
@@ -109,6 +112,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	app := fs.String("app", "", "allow: the app whose tools to allow; run: the app whose link it holds")
 	tools := fs.String("tools", "", "allow: the app's tools the user agreed to allow without asking, comma-separated")
 	none := fs.Bool("none", false, "allow: the user said no: remove the app's tool rules and don't offer them again")
+	plugin := fs.Bool("plugin", false, "install: the hooks come from Wakeshift's plugin for the harness (its launcher passes it): trust --issuer and add the allow rules, but write no hooks, and remove hooks an earlier install wrote")
 	switch cmd {
 	case "install", "uninstall", "hook", "bridge", "run", "allow":
 		if fs.Parse(rest) != nil {
@@ -147,6 +151,9 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			if !ok {
 				return fail(errors.New("not installed: " + iss + " wasn't trusted"))
 			}
+		}
+		if *plugin {
+			return fail(spec.InstallPlugin(bin, iss, stdout))
 		}
 		if err := spec.Install(bin, iss, stdout); err != nil {
 			return fail(err)

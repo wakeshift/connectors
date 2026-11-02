@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -102,6 +103,71 @@ func (s Spec) Install(bin, issuer string, out io.Writer) error {
 	fmt.Fprintf(out, "Wakeshift's hooks for %s run %s and trust beacons from %s.\n", s.Name, bin, issuer)
 	addRule(set, s, bin, out, was)
 	return nil
+}
+
+// PluginIssuerFile, in a harness's directory, is the issuer InstallPlugin
+// last trusted for the harness's plugin: the plugin's launcher runs
+// `install --plugin` again only when its own issuer differs (or the file is
+// gone, after an uninstall), so a warm hook run reads one small file.
+const PluginIssuerFile = "plugin-issuer"
+
+// InstallPlugin is Install for a harness whose hooks come from Wakeshift's
+// plugin for it (wakeshift/agent-plugins), installed with the harness's own
+// plugin command: it trusts issuer, stamps installed_at and adds the allow
+// rules, but writes no hooks. Hooks an earlier install (/install/<harness>.sh)
+// wrote to the harness's user settings are removed, so a user who moves to
+// the plugin doesn't run both. The plugin's launcher runs it on a hook's
+// first run and whenever the plugin's issuer changes.
+func (s Spec) InstallPlugin(bin, issuer string, out io.Writer) error {
+	issuer, err := CheckIssuer(issuer)
+	if err != nil {
+		return err
+	}
+	set := LoadSettings(s.Name)
+	if err := set.Trust(issuer); err != nil {
+		return err
+	}
+	s.removeUserHooks(set, bin, out)
+	set.InstalledAt = time.Now().UTC()
+	if err := set.Save(); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Wakeshift's plugin for %s runs %s and trusts beacons from %s.\n", s.Name, bin, issuer)
+	addRule(set, s, bin, out, nil)
+	// Last, so a failure above runs the whole install again next time.
+	return os.WriteFile(filepath.Join(set.Dir, PluginIssuerFile), []byte(issuer+"\n"), 0o600)
+}
+
+// removeUserHooks takes out the hooks an earlier install wrote to the
+// harness's user settings, saying so only if there were any, and removes the
+// file (and its directories) if that install created it and nothing else is
+// in it now. It never fails InstallPlugin: a hooks file it can't edit is
+// left as it is, with a note.
+func (s Spec) removeUserHooks(set Settings, bin string, out io.Writer) {
+	f, filed := s.Installer.(hookFiler)
+	if !filed || !exists(f.path()) {
+		return
+	}
+	before := backupsOf(f.path())
+	var said bytes.Buffer
+	if err := s.Installer.Uninstall(bin, &said); err != nil {
+		fmt.Fprintf(out, "Left the hooks in %s as they are: %v. If they're Wakeshift's, remove them, or %s runs Wakeshift's hooks twice.\n", f.path(), err, s.Name)
+		return
+	}
+	added := newSince(before, backupsOf(f.path()))
+	if len(added) == 0 && exists(f.path()) {
+		return // nothing of ours was there
+	}
+	// Copilot's hooks file is Wakeshift's alone: uninstalling deletes it,
+	// with no backup. Otherwise the file may now hold nothing, and go too.
+	var gone bytes.Buffer
+	removed := removeCreated(set, s.Installer, added, &gone)
+	fmt.Fprintf(out, "Removed the hooks an earlier Wakeshift install wrote to %s", f.path())
+	if len(added) > 0 && !slices.Contains(removed, added[0]) {
+		fmt.Fprintf(out, " (the previous file is at %s)", added[0])
+	}
+	fmt.Fprintln(out, ": the plugin's hooks replace them.")
+	out.Write(gone.Bytes())
 }
 
 // Uninstall removes the harness's hooks, the issuers it trusted and its

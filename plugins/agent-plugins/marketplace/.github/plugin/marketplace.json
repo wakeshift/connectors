@@ -1,0 +1,17 @@
+{
+  "name": "wakeshift",
+  "owner": {
+    "name": "Wakeshift",
+    "url": "https://wakeshift.ai"
+  },
+  "metadata": {
+    "description": "Wakeshift's plugins: let Wakeshift messages wake your agent's conversations"
+  },
+  "plugins": [
+    {
+      "name": "wakeshift",
+      "source": "./plugins/copilot",
+      "description": "Lets Wakeshift messages wake your GitHub Copilot CLI sessions, for the apps you connect"
+    }
+  ]
+}

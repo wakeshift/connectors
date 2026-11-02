@@ -1082,27 +1082,41 @@ class UpdateCommand(unittest.TestCase):
         self.d = Path(tempfile.mkdtemp()) / "wakeshift"
         self.d.mkdir()
 
-    def cmd(self, catalog=None, record=None):
-        return plugin.update_command(self.d, catalog_record=lambda p: catalog, install_record=lambda name: record)
+    def cmd(self, record=None, raw=None):
+        """update_command with Hermes's install record for the plugin (record),
+        or that file's raw text."""
+        p = self.d.parent / ".install-metadata.json"
+        if raw is not None:
+            p.write_text(raw)
+        elif record is not None:
+            p.write_text(json.dumps({"other": {"source": "y"}, "wakeshift": record}))
+        elif p.exists():
+            p.unlink()
+        return plugin.update_command(self.d)
 
     def test_hermes_updates_what_it_installed(self):
-        self.assertEqual(self.cmd(catalog={"sha": "abc"}), "hermes plugins update wakeshift")
-        self.assertEqual(self.cmd(record={"source": "https://github.com/wakeshift/hermes-plugin.git", "pinned": False}),
-                         "hermes plugins update wakeshift")
+        update = "hermes plugins update wakeshift"
+        self.assertEqual(self.cmd({"catalog": {"name": "wakeshift", "sha": "abc"}, "pinned": True}), update)
+        self.assertEqual(self.cmd({"catalog_name": "wakeshift", "revision": "abc"}), update)  # an older record
+        self.assertEqual(self.cmd({"source": "https://github.com/wakeshift/hermes-plugin.git", "pinned": False}), update)
         (self.d / ".git").mkdir()
-        self.assertEqual(self.cmd(), "hermes plugins update wakeshift")
+        self.assertEqual(self.cmd(), update)
 
     def test_otherwise_it_installs_again(self):
         reinstall = "hermes plugins install wakeshift/hermes-plugin --enable --force"
         self.assertEqual(self.cmd(), reinstall)  # Wakeshift's installer: no git, no record
+        self.assertEqual(self.cmd({"source": ""}), reinstall)
         (self.d / ".git").mkdir()
-        self.assertEqual(self.cmd(record={"source": "x", "pinned": True}), reinstall)  # Hermes won't move a pin
+        self.assertEqual(self.cmd({"source": "x", "pinned": True}), reinstall)  # Hermes won't move a pin
 
-    def test_outside_hermes_or_failing_records(self):
-        def boom(_):
-            raise RuntimeError("records")
-        self.assertEqual(plugin.update_command(self.d), plugin.REINSTALL_COMMAND)  # no hermes_cli here
-        self.assertEqual(plugin.update_command(self.d, catalog_record=boom, install_record=boom), plugin.REINSTALL_COMMAND)
+    def test_unreadable_records(self):
+        for raw in ("{", "[]", '{"wakeshift": "x"}'):
+            self.assertEqual(self.cmd(raw=raw), plugin.REINSTALL_COMMAND, raw)
+
+    def test_no_private_hermes_imports(self):
+        # Hermes's catalog rule 9: public plugin surfaces only.
+        src = (Path(plugin.__file__)).read_text()
+        self.assertNotIn("plugins_cmd", src)
 
     def test_the_note_without_wakeshifts_own_message(self):
         ws = Wakeshift()
