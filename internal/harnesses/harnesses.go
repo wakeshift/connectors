@@ -142,10 +142,11 @@ type Harness struct {
 	// Repo, if set, is the public repository (owner/repo) the harness's own
 	// plugin installer takes Wakeshift's plugin from (Hermes: `hermes plugins
 	// install`): the install offers give that command (OfferCommand) rather
-	// than Wakeshift's installer. Updates still run Wakeshift's installer
-	// (InstallCommand), which replaces the plugin however it was installed.
+	// than Wakeshift's installer, and the update offers the same command
+	// forced over the installed plugin (UpdateCommand), which replaces it
+	// however it was installed.
 	Repo string
-	// Allow, if set, is a command OfferCommand runs after a Repo install to
+	// Allow, if set, is a command OfferCommand (and UpdateCommand) runs after a Repo install to
 	// turn on a setting the install needs, which its Changes disclose (Hermes:
 	// allow_gateway_injection, without which Hermes 0.22.3 and later refuse
 	// the plugin's turns in `hermes chat` conversations).
@@ -739,11 +740,29 @@ var originRE = regexp.MustCompile(`^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?$`)
 // wakeshift/hermes-plugin --enable`) and its Allow command, followed, for a Wakeshift other than
 // the one the plugin trusts by default, by the setting that makes it trust
 // the Wakeshift at base instead; otherwise InstallCommand.
-func OfferCommand(h Harness, base string) string {
+func OfferCommand(h Harness, base string) string { return repoCommand(h, base, false) }
+
+// UpdateCommand is the command an update offer gives for a harness:
+// OfferCommand with the plugin installer's --force for one with a Repo,
+// otherwise InstallCommand. Hermes 0.22.5's `hermes plugins update` can't
+// update a plugin Wakeshift's installer wrote (it has no .git), but
+// `hermes plugins install --force` replaces the plugin however it was
+// installed: over its own install from the same repository it keeps the
+// plugin directory's untracked files; over Wakeshift's installer's it drops
+// config.json (the Wakeshift it pinned), which the command's issuers
+// setting replaces for a Wakeshift other than the default. Hermes's
+// settings and the plugin's state ($HERMES_HOME/wakeshift) are outside the
+// directory and stay.
+func UpdateCommand(h Harness, base string) string { return repoCommand(h, base, true) }
+
+func repoCommand(h Harness, base string, force bool) string {
 	if h.Repo == "" || !h.Installable {
 		return InstallCommand(h, base)
 	}
 	cmd := h.ID + " plugins install " + h.Repo + " --enable"
+	if force {
+		cmd += " --force"
+	}
 	if h.Allow != "" {
 		cmd += " && " + h.Allow
 	}
@@ -824,14 +843,6 @@ const Connected = "Wakeshift: connected"
 
 // unwoken is what a conversation nothing delivers to is told.
 const unwoken = "Wakeshift can't wake this conversation yet: new messages are held until you call this tool again."
-
-// TermsLine is the line every installer for the wakeshift program and its
-// connectors prints (internal/downloads): the Connector Terms and the
-// Privacy Policy apply to it (Connector Terms Section 3.1). Agents don't
-// relay it: an app's own terms carry both documents to its users (Terms of
-// Service Section 6.6). The offers still ask the user, and the install runs
-// only on a yes. It is written once, here.
-const TermsLine = "Wakeshift's Connector Terms (https://wakeshift.ai/connector-terms) and Privacy Policy (https://wakeshift.ai/privacy) apply to this connector."
 
 // InstallNote is what an agent in this harness should tell its user
 // while nothing delivers Wakeshift's messages to its conversation: whether

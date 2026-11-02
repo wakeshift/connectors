@@ -23,6 +23,20 @@ func TestInstallerURL(t *testing.T) {
 	if got := UpgradeNote(codex, "https://x.test"); strings.Contains(got, "x.test/install") || !strings.Contains(got, "releases/latest/download/codex.sh") {
 		t.Fatalf("upgrade note: %q", got)
 	}
+	// Updates fetch from the release too, for every harness without its own
+	// plugin installer.
+	for _, h := range All() {
+		if !h.Installable || h.Repo != "" {
+			continue
+		}
+		want := "releases/latest/download/" + h.ID + ".sh"
+		if got := UpdateNote(h, "https://x.test"); strings.Contains(got, "x.test/install") || !strings.Contains(got, want) {
+			t.Fatalf("%s: update note: %q", h.ID, got)
+		}
+		if got := UpdateRequired(h, "https://x.test"); strings.Contains(got, "x.test/install") || !strings.Contains(got, want) {
+			t.Fatalf("%s: update required: %q", h.ID, got)
+		}
+	}
 	SetInstallerURL("")
 	if got := ScriptURL(codex, "https://x.test"); got != "https://x.test/install/codex.sh" {
 		t.Fatalf("reset: %q", got)
@@ -450,8 +464,8 @@ func TestUnsure(t *testing.T) {
 // plugin's public repository, not a script piped into sh: through Hermes's
 // API server nobody can approve the command, so the agent puts it in its
 // question for the user to run. A Wakeshift other than the one the plugin
-// trusts by default adds the setting that trusts it. Updates still run
-// Wakeshift's installer, which replaces the plugin however it was installed.
+// trusts by default adds the setting that trusts it. Updates force the
+// same command over the installed plugin (TestHermesUpdate).
 func TestHermesOffer(t *testing.T) {
 	h, _ := Get("hermes")
 	// It also turns on allow_gateway_injection (CLI chats need it since Hermes 0.22.3), as its Changes say.
@@ -483,12 +497,48 @@ func TestHermesOffer(t *testing.T) {
 	if !strings.Contains(sub, "Ask the user now") || !strings.Contains(sub, "Only if they agree, run `"+install+"`") || !strings.Contains(repeat, "Don't ask again if they said no") {
 		t.Errorf("consent: %s\n%s", sub, repeat)
 	}
-	if u := UpdateNote(h, base); !strings.Contains(u, "`"+InstallCommand(h, base)+"`") {
-		t.Errorf("update: %s", u)
-	}
 	for _, other := range All() {
-		if other.ID != "hermes" && OfferCommand(other, base) != InstallCommand(other, base) {
-			t.Errorf("%s: %s", other.ID, OfferCommand(other, base))
+		if other.ID != "hermes" && (OfferCommand(other, base) != InstallCommand(other, base) || UpdateCommand(other, base) != InstallCommand(other, base)) {
+			t.Errorf("%s: %s, %s", other.ID, OfferCommand(other, base), UpdateCommand(other, base))
+		}
+	}
+}
+
+// Hermes's update is its own plugin installer forced over the installed
+// plugin, not Wakeshift's installer piped into sh (which Hermes holds for an
+// approval nobody can give through its API server): `hermes plugins update`
+// can't update a plugin Wakeshift's installer wrote, and `install --force`
+// replaces it however it was installed. The note and the refusal keep the
+// install's consent, the way to run hermes without it on PATH, and the
+// command handed to the user.
+func TestHermesUpdate(t *testing.T) {
+	h, _ := Get("hermes")
+	const update = "hermes plugins install wakeshift/hermes-plugin --enable --force && hermes config set plugins.entries.wakeshift.allow_gateway_injection true"
+	for base, want := range map[string]string{
+		"https://app.wakeshift.ai":          update,
+		"https://app.staging.wakeshift.ai/": update + ` && hermes config set plugins.entries.wakeshift.settings.issuers '["https://app.staging.wakeshift.ai"]'`,
+		"https://x.test/'; rm -rf ~":        "curl -fsSL https://x.test/'; rm -rf ~/install/hermes.sh | sh",
+	} {
+		if got := UpdateCommand(h, base); got != want {
+			t.Errorf("%s: %s", base, got)
+		}
+	}
+	t.Cleanup(func() { SetInstallerURL("") })
+	SetInstallerURL("https://installers.example/releases/latest/download")
+	for _, base := range []string{"https://app.wakeshift.ai", "https://app.staging.wakeshift.ai"} {
+		note, refusal := UpdateNote(h, base), UpdateRequired(h, base)
+		for name, n := range map[string]string{"note": note, "refusal": refusal} {
+			if !strings.Contains(n, "`"+UpdateCommand(h, base)+"`") || strings.Contains(n, "curl") || strings.Contains(n, "| sh") {
+				t.Errorf("%s %s: %s", base, name, n)
+			}
+			for _, want := range []string{"Only if they agree, run `", "put the exact command in your question", "never end your reply without it", "`\"$HERMES_PYTHON\" -m hermes_cli.main`", h.AfterUpdate} {
+				if !strings.Contains(n, want) {
+					t.Errorf("%s %s: missing %q: %s", base, name, want, n)
+				}
+			}
+		}
+		if !strings.Contains(note, "github.com/wakeshift/hermes-plugin with Hermes Agent's own plugin installer") || !strings.Contains(note, "Don't ask again if they said no") {
+			t.Errorf("%s note: %s", base, note)
 		}
 	}
 }

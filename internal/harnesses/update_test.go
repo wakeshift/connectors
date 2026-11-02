@@ -19,7 +19,7 @@ func TestUpdateNotes(t *testing.T) {
 		if h.AfterUpdate == "" {
 			t.Errorf("%s: no AfterUpdate", h.ID)
 		}
-		install := InstallCommand(h, base)
+		install := UpdateCommand(h, base)
 		n := UpdateNote(h, base)
 		wants := []string{Outdated(h), "Ask the user now whether to update them", "Only if they agree, run `" + install + "`.", h.AfterUpdate, `"` + Connected + `" confirms it`, "held for you"}
 		if h.AskTool != "" { // Claude Code: its AskUserQuestion, two options, and the user's own shell if refused
@@ -45,7 +45,7 @@ func TestUpdateNotes(t *testing.T) {
 
 // Every offer to install or update Wakeshift's hooks asks the user and
 // runs the installer only on a yes. None has the agent relay a legal
-// notice: the installer prints TermsLine, and an app's own terms carry the
+// notice, and the installer prints none: an app's own terms carry the
 // Connector Terms and the Privacy Policy to its users.
 func TestOffersAskWithoutNotice(t *testing.T) {
 	const base = "https://app.wakeshift.ai"

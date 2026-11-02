@@ -451,7 +451,7 @@ func Outdated(h Harness) string {
 // with (426 update_required), which its hook shows the agent: ask the
 // user, and only if they agree, run the install command again.
 func UpdateRequired(h Harness, base string) string {
-	install := InstallCommand(h, base)
+	install := UpdateCommand(h, base)
 	if install == "" {
 		return Outdated(h) + " Ask the user to install them again the way they did before; until then new messages wait in the app's tool results."
 	}
@@ -467,15 +467,15 @@ const UpdateNo = "No, don't update them"
 // UpdateNote is what a tool result tells an agent while its conversation's
 // Wakeshift hooks are out of date: messages are held for the tool, and,
 // with the same consent as the install, how to update them. Running the
-// install command again replaces the binary or plugin in place and keeps
-// the user's settings and connected conversations.
+// install command again (UpdateCommand) replaces the binary or plugin in
+// place and keeps the user's settings and connected conversations.
 func UpdateNote(h Harness, base string) string {
-	install := InstallCommand(h, base)
+	install := UpdateCommand(h, base)
 	held := "Until they're updated they can't deliver to this conversation, so new messages are held for you: call this tool again to check for them."
 	if install == "" {
 		return unsureShort(h, Outdated(h)+" "+held+" Ask the user to install them again the way they did before.")
 	}
-	n := Outdated(h) + " " + held + " Ask the user now whether to update them (it runs the install again, which replaces Wakeshift's files and keeps their settings and connected conversations). Only if they agree, run `" + install + "`." + sep(h.Run)
+	n := Outdated(h) + " " + held + " Ask the user now whether to update them (" + updateChanges(h) + "). Only if they agree, run `" + install + "`." + sep(h.Run)
 	if h.AskTool != "" {
 		n = Outdated(h) + " " + held + " Ask the user now with your " + h.AskTool + " tool, with two options: \"" + UpdateYes(h) + "\" (description: runs `" + install +
 			"`, which replaces Wakeshift's files and keeps their settings and connected conversations) and \"" + UpdateNo + "\" (description: messages wait until you call this tool again). " +
@@ -489,6 +489,19 @@ func UpdateNote(h Harness, base string) string {
 		n += " Then tell them: " + h.AfterUpdate
 	}
 	return unsureShort(h, n+" Then call this tool again: a note \""+Connected+"\" confirms it. Don't ask again if they said no.")
+}
+
+// updateChanges says what the update command (UpdateCommand) does, for
+// the user.
+func updateChanges(h Harness) string {
+	if h.Repo == "" {
+		return "it runs the install again, which replaces Wakeshift's files and keeps their settings and connected conversations"
+	}
+	n := "it installs Wakeshift's plugin again from github.com/" + h.Repo + " with " + h.Name + "'s own plugin installer, which replaces the plugin's files and keeps their settings and connected conversations"
+	if h.Allow != "" {
+		n += ", and lets it start turns in their chats, as the install does"
+	}
+	return n
 }
 
 // Generic wakes: a harness Wakeshift doesn't recognize gets the inbox
