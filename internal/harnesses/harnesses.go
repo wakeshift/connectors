@@ -146,6 +146,22 @@ type Harness struct {
 	// forced over the installed plugin (UpdateCommand), which replaces it
 	// however it was installed.
 	Repo string
+	// Marketplace, if set, is how the harness's own plugin commands install
+	// Wakeshift's plugin from github.com/wakeshift/agent-plugins
+	// (marketplace.go): the offers from a Wakeshift with a marketplace
+	// branch give those commands and its texts (Route), others Wakeshift's
+	// installer.
+	Marketplace *Marketplace
+	// Package, if set, is the npm package of Wakeshift's plugin that the
+	// harness's own plugin command installs (opencode: `opencode plugin
+	// @wakeshift/opencode@<version> --global --force`, PackageCommand with
+	// {spec} the package at a version). Once this Wakeshift knows the version
+	// to offer (SetPackageVersion: production's from npm, another's from its
+	// configuration), the install and update offers give that command, and
+	// PackageChanges in place of Changes; until then, InstallCommand.
+	Package        string
+	PackageCommand string
+	PackageChanges string
 	// Allow, if set, is a command OfferCommand (and UpdateCommand) runs after a Repo install to
 	// turn on a setting the install needs, which its Changes disclose (Hermes:
 	// allow_gateway_injection, without which the plugin starts no turn in
@@ -271,6 +287,18 @@ var all = []Harness{
 		ID: "codex", Name: "Codex", Claim: "codex", Aliases: []string{"codex-cli", "openai-codex"}, Clients: []string{"codex-mcp-client"}, UserAgents: []string{"codex-mcp-client"},
 		Wake: Connector, Ack: "at least once, acknowledged when the turn starts", Binding: ByConversation, Carrier: Meta,
 		ConversationMeta: "x-codex-turn-metadata.thread_id", Fingerprint: "x-codex-turn-metadata.thread_id", Installable: true,
+		// Codex 0.164 and later ask to trust a plugin's hooks again whenever
+		// any file in it changes, so the marketplace re-pins Codex's plugin
+		// only when it must (plugins/agent-plugins).
+		Marketplace: &Marketplace{
+			Install:     "codex plugin marketplace add {source} && codex plugin add wakeshift@wakeshift",
+			Update:      "codex plugin marketplace add {source} && codex plugin marketplace upgrade wakeshift && codex plugin add wakeshift@wakeshift",
+			Remove:      "codex plugin remove wakeshift@wakeshift",
+			RefSep:      "@",
+			Changes:     "installs Wakeshift's plugin for Codex with Codex's own plugin command, from github.com/wakeshift/agent-plugins; its hooks run Wakeshift's connector, which the plugin downloads into ~/.wakeshift/bin and checks against the SHA-256 it carries",
+			Run:         "It writes ~/.codex/config.toml and downloads the plugin, which the sandbox blocks: run it with escalated permissions, so the user approves it.",
+			AfterUpdate: "Quit Codex (/quit) and start it again in this conversation with `codex resume --last`: Codex asks to trust the plugin's hooks again after each update, so choose \"Trust all and continue\".",
+		},
 		Changes: "adds Wakeshift's hook to ~/.codex/hooks.json, keeping a backup",
 		Run:     "It needs network access and writes ~/.wakeshift/bin and ~/.codex/hooks.json, which the sandbox blocks: run it with escalated permissions, so the user approves it.",
 		Trust:   "Quit Codex (/quit), start it again in this conversation with `codex resume --last`, and trust the Wakeshift hooks when Codex asks (\"Trust all and continue\").",
@@ -335,6 +363,17 @@ var all = []Harness{
 		Wake: StopHook, ZeroInstall: Background, Ack: "at least once, acknowledged when the stop hook hands the message over",
 		Binding: ByConversation, Carrier: Text, StripsText: true, ConversationMeta: "wakeshift/conversation", Fingerprint: "wakeshift/conversation", Installable: true,
 		Changes: "writes one hooks file, ~/.copilot/hooks/wakeshift.json",
+		Marketplace: &Marketplace{
+			Install: "copilot plugin marketplace add {source} && copilot plugin install wakeshift@wakeshift",
+			// A curl install has no plugin to update: install it then.
+			Update:  "copilot plugin update wakeshift || (copilot plugin marketplace add {source}; copilot plugin install wakeshift@wakeshift)",
+			Remove:  "copilot plugin uninstall wakeshift",
+			RefSep:  "#",
+			Changes: "installs Wakeshift's plugin for Copilot CLI with Copilot's own plugin installer, from github.com/wakeshift/agent-plugins, which adds its hooks; they download Wakeshift's connector into ~/.wakeshift/bin, checking its SHA-256",
+			Trust: "There's nothing to approve for the plugin's hooks. Restart copilot to load them. " +
+				"The background command that wakes the agent while it's idle still needs one \"Yes\" each time it starts (once per wake), unless copilot runs with --allow-all-tools (which approves every tool, not just this one).",
+			AfterUpdate: "There's nothing to approve. Restart copilot so it loads the new plugin, then reopen this session (copilot --continue).",
+		},
 		Trust: "There's nothing to approve for hooks in your home folder. Restart copilot to load them (/env lists them). " +
 			"The background command that wakes the agent while it's idle still needs one \"Yes\" each time it starts (once per wake), unless copilot runs with --allow-all-tools (which approves every tool, not just this one).",
 		Resume:      "Then reopen this session (copilot --continue) and send any message (\"done\" is enough), so I can connect it and start listening again.",
@@ -348,13 +387,16 @@ var all = []Harness{
 		ID: "opencode", Name: "opencode", Claim: "opencode", Aliases: []string{"open-code"}, Clients: []string{"opencode"}, UserAgents: []string{"opencode"},
 		Wake: Plugin, Ack: "at least once, acknowledged once opencode stores the message",
 		Binding: Unbound, Carrier: Meta, Installable: true,
-		Changes:     "writes one plugin file, ~/.config/opencode/plugins/wakeshift.ts",
-		Trust:       "Quit and restart opencode to load the Wakeshift plugin (opencode doesn't ask to approve plugins).",
-		Resume:      "Then reopen this session (opencode --continue) and send any message (\"done\" is enough), so I can connect it. After that, opencode reconnects it by itself whenever it starts.",
-		AfterUpdate: "Quit and restart opencode so it loads the new plugin.",
-		When:        "as soon as they arrive, even while the session is idle, as long as opencode is open (not in opencode run)",
-		NoteAt:      "right after this result",
-		Verified:    "1.18.7",
+		Package:        "@wakeshift/opencode",
+		PackageCommand: "opencode plugin {spec} --global --force",
+		PackageChanges: "installs Wakeshift's plugin for opencode, the npm package @wakeshift/opencode, with opencode's own plugin command: opencode adds it to the plugin list in ~/.config/opencode/opencode.json, keeping their other settings, and downloads it with Wakeshift's connector for this computer (the plugin also removes ~/.config/opencode/plugins/wakeshift.ts, if an earlier install wrote it)",
+		Changes:        "writes one plugin file, ~/.config/opencode/plugins/wakeshift.ts",
+		Trust:          "Quit and restart opencode to load the Wakeshift plugin (opencode doesn't ask to approve plugins).",
+		Resume:         "Then reopen this session (opencode --continue) and send any message (\"done\" is enough), so I can connect it. After that, opencode reconnects it by itself whenever it starts.",
+		AfterUpdate:    "Quit and restart opencode so it loads the new version.",
+		When:           "as soon as they arrive, even while the session is idle, as long as opencode is open (not in opencode run)",
+		NoteAt:         "right after this result",
+		Verified:       "1.18.7",
 	},
 	{
 		ID: "antigravity", Name: "Antigravity CLI", Claim: "antigravity", Aliases: []string{"agy", "antigravity-cli"}, Clients: []string{"antigravity-client"},
@@ -730,7 +772,11 @@ func InstallCommand(h Harness, base string) string {
 // pluginIssuer is the Wakeshift a plugin installed from its public
 // repository trusts when nothing says otherwise (plugins/hermes,
 // DEFAULT_ISSUER).
-const pluginIssuer = "https://app.wakeshift.ai"
+const pluginIssuer = ProductionIssuer
+
+// ProductionIssuer is production Wakeshift's address: the issuer the
+// plugins and npm packages it releases trust by default.
+const ProductionIssuer = "https://app.wakeshift.ai"
 
 // originRE is a Wakeshift's address that can go into a shell command and a
 // YAML list as it is.
@@ -757,6 +803,18 @@ func OfferCommand(h Harness, base string) string { return repoCommand(h, base, f
 func UpdateCommand(h Harness, base string) string { return repoCommand(h, base, true) }
 
 func repoCommand(h Harness, base string, force bool) string {
+	if spec := PackageSpec(h); spec != "" {
+		return strings.Replace(h.PackageCommand, "{spec}", spec, 1)
+	}
+	if h.Marketplace != nil {
+		tmpl := h.Marketplace.Install
+		if force {
+			tmpl = h.Marketplace.Update
+		}
+		if c := marketplaceCommand(h, base, tmpl); c != "" {
+			return c
+		}
+	}
 	if h.Repo == "" || !h.Installable {
 		return InstallCommand(h, base)
 	}
@@ -775,6 +833,64 @@ func repoCommand(h Harness, base string, force bool) string {
 		return InstallCommand(h, base)
 	}
 	return cmd + " && " + h.ID + ` config set plugins.entries.wakeshift.settings.issuers '["` + origin + `"]'`
+}
+
+// packageVersions is the version of each Package to offer, by harness ID
+// (SetPackageVersion).
+var packageVersions atomic.Pointer[map[string]string]
+
+// packageVersionRE is a version npm takes that can go into a shell command
+// as it is: X.Y.Z, with an optional prerelease.
+var packageVersionRE = regexp.MustCompile(`^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$`)
+
+// ValidPackageVersion reports whether v is a version SetPackageVersion takes.
+func ValidPackageVersion(v string) bool { return len(v) <= 64 && packageVersionRE.MatchString(v) }
+
+// SetPackageVersion makes the install and update offers for the harness
+// with that ID give its Package at version v (PackageCommand). The package
+// must trust this Wakeshift (production's releases trust production; a
+// package for another is packed and published for it). "" (or a version
+// that isn't one) goes back to InstallCommand.
+func SetPackageVersion(id, v string) {
+	for {
+		old := packageVersions.Load()
+		next := map[string]string{}
+		if old != nil {
+			for k, x := range *old {
+				next[k] = x
+			}
+		}
+		if ValidPackageVersion(v) {
+			next[id] = v
+		} else {
+			delete(next, id)
+		}
+		if packageVersions.CompareAndSwap(old, &next) {
+			return
+		}
+	}
+}
+
+// PackageSpec is h's Package at the version SetPackageVersion set ("" if
+// it has none, or none is set).
+func PackageSpec(h Harness) string {
+	if h.Package == "" || h.PackageCommand == "" || !h.Installable {
+		return ""
+	}
+	m := packageVersions.Load()
+	if m == nil || (*m)[h.ID] == "" {
+		return ""
+	}
+	return h.Package + "@" + (*m)[h.ID]
+}
+
+// changes is what the install offer tells the user it changes: its
+// package's, when the offer gives the package's command.
+func changes(h Harness) string {
+	if h.PackageChanges != "" && PackageSpec(h) != "" {
+		return h.PackageChanges
+	}
+	return h.Changes
 }
 
 // AllowToolsEnv is the variable an install command sets for the installer
@@ -851,6 +967,7 @@ const unwoken = "Wakeshift can't wake this conversation yet: new messages are he
 // it can't be woken yet (for a retired harness: at all, and what replaced
 // it).
 func InstallNote(h Harness, base string) string {
+	h = Route(h, base)
 	return unsure(h, installNote(h, OfferCommand(h, base)))
 }
 
@@ -886,7 +1003,7 @@ func installNote(h Harness, install string) string {
 		return "You can be woken now, within seconds even while idle, by a command you start in the background (subscribing gives it). " + backgroundUpgrade(h, install)
 	}
 	install = agreed(h, install)
-	ask := unwoken + " Ask the user now whether to install Wakeshift's hooks for " + h.Name + " (it " + h.Changes + "), so new messages reach this conversation " + h.When + ". " +
+	ask := unwoken + " Ask the user now whether to install Wakeshift's hooks for " + h.Name + " (it " + changes(h) + "), so new messages reach this conversation " + h.When + ". " +
 		askAlso(h) + "Only if they agree, run `" + install + "`. "
 	if h.AskTool != "" {
 		ask = unwoken + " Wakeshift's hooks for " + h.Name + " deliver new messages to this conversation " + h.When + ". " + askWith(h, install) + " "
@@ -950,7 +1067,7 @@ func askWith(h Harness, install string) string {
 
 // askWithNo is askWith with the "no" option's description given.
 func askWithNo(h Harness, install, no string) string {
-	n := "Ask them with your " + h.AskTool + " tool, with two options: \"" + AskYes(h) + "\" (description: runs `" + install + "`, " + h.Changes + ") " +
+	n := "Ask them with your " + h.AskTool + " tool, with two options: \"" + AskYes(h) + "\" (description: runs `" + install + "`, " + changes(h) + ") " +
 		"and \"" + AskNo + "\" (description: " + no + "). " +
 		"Run `" + install + "` only if they pick yes"
 	if h.UserShell != "" {
@@ -977,7 +1094,7 @@ func upgradeNote(h Harness, install string) string {
 	if h.AskTool != "" {
 		n = monitorLimit + "For delivery without a Monitor, with no such limit, the user can install Wakeshift's hooks for " + h.Name + ". Start the Monitor first either way: it wakes you until the hooks connect. " + askWith(h, install)
 	} else {
-		n = "For delivery without a Monitor, the user can install Wakeshift's hooks for " + h.Name + " (it " + h.Changes + "). " +
+		n = "For delivery without a Monitor, the user can install Wakeshift's hooks for " + h.Name + " (it " + changes(h) + "). " +
 			"Ask them first. Only if they agree, run `" + install + "`."
 	}
 	n += " After that, call this tool again right away, in the same turn and without waiting for the user: the hooks work in this session already, but they connect this conversation only from a result that comes after the install, so until you call it they can't wake you. Once they connect it, a note \"" + Connected + "\" appears " + h.NoteAt + ", and they deliver instead of the Monitor."
@@ -1011,6 +1128,7 @@ func TaskUpgradeNote(h Harness, base string) string {
 // told while Wakeshift's hooks haven't connected it: that the hooks say so
 // in a note if they're installed, and otherwise how to install them.
 func SubscribeNote(h Harness, base string) string {
+	h = Route(h, base)
 	return SubscribeNoteFor(h, OfferCommand(h, base))
 }
 
@@ -1028,14 +1146,16 @@ func SubscribeNoteFor(h Harness, install string) string {
 
 // RepeatNote is SubscribeNote for a conversation that's been told it once
 // already (it subscribed before): short, and without asking the user again.
-func RepeatNote(h Harness, base string) string { return RepeatNoteFor(h, OfferCommand(h, base)) }
+func RepeatNote(h Harness, base string) string {
+	return RepeatNoteFor(Route(h, base), OfferCommand(h, base))
+}
 
 // RepeatNoteFor is RepeatNote with the install command given.
 func RepeatNoteFor(h Harness, install string) string {
 	if !h.Installable {
 		return unsure(h, installNote(h, install))
 	}
-	ask := "If you haven't asked the user yet whether to install them (it " + h.Changes + "), ask now. " + askAlso(h) + "If they agreed and it hasn't run, run `" + agreed(h, install) + "`." + sep(h.Run)
+	ask := "If you haven't asked the user yet whether to install them (it " + changes(h) + "), ask now. " + askAlso(h) + "If they agreed and it hasn't run, run `" + agreed(h, install) + "`." + sep(h.Run)
 	if h.AskTool != "" {
 		ask = "If you haven't asked the user yet whether to install them, ask now. " + askWith(h, install)
 	}

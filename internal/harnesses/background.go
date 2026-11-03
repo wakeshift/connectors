@@ -380,14 +380,14 @@ func BackgroundRunningNote(h Harness, app, url string) string {
 // harness woken by a background command: they deliver at the end of a
 // turn when the command isn't running ("" for other harnesses).
 func BackgroundUpgradeNote(h Harness, base string) string {
-	return backgroundUpgrade(h, InstallCommand(h, base))
+	return backgroundUpgrade(Route(h, base), OfferCommand(h, base))
 }
 
 func backgroundUpgrade(h Harness, install string) string {
 	if h.ZeroInstall != Background || !h.Installable {
 		return ""
 	}
-	n := "Optional: Wakeshift's hooks for " + h.Name + " also deliver messages when a turn ends, and confirm them (it " + h.Changes + "). " +
+	n := "Optional: Wakeshift's hooks for " + h.Name + " also deliver messages when a turn ends, and confirm them (it " + changes(h) + "). " +
 		"Mention it to the user once. Only if they want it, run `" + install + "`."
 	if t := TrustNote(h); t != "" {
 		n += " Then tell them: " + t
@@ -432,7 +432,15 @@ func UninstallNote(h Harness) string {
 	if !h.Installable || h.Plugin {
 		return ""
 	}
-	return "Wakeshift's hooks stay installed for every " + h.Name + " conversation; if the user wants them removed, run `~/.wakeshift/bin/wakeshift uninstall --harness " + h.ID + "` (don't restore a settings backup instead: that would undo their later changes)."
+	if h.Package != "" {
+		// opencode (1.19) has no command that removes a plugin.
+		return "Wakeshift's plugin stays installed for every " + h.Name + " session. If the user wants it removed: " + h.Name + " has no command for that, so delete the \"" + h.Package + "@…\" entry from the \"plugin\" list in ~/.config/opencode/opencode.json, keeping the rest of the file, and delete ~/.wakeshift/" + h.ID + " (the plugin's settings and connected sessions); if instead Wakeshift's installer wrote ~/.config/opencode/plugins/wakeshift.ts, run `~/.wakeshift/bin/wakeshift uninstall --harness " + h.ID + "`. Then they restart " + h.Name + " to unload it."
+	}
+	run := "run `~/.wakeshift/bin/wakeshift uninstall --harness " + h.ID + "`"
+	if h.Marketplace != nil && h.Marketplace.Remove != "" {
+		run = "run `" + h.Marketplace.Remove + "` (if they installed Wakeshift's plugin), then `~/.wakeshift/bin/wakeshift uninstall --harness " + h.ID + "`"
+	}
+	return "Wakeshift's hooks stay installed for every " + h.Name + " conversation; if the user wants them removed, " + run + " (don't restore a settings backup instead: that would undo their later changes)."
 }
 
 // Outdated is the exact text that starts what an agent is told while the
@@ -452,6 +460,7 @@ func Outdated(h Harness) string {
 // user, and only if they agree, run the install command again.
 func UpdateRequired(h Harness, base string) string {
 	install := UpdateCommand(h, base)
+	h = Route(h, base)
 	if install == "" {
 		return Outdated(h) + " Ask the user to install them again the way they did before; until then new messages wait in the app's tool results."
 	}
@@ -471,11 +480,13 @@ const UpdateNo = "No, don't update them"
 // place and keeps the user's settings and connected conversations.
 func UpdateNote(h Harness, base string) string {
 	install := UpdateCommand(h, base)
+	pluginRoute := PluginRoute(h, base)
+	h = Route(h, base)
 	held := "Until they're updated they can't deliver to this conversation, so new messages are held for you: call this tool again to check for them."
 	if install == "" {
 		return unsureShort(h, Outdated(h)+" "+held+" Ask the user to install them again the way they did before.")
 	}
-	n := Outdated(h) + " " + held + " Ask the user now whether to update them (" + updateChanges(h) + "). Only if they agree, run `" + install + "`." + sep(h.Run)
+	n := Outdated(h) + " " + held + " Ask the user now whether to update them (" + updateChanges(h, pluginRoute) + "). Only if they agree, run `" + install + "`." + sep(h.Run)
 	if h.AskTool != "" {
 		n = Outdated(h) + " " + held + " Ask the user now with your " + h.AskTool + " tool, with two options: \"" + UpdateYes(h) + "\" (description: runs `" + install +
 			"`, which replaces Wakeshift's files and keeps their settings and connected conversations) and \"" + UpdateNo + "\" (description: messages wait until you call this tool again). " +
@@ -493,7 +504,13 @@ func UpdateNote(h Harness, base string) string {
 
 // updateChanges says what the update command (UpdateCommand) does, for
 // the user.
-func updateChanges(h Harness) string {
+func updateChanges(h Harness, pluginRoute bool) string {
+	if pluginRoute {
+		return "it updates Wakeshift's plugin for " + h.Name + " from github.com/" + AgentPlugins + " with " + h.Name + "'s own plugin command, which replaces the plugin's files and keeps their settings and connected conversations"
+	}
+	if PackageSpec(h) != "" {
+		return "it installs the new version of Wakeshift's plugin, the npm package " + h.Package + ", with " + h.Name + "'s own plugin command, which replaces the old version and keeps their settings and connected conversations"
+	}
 	if h.Repo == "" {
 		return "it runs the install again, which replaces Wakeshift's files and keeps their settings and connected conversations"
 	}

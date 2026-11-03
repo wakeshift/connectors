@@ -1,0 +1,37 @@
+{
+  "name": "@wakeshift/connect",
+  "version": "0.0.0",
+  "description": "Installs Wakeshift's connector and its hooks for your agent's program: npx -y @wakeshift/connect <harness>",
+  "license": "Apache-2.0",
+  "homepage": "https://wakeshift.ai/docs/agents",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wakeshift/connectors.git",
+    "directory": "plugins/connect"
+  },
+  "keywords": [
+    "wakeshift",
+    "cursor",
+    "codex",
+    "claude-code"
+  ],
+  "bin": {
+    "wakeshift-connect": "bin/wakeshift-connect.js"
+  },
+  "files": [
+    "bin/wakeshift-connect.js",
+    "SHA256SUMS"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "optionalDependencies": {
+    "@wakeshift/connect-darwin-arm64": "0.0.0",
+    "@wakeshift/connect-darwin-x64": "0.0.0",
+    "@wakeshift/connect-linux-arm64": "0.0.0",
+    "@wakeshift/connect-linux-x64": "0.0.0"
+  }
+}

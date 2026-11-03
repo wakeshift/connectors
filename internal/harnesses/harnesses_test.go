@@ -501,7 +501,7 @@ func TestHermesOffer(t *testing.T) {
 		t.Errorf("consent: %s\n%s", sub, repeat)
 	}
 	for _, other := range All() {
-		if other.ID != "hermes" && (OfferCommand(other, base) != InstallCommand(other, base) || UpdateCommand(other, base) != InstallCommand(other, base)) {
+		if other.ID != "hermes" && other.Marketplace == nil && (OfferCommand(other, base) != InstallCommand(other, base) || UpdateCommand(other, base) != InstallCommand(other, base)) {
 			t.Errorf("%s: %s, %s", other.ID, OfferCommand(other, base), UpdateCommand(other, base))
 		}
 	}

@@ -1,0 +1,35 @@
+{
+  "name": "@wakeshift/opencode",
+  "version": "0.0.0",
+  "description": "Wakeshift's plugin for opencode: messages from the apps your agent watches through Wakeshift wake your opencode sessions, even while they're idle.",
+  "license": "Apache-2.0",
+  "homepage": "https://wakeshift.ai/docs/agents",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wakeshift/connectors.git",
+    "directory": "plugins/opencode"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "wakeshift"
+  ],
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./server": "./index.js"
+  },
+  "main": "./index.js",
+  "files": [
+    "index.js"
+  ],
+  "engines": {
+    "opencode": ">=1.18.7"
+  },
+  "optionalDependencies": {
+    "@wakeshift/connect-darwin-arm64": "0.0.0",
+    "@wakeshift/connect-darwin-x64": "0.0.0",
+    "@wakeshift/connect-linux-arm64": "0.0.0",
+    "@wakeshift/connect-linux-x64": "0.0.0"
+  }
+}

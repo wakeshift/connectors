@@ -21,7 +21,7 @@ func TestUpdateNotes(t *testing.T) {
 		}
 		install := UpdateCommand(h, base)
 		n := UpdateNote(h, base)
-		wants := []string{Outdated(h), "Ask the user now whether to update them", "Only if they agree, run `" + install + "`.", h.AfterUpdate, `"` + Connected + `" confirms it`, "held for you"}
+		wants := []string{Outdated(h), "Ask the user now whether to update them", "Only if they agree, run `" + install + "`.", Route(h, base).AfterUpdate, `"` + Connected + `" confirms it`, "held for you"}
 		if h.AskTool != "" { // Claude Code: its AskUserQuestion, two options, and the user's own shell if refused
 			wants = []string{Outdated(h), "with your " + h.AskTool + " tool", `"` + UpdateYes(h) + `"`, `"` + UpdateNo + `"`, "Only if they agree (they pick yes), run `" + install + "`",
 				"typing `" + h.UserShell + " " + install + "`", h.AfterUpdate, `"` + Connected + `" confirms it`}
@@ -53,7 +53,7 @@ func TestOffersAskWithoutNotice(t *testing.T) {
 	// agree" (or "want it"), "if they agreed and it hasn't run", the yes
 	// option's description, or the user's own shell after a refusal, or it is
 	// followed by "only if they pick yes".
-	command := regexp.MustCompile("`([^`]*/install/|[a-z]+ plugins install )[^`]*`") // Wakeshift's installer, or the harness's own (OfferCommand)
+	command := regexp.MustCompile("`([^`]*/install/|[a-z]+ plugins install |[a-z]+ plugin marketplace add |[a-z]+ plugin update )[^`]*`") // Wakeshift's installer, or the harness's own (OfferCommand)
 	gate := regexp.MustCompile(`(?i)(only if they (agree|want it)[^.` + "`" + `]*, run |if they agreed and it hasn't run, run |\(description: runs |by typing )$`)
 	if bad := "Install Wakeshift's hooks: run `curl -fsSL https://x/install/codex.sh | sh` now."; gate.MatchString(bad[:strings.Index(bad, "`")]) {
 		t.Errorf("the gate accepts an ungated command: %s", bad)

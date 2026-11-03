@@ -281,6 +281,9 @@ const opencodeMarker = "Wakeshift's plugin for opencode"
 // opencodePlugin is the plugin file. Only a default export (opencode treats
 // every named export as a plugin) and only node builtins (no npm install).
 // It never throws: a throwing hook fails the user's tool call.
+//
+// The npm package @wakeshift/opencode ships the same plugin with its own
+// head (OpencodePackage): opencodeBody is shared by both.
 const opencodePlugin = `// Wakeshift's plugin for opencode: lets Wakeshift messages reach your opencode
 // sessions. Written by ` + "`wakeshift install --harness opencode`" + `; remove it with
 // ` + "`wakeshift uninstall --harness opencode`" + ` (or delete this file) and restart opencode.
@@ -292,7 +295,11 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 
 const BIN = __WAKESHIFT_BIN__
-const KEY = "wakeshift/connector"
+` + opencodeBody
+
+// opencodeBody is the plugin after its head (imports and BIN). Its server
+// starts with opencodeServer, which OpencodePackage replaces.
+const opencodeBody = `const KEY = "wakeshift/connector"
 const FIRST_LINE_MS = 15000
 // A bridge that can't start, or stops while its link is still saved, is
 // started again after a backoff: 2s, doubling to 2 minutes, with jitter.
@@ -309,7 +316,11 @@ const REARM_MAX = 20
 
 export default {
   id: "wakeshift",
-  server: async ({ client, directory }) => {
+` + opencodeServer + `    // One Wakeshift plugin per project: the file an earlier install wrote
+    // and the npm package can both be loaded once, while moving over.
+    const loaded = (globalThis[Symbol.for("wakeshift.opencode")] ??= new Set())
+    if (loaded.has(directory)) return {}
+    loaded.add(directory)
     const children = new Map() // session ID -> bridge process
     const tried = new Set() // sessions checked for a saved link this run
     const busy = new Set()
@@ -549,6 +560,7 @@ export default {
       },
       dispose: async () => {
         disposed = true
+        loaded.delete(directory)
         clearTimeout(rearmTimer)
         for (const r of retries.values()) if (r.timer) clearTimeout(r.timer)
         retries.clear()
@@ -561,3 +573,6 @@ export default {
   },
 }
 `
+
+// opencodeServer is the plugin's server line in opencodeBody.
+const opencodeServer = "  server: async ({ client, directory }) => {\n"
