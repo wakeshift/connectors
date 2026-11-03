@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { addScope, admits, agentOf, bindMode, DEFAULT_KEY, listensBeyondLoopback, NETWORK, releaseScope, restorePatch, takeover, type HooksConfig } from "../src/hooks.js";
 import { routeOf } from "../src/index.js";
+import { applyPatch, reset } from "../src/reset.js";
 import { hooksPath, wakeBody, wakeResult } from "../src/wake.js";
 
 const local = { network: false, allowNetwork: false };
@@ -282,4 +283,42 @@ test("a hooks write that fails leaves no record of it: the record matches OpenCl
   assert.equal(await c.allow("agent:main:other", "main"), "");
   assert.ok(cfg!.allowedSessionKeyPrefixes!.includes("agent:main:other"));
   assert.ok(JSON.parse(readFileSync(join(dir, "hooks.json"), "utf8")).added.allowedSessionKeyPrefixes.includes("agent:main:other"));
+});
+
+test("reset: undoes only the plugin's changes, keeps the user's, and writes nothing when there's nothing to undo", async () => {
+  // The user's own hooks, on already: the plugin only added its session and agent.
+  const theirs: HooksConfig = { enabled: true, token: "theirs", path: "/in", allowRequestSessionKey: true, allowedSessionKeyPrefixes: ["hook:"], allowedAgentIds: ["ops"] };
+  const t = takeover(theirs, T, local);
+  assert.ok(t.ok);
+  const { next, changes } = addScope(t.next, t.changes, "agent:main:main", "main")!;
+  const dir = mkdtempSync(join(tmpdir(), "wsr-"));
+  writeFileSync(join(dir, "hooks.json"), JSON.stringify(changes));
+  const cfg: Record<string, unknown> = { hooks: next };
+  let writes = 0;
+  const config = {
+    current: () => cfg,
+    mutate: async (fn: (d: Record<string, unknown>) => void) => {
+      writes++;
+      fn(cfg);
+    },
+  };
+  const lines = await reset({ dir, config });
+  assert.deepEqual(cfg.hooks, theirs, "the user's hooks, as they were");
+  assert.match(lines[0], /additions to your OpenClaw hooks settings are removed/);
+  assert.equal(existsSync(dir), false);
+  assert.equal(writes, 1);
+  // No record and no consent: nothing to write.
+  assert.equal((await reset({ dir, config })).length, 1);
+  assert.equal(writes, 1);
+  assert.equal(applyPatch({ enabled: true }, { enabled: null }), undefined);
+});
+
+test("reset: a record it can't read stays, and nothing changes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wsr-"));
+  writeFileSync(join(dir, "hooks.json"), "{not json");
+  let writes = 0;
+  const config = { current: () => ({ hooks: { enabled: true } }), mutate: async () => void writes++ };
+  await assert.rejects(reset({ dir, config }), /can't be read; nothing was changed/);
+  assert.equal(writes, 0);
+  assert.ok(existsSync(join(dir, "hooks.json")), "the record stays");
 });

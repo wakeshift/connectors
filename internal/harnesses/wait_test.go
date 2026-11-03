@@ -87,7 +87,7 @@ func TestWaitNotes(t *testing.T) {
 			}
 		case "copilot":
 			if !strings.Contains(n, `shellId "wakeshift-wait"`) || !strings.Contains(n, "read_bash") || !strings.Contains(n, "act on the messages first, then run the same command again") ||
-				!strings.Contains(n, "Copilot asks them to approve it each time it starts") || !strings.Contains(n, "stop_bash") {
+				!strings.Contains(n, "Wakeshift's hooks approve exactly this command") || strings.Contains(n, "allow-all-tools") || !strings.Contains(n, "stop_bash") {
 				t.Errorf("copilot: %s", n)
 			}
 		}

@@ -1,0 +1,22 @@
+{
+  "name": "wakeshift",
+  "displayName": "Wakeshift",
+  "version": "0.0.0",
+  "description": "Lets Wakeshift messages wake your Claude Code sessions, even while they're idle, for the apps you connect. Its hooks run Wakeshift's connector, ~/.wakeshift/bin/wakeshift, which it downloads and checks against the SHA-256 it carries.",
+  "author": {
+    "name": "Wakeshift",
+    "url": "https://wakeshift.ai"
+  },
+  "homepage": "https://wakeshift.ai/docs/agents",
+  "repository": "https://github.com/wakeshift/agent-plugins",
+  "license": "Apache-2.0",
+  "userConfig": {
+    "issuer": {
+      "type": "string",
+      "title": "Wakeshift server",
+      "description": "The Wakeshift whose messages may wake your sessions: https://app.wakeshift.ai unless you use another",
+      "default": "https://app.wakeshift.ai",
+      "required": true
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "wakeshift",
+  "owner": {
+    "name": "Wakeshift",
+    "email": "support@wakeshift.ai"
+  },
+  "metadata": {
+    "description": "Wakeshift's plugins: let the apps your agent watches wake its conversations"
+  },
+  "plugins": [
+    {
+      "name": "wakeshift",
+      "source": "plugins/cursor",
+      "description": "Wakes your Cursor agent when the apps it watches through Wakeshift send something",
+      "category": "Productivity"
+    }
+  ]
+}

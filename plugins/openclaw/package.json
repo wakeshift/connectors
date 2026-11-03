@@ -1,8 +1,22 @@
 {
-  "name": "wakeshift-openclaw",
-  "version": "0.1.0",
+  "name": "@wakeshift/openclaw",
+  "version": "0.0.0",
   "description": "Wakeshift for OpenClaw: wakes an OpenClaw session when an app it watches through Wakeshift sends something.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wakeshift/connectors.git",
+    "directory": "plugins/openclaw"
+  },
+  "homepage": "https://wakeshift.ai/docs/agents",
+  "bugs": {
+    "url": "https://github.com/wakeshift/connectors/issues"
+  },
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "wakeshift"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "files": [
@@ -19,6 +33,9 @@
     "compat": {
       "pluginApi": ">=2026.10.4",
       "minGatewayVersion": "2026.10.4"
+    },
+    "build": {
+      "openclawVersion": "2026.10.4"
     }
   },
   "scripts": {
@@ -30,5 +47,9 @@
   "devDependencies": {
     "@types/node": "^22.20.5",
     "typescript": "^7.0.2"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   }
 }

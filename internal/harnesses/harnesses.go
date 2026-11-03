@@ -159,9 +159,25 @@ type Harness struct {
 	// to offer (SetPackageVersion: production's from npm, another's from its
 	// configuration), the install and update offers give that command, and
 	// PackageChanges in place of Changes; until then, InstallCommand.
-	Package        string
-	PackageCommand string
-	PackageChanges string
+	// PackageIssuer, if set, is the command PackageCommand runs after for a
+	// Wakeshift other than production, whose issuer the package trusts by
+	// default, with {origin} this Wakeshift (OpenClaw keeps the setting
+	// before the plugin is installed, so the plugin never loads without it).
+	//
+	// PackageUpdateChanges, if set, is what the update offer says it does
+	// (UpdateNote), for a package that isn't a plugin installed with the
+	// harness's own command (Cursor: ConnectPackage, run with npx).
+	Package              string
+	PackageCommand       string
+	PackageChanges       string
+	PackageIssuer        string
+	PackageUpdateChanges string
+	// Uninstall, if set, is the command that removes the plugin a Package
+	// offer installed and undoes what it changed (OpenClaw: the plugin's own
+	// reset, then OpenClaw's uninstall, which leaves hooks.* alone).
+	Uninstall string
+	// routed: Route gave h its Marketplace's texts (the offer is the plugin).
+	routed bool
 	// Allow, if set, is a command OfferCommand (and UpdateCommand) runs after a Repo install to
 	// turn on a setting the install needs, which its Changes disclose (Hermes:
 	// allow_gateway_injection, without which the plugin starts no turn in
@@ -175,9 +191,12 @@ type Harness struct {
 	// beyond this computer), so one yes covers the whole install; AgreeEnv
 	// is the variable the agent's install command then sets, the
 	// installer's record of that yes (without it the installer stops and
-	// says to ask, a second question).
+	// says to ask, a second question), and Agree the command a Package
+	// offer runs first instead, the record of that yes where the plugin
+	// reads it (without it the plugin turns nothing on and says to ask).
 	AskAlso  string
 	AgreeEnv string
+	Agree    string
 	// ToolRules: the harness has exact per-tool rules for MCP tools that
 	// Wakeshift's hooks can write (Claude Code, Cursor CLI), so an install
 	// offer from an app can also offer to pre-approve the app's own tools
@@ -317,6 +336,22 @@ var all = []Harness{
 		ID: "claude-code", Name: "Claude Code", Claim: "claude-code", Aliases: []string{"claude", "claude-cli"}, Clients: []string{"claude-code"}, UserAgents: []string{"claude-code"},
 		Wake: Rewake, ZeroInstall: Monitor, Tasks: true, Ack: "at least once, acknowledged when the hook hands the message over",
 		Binding: ByCall, Carrier: Meta, CallMeta: "claudecode/toolUseId", Fingerprint: "claudecode/toolUseId", Installable: true,
+		// Wakeshift's plugin (plugins/agent-plugins). Claude Code 2.1.316
+		// applies no option's default (an unset option fails the hooks), so
+		// the install always sets the issuer, production's too; installing
+		// again is a no-op and `claude plugin update` doesn't refresh a Git
+		// marketplace, so the update refreshes it first.
+		Marketplace: &Marketplace{
+			Install:     "claude plugin install wakeshift --marketplace {source} --config issuer={origin}",
+			Update:      "claude plugin install wakeshift --marketplace {source} --config issuer={origin} && claude plugin marketplace update wakeshift && claude plugin update wakeshift@wakeshift",
+			Remove:      "claude plugin uninstall wakeshift@wakeshift",
+			RefSep:      "#",
+			Changes:     "installs Wakeshift's plugin for Claude Code from github.com/wakeshift/agent-plugins with Claude Code's own plugin installer, whose hooks fetch Wakeshift's connector into ~/.wakeshift/bin, checking its SHA-256; it also pre-approves Wakeshift's own wait command in ~/.claude/settings.json (~/.wakeshift/bin/wakeshift wait), so Claude Code runs it without asking",
+			Trust:       "There's nothing to approve, but Claude Code loads a newly installed plugin only when a session starts: type /reload-plugins here (or restart with claude --continue).",
+			Resume:      "Then send any message here (\"done\" is enough), so I can connect this conversation.",
+			AfterUpdate: "Type /reload-plugins here (or restart Claude Code), so it runs the new version.",
+			Reload:      true,
+		},
 		Changes: "adds three hooks to ~/.claude/settings.json and pre-approves Wakeshift's own wait command there (~/.wakeshift/bin/wakeshift wait), so Claude Code runs it without asking, keeping a backup",
 		AskTool: "AskUserQuestion", UserShell: "!", ToolRules: true,
 		Trust:       "There's nothing to approve. Claude Code picks the hooks up in running sessions; in a folder Claude Code hasn't trusted yet, choose \"Yes, I trust this folder\" when it asks, since hooks don't run until then.",
@@ -332,15 +367,22 @@ var all = []Harness{
 		ID: "cursor", Name: "Cursor", Claim: "cursor", ClaimHint: "local CLI or IDE", Aliases: []string{"cursor-agent", "cursor-cli", "cursor-ide", "cursor-local"}, Clients: []string{"Cursor", "cursor-vscode"}, UserAgents: []string{"Cursor"},
 		Wake: StopHook, ZeroInstall: Background, Ack: "at least once, acknowledged when the stop hook hands the message over",
 		Binding: Unbound, Carrier: Text, StripsText: true, Installable: true, ConversationEnv: "CURSOR_CONVERSATION_ID",
-		Changes:     "adds three hooks to ~/.cursor/hooks.json, keeping a backup",
-		ToolRules:   true,
-		Trust:       "Restart cursor-agent to load them (a new chat isn't enough); the Cursor app reloads them by itself. There's nothing to approve for hooks in your home folder.",
-		Resume:      "Then reopen this chat (cursor-agent --continue) and send any message (\"done\" is enough), so I can connect it and start listening again.",
-		Restart:     "After any later restart, reopen this chat and send any message, so I can start listening again.",
-		AfterUpdate: "There's nothing to approve or restart: the hooks run the new version from their next call.",
-		When:        "if they come within a minute after the agent finishes a turn, otherwise at the start of the next one (not in cursor-agent -p)",
-		NoteAt:      "right after this result",
-		Verified:    "cursor-agent 2026.09.23",
+		// The offers give `npx -y @wakeshift/connect@<version> cursor` once
+		// this Wakeshift knows a published version (SetPackageVersion), the
+		// version pinned so npx never reuses an older copy it cached.
+		Package:              ConnectPackage,
+		PackageCommand:       "npx -y {spec} cursor",
+		PackageChanges:       "adds three hooks to ~/.cursor/hooks.json, keeping a backup, with Wakeshift's npm package " + ConnectPackage + ", which also puts Wakeshift's connector in ~/.wakeshift/bin",
+		PackageUpdateChanges: "it runs Wakeshift's npm package " + ConnectPackage + " at its new version, which replaces Wakeshift's connector and keeps their settings and connected conversations",
+		Changes:              "adds three hooks to ~/.cursor/hooks.json, keeping a backup",
+		ToolRules:            true,
+		Trust:                "Restart cursor-agent to load them (a new chat isn't enough); the Cursor app reloads them by itself. There's nothing to approve for hooks in your home folder.",
+		Resume:               "Then reopen this chat (cursor-agent --continue) and send any message (\"done\" is enough), so I can connect it and start listening again.",
+		Restart:              "After any later restart, reopen this chat and send any message, so I can start listening again.",
+		AfterUpdate:          "There's nothing to approve or restart: the hooks run the new version from their next call.",
+		When:                 "if they come within a minute after the agent finishes a turn, otherwise at the start of the next one (not in cursor-agent -p)",
+		NoteAt:               "right after this result",
+		Verified:             "cursor-agent 2026.09.23",
 	},
 	{
 		// Cursor's cloud agents call MCP servers as Cursor does; their
@@ -371,11 +413,11 @@ var all = []Harness{
 			RefSep:  "#",
 			Changes: "installs Wakeshift's plugin for Copilot CLI with Copilot's own plugin installer, from github.com/wakeshift/agent-plugins, which adds its hooks; they download Wakeshift's connector into ~/.wakeshift/bin, checking its SHA-256",
 			Trust: "There's nothing to approve for the plugin's hooks. Restart copilot to load them. " +
-				"The background command that wakes the agent while it's idle still needs one \"Yes\" each time it starts (once per wake), unless copilot runs with --allow-all-tools (which approves every tool, not just this one).",
+				"Once they connect this conversation, the command that wakes the agent while it's idle starts without asking: they approve Wakeshift's wait command, and only that command.",
 			AfterUpdate: "There's nothing to approve. Restart copilot so it loads the new plugin, then reopen this session (copilot --continue).",
 		},
 		Trust: "There's nothing to approve for hooks in your home folder. Restart copilot to load them (/env lists them). " +
-			"The background command that wakes the agent while it's idle still needs one \"Yes\" each time it starts (once per wake), unless copilot runs with --allow-all-tools (which approves every tool, not just this one).",
+			"Once they connect this conversation, the command that wakes the agent while it's idle starts without asking: they approve Wakeshift's wait command, and only that command.",
 		Resume:      "Then reopen this session (copilot --continue) and send any message (\"done\" is enough), so I can connect it and start listening again.",
 		Restart:     "After any later restart, reopen this session and send any message, so I can start listening again.",
 		AfterUpdate: "There's nothing to approve or restart: the hooks run the new version from their next call.",
@@ -402,6 +444,20 @@ var all = []Harness{
 		ID: "antigravity", Name: "Antigravity CLI", Claim: "antigravity", Aliases: []string{"agy", "antigravity-cli"}, Clients: []string{"antigravity-client"},
 		Wake: StopHook, ZeroInstall: Background, Ack: "at least once, acknowledged when the stop hook hands the message over",
 		Binding: ByConversation, Carrier: Text, ConversationMeta: "antigravity.google/conversation_id", Fingerprint: "antigravity.google/conversation_id", Installable: true,
+		// agy installs only from a git URL whose root is the plugin, so the
+		// plugin is a repository of its own (plugins/agent-plugins/standalone);
+		// installing it again replaces the installed copy.
+		Marketplace: &Marketplace{
+			Install: "agy plugin install {source}",
+			Update:  "agy plugin install {source}",
+			Remove:  "agy plugin uninstall wakeshift",
+			RefSep:  "/tree/",
+			Repo:    "https://github.com/wakeshift/antigravity-plugin",
+			// agy loads a plugin when it starts: a running agy keeps the hooks it
+			// loaded, so an update takes a restart, as the install does.
+			AfterUpdate: "There's nothing to approve. Restart agy and reopen this conversation (agy --continue), so it loads the new plugin.",
+			Changes:     "installs Wakeshift's plugin with agy's own plugin installer, from github.com/wakeshift/antigravity-plugin, into ~/.gemini/config/plugins/wakeshift; its hooks run Wakeshift's connector, which the plugin downloads into ~/.wakeshift/bin and checks against the SHA-256 it carries, and take out a \"wakeshift\" entry an earlier install added to ~/.gemini/config/hooks.json",
+		},
 		Changes:     "adds a \"wakeshift\" entry to ~/.gemini/config/hooks.json, keeping a backup",
 		Trust:       "There's nothing to approve for hooks in your home folder. Restart agy to load them (/hooks lists them).",
 		Resume:      "Then reopen this conversation (agy --continue) and send any message (\"done\" is enough), so I can connect it and start listening again.",
@@ -421,11 +477,24 @@ var all = []Harness{
 		Wake:   Plugin, Ack: "at least once, acknowledged once the turn it wakes has finished",
 		Binding: Unbound, Carrier: Text, StripsText: true, Installable: true, Plugin: true,
 		Changes: "installs the Wakeshift plugin with openclaw plugins install and sets the Wakeshift it trusts. When it connects a conversation, the plugin turns on OpenClaw's hooks endpoint with a token of its own, allowing it to start turns only in the conversations that connect through Wakeshift; hooks settings OpenClaw already has are only added to, and its uninstaller undoes this",
+		// From npm once a release has published it (SetPackageVersion):
+		// npm checks the package's integrity, and the plugin itself refuses
+		// to turn hooks on beyond loopback without the user's yes (Agree), so
+		// nothing here detects the bind. --force: npm isn't a source OpenClaw
+		// trusts without asking, and it replaces an install however it was
+		// made (openclaw.sh's included); --accept-capabilities: nothing can
+		// prompt; enable: a reinstall after an uninstall stays disabled.
+		Package:        "@wakeshift/openclaw",
+		PackageCommand: "openclaw plugins install npm:{spec} --force --accept-capabilities && openclaw plugins enable wakeshift --accept-capabilities",
+		PackageIssuer:  `openclaw config set plugins.entries.wakeshift.config.issuer '"{origin}"' --strict-json`,
+		PackageChanges: "installs Wakeshift's plugin, the npm package @wakeshift/openclaw, with OpenClaw's own openclaw plugins install, and enables it, trusting this Wakeshift. When it connects a conversation, the plugin turns on OpenClaw's hooks endpoint with a token of its own, allowing it to start turns only in the conversations that connect through Wakeshift; hooks settings OpenClaw already has are only added to, and `openclaw wakeshift reset` undoes this",
+		Uninstall:      "openclaw wakeshift reset && openclaw plugins uninstall wakeshift --force",
 		// One question, not two: a gateway in Docker usually listens beyond
 		// this computer, and the installer would otherwise stop to ask about
 		// it (wakebench, October 26, 2026: 5 of 5 asked twice; with this, 0).
 		AskAlso:     "if the OpenClaw gateway listens beyond this computer (in Docker it usually does), OpenClaw's hooks endpoint shares that listener, so it's reachable there too, guarded by the plugin's token; a firewall or proxy rule that blocks /hooks/ from other machines keeps it local.",
 		AgreeEnv:    "WAKESHIFT_OPENCLAW_NETWORK_HOOKS=1",
+		Agree:       "openclaw config set plugins.entries.wakeshift.config.allowNetworkHooks true --strict-json",
 		Run:         "Run it yourself with your exec tool, on the machine (or in the container) where the OpenClaw gateway runs.",
 		Trust:       "There's nothing to approve in OpenClaw, and no restart.",
 		Resume:      "The plugin starts with my next turn, so send any reply (\"done\" is enough), and I'll connect this conversation. After that, it reconnects by itself whenever the gateway starts.",
@@ -450,9 +519,16 @@ var all = []Harness{
 		Repo:    "wakeshift/hermes-plugin",
 		Changes: "installs Wakeshift's plugin from its public repository, github.com/wakeshift/hermes-plugin, with Hermes's own plugin installer, into $HERMES_HOME/plugins/wakeshift, enables it, and lets it start turns in your Hermes chats (Hermes's allow_gateway_injection setting for it, without which the plugin wakes no Hermes chat, through the API server or `hermes chat`); it starts them only in conversations connected to Wakeshift",
 		Allow:   "hermes config set plugins.entries.wakeshift.allow_gateway_injection true",
-		Run: "It runs where Hermes runs (inside its container, if it's in one). Your terminal there may not have `hermes` on its PATH (Hermes's Docker image doesn't): then run each `hermes` in it as `\"$HERMES_PYTHON\" -m hermes_cli.main` (Hermes sets HERMES_PYTHON for its tools), or as /opt/hermes/bin/hermes in Hermes's Docker image. Hermes may hold the command for approval, and in a chat through Hermes's API server nobody can approve it, so put the exact command in your question too, for the user to run where Hermes runs themselves. " +
-			"If Hermes blocks the command, running it fails, or you can't run commands, tell them so in your reply and give them the command to run there: never end your reply without it.",
-		Trust:       "There's nothing to approve in Hermes after the install, but Hermes loads plugins only when a chat starts or is resumed, so Wakeshift can't wake this chat until they resume it: through Hermes's gateway or API server, restart the gateway and continue the session; in `hermes chat`, exit and run `hermes chat --continue`. A new chat works too. If the plugin isn't enabled, first run `hermes plugins enable wakeshift` where Hermes runs.",
+		// The command a user types is `hermes …`; only the agent's own run
+		// may need another form (wakebench, November 2, 2026: the bare
+		// command failed with exit 127 in the image's terminal tool, and the
+		// agent then gave the user its fallback to type).
+		Run: "It runs where Hermes runs (inside its container, if it's in one). In your question, quote the command as it is, starting with `hermes`: that's what the user types where Hermes runs (in Docker, after `docker exec -u hermes <container>`). " +
+			"To run it yourself, first check `command -v hermes`: if your terminal doesn't have it (Hermes's Docker image doesn't put it on the PATH), run each `hermes` in the command as `\"$HERMES_PYTHON\" -m hermes_cli.main` instead (Hermes sets HERMES_PYTHON for its tools). Whatever you ran, every command you give the user starts with `hermes`, so `hermes chat --continue` rather than that form. " +
+			"Hermes may hold the command for approval, and in a chat through Hermes's API server nobody can approve it. If Hermes blocks the command, running it fails, or you can't run commands, tell them so in your reply and give them the command to run there, starting with `hermes`: never end your reply without it. " +
+			"If its output warns \"custom (unreviewed) source\", tell them in one line: Wakeshift's plugin isn't in Hermes's catalog yet, so Hermes installed it from Wakeshift's public repository, github.com/wakeshift/hermes-plugin. " +
+			"If its output says \"Gateway reloaded plugins\" and that the plugin is active in the running gateway now, Hermes loaded it already: skip the restart and resume below, and just ask them to send any message.",
+		Trust:       "There's nothing to approve in Hermes after the install, but Hermes loads plugins only when a chat starts or is resumed, so Wakeshift can't wake this chat until they resume it: through Hermes's gateway or API server, restart the gateway and keep sending to this session as before; in `hermes chat`, exit and run `hermes chat --continue`. A new chat works too. If the plugin isn't enabled, first run `hermes plugins enable wakeshift` where Hermes runs.",
 		Resume:      "Then send any message (\"done\" is enough), so I can connect it.",
 		Restart:     "After a later restart of hermes chat, send any message once you've resumed it, so I can reconnect it (conversations through Hermes's gateway reconnect by themselves).",
 		AfterUpdate: "There's nothing to approve again, but Hermes loads plugins only when a chat starts or is resumed: ask them to resume this chat (exit and run `hermes chat --continue`, or restart Hermes's gateway) or start a new one, so it loads the new plugin.",
@@ -774,6 +850,11 @@ func InstallCommand(h Harness, base string) string {
 // DEFAULT_ISSUER).
 const pluginIssuer = ProductionIssuer
 
+// ConnectPackage is Wakeshift's npm package that installs the connector and
+// its hooks for a harness (`npx -y @wakeshift/connect <harness>`,
+// plugins/connect).
+const ConnectPackage = "@wakeshift/connect"
+
 // ProductionIssuer is production Wakeshift's address: the issuer the
 // plugins and npm packages it releases trust by default.
 const ProductionIssuer = "https://app.wakeshift.ai"
@@ -784,7 +865,7 @@ var originRE = regexp.MustCompile(`^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?$`)
 
 // OfferCommand is the command an install offer gives for a harness: for
 // one with a Repo, its own plugin installer (`hermes plugins install
-// wakeshift/hermes-plugin --enable`) and its Allow command, followed, for a Wakeshift other than
+// wakeshift/hermes-plugin --enable`) and its Allow command, preceded, for a Wakeshift other than
 // the one the plugin trusts by default, by the setting that makes it trust
 // the Wakeshift at base instead; otherwise InstallCommand.
 func OfferCommand(h Harness, base string) string { return repoCommand(h, base, false) }
@@ -804,7 +885,19 @@ func UpdateCommand(h Harness, base string) string { return repoCommand(h, base, 
 
 func repoCommand(h Harness, base string, force bool) string {
 	if spec := PackageSpec(h); spec != "" {
-		return strings.Replace(h.PackageCommand, "{spec}", spec, 1)
+		cmd := strings.Replace(h.PackageCommand, "{spec}", spec, 1)
+		if h.allowTools != "" {
+			// The package runs Wakeshift's installer, which reads it
+			// (WithTools).
+			cmd = h.allowTools + " " + cmd
+		}
+		origin := strings.TrimSuffix(base, "/")
+		if h.PackageIssuer == "" || origin == pluginIssuer || origin == "" {
+			return cmd
+		}
+		if originRE.MatchString(origin) {
+			return strings.Replace(h.PackageIssuer, "{origin}", origin, 1) + " && " + cmd
+		}
 	}
 	if h.Marketplace != nil {
 		tmpl := h.Marketplace.Install
@@ -832,7 +925,11 @@ func repoCommand(h Harness, base string, force bool) string {
 	if !originRE.MatchString(origin) {
 		return InstallCommand(h, base)
 	}
-	return cmd + " && " + h.ID + ` config set plugins.entries.wakeshift.settings.issuers '["` + origin + `"]'`
+	// The issuer first: Hermes 0.22.5's install reloads a running gateway's
+	// plugins at once, and the plugin reads the setting when it loads
+	// (`hermes config set` keeps it for a plugin not installed yet, and the
+	// install keeps it).
+	return h.ID + ` config set plugins.entries.wakeshift.settings.issuers '["` + origin + `"]' && ` + cmd
 }
 
 // packageVersions is the version of each Package to offer, by harness ID
@@ -929,7 +1026,11 @@ func WithTools(h Harness, o ToolsOffer) Harness {
 	if name == "" {
 		name = o.App
 	}
-	h.Changes += "; it also lets " + h.Name + " run " + name + "'s " + ToolList(o.Tools) + " " + plural(len(o.Tools), "tool") + " without asking each time (no other tools)"
+	also := "; it also lets " + h.Name + " run " + name + "'s " + ToolList(o.Tools) + " " + plural(len(o.Tools), "tool") + " without asking each time (no other tools)"
+	h.Changes += also
+	if h.PackageChanges != "" {
+		h.PackageChanges += also
+	}
 	h.allowTools = AllowToolsEnv + "=" + o.App + ":" + strings.Join(o.Tools, ",")
 	return h
 }
@@ -997,16 +1098,16 @@ func installNote(h Harness, install string) string {
 		return CantWake(h.Name)
 	}
 	if h.ZeroInstall == Monitor {
-		return "You can be woken now with the Monitor tool on your stream link (started again every 25 minutes, since Claude Code stops a Monitor after 30). " + upgradeNote(h, install)
+		return pluginFirst(h, install, false, "start the Monitor tool on your stream link, as this result says.")
 	}
 	if h.ZeroInstall == Background {
 		return "You can be woken now, within seconds even while idle, by a command you start in the background (subscribing gives it). " + backgroundUpgrade(h, install)
 	}
 	install = agreed(h, install)
-	ask := unwoken + " Ask the user now whether to install Wakeshift's hooks for " + h.Name + " (it " + changes(h) + "), so new messages reach this conversation " + h.When + ". " +
-		askAlso(h) + "Only if they agree, run `" + install + "`. "
+	ask := unwoken + " Ask the user now whether to install " + Kit(h) + " (it " + changes(h) + "), so new messages reach this conversation " + h.When + ". " +
+		askAlso(h) + askShape(h, install) + " " + declined + " "
 	if h.AskTool != "" {
-		ask = unwoken + " Wakeshift's hooks for " + h.Name + " deliver new messages to this conversation " + h.When + ". " + askWith(h, install) + " "
+		ask = unwoken + " " + Kit(h) + " " + delivers(h) + " new messages to this conversation " + h.When + ". " + askWith(h, install) + " "
 	}
 	if h.Run != "" {
 		ask += h.Run + " "
@@ -1017,12 +1118,63 @@ func installNote(h Harness, install string) string {
 	return ask + "Then call this tool again: a note \"" + Connected + "\" confirms it."
 }
 
+// Kit is what an install offer for h (as Route presents it) installs, for
+// people: "Wakeshift's plugin for Codex" where the offer is a plugin (the
+// harness's own plugin command, an npm plugin, Hermes's repository, or a
+// plugin file), "Wakeshift's package for Cursor" for Cursor's npm package
+// (npx), and "Wakeshift's hooks for …" where it's a plain hooks install.
+func Kit(h Harness) string { return "Wakeshift's " + kit(h) + " for " + h.Name }
+
+// KitFor is Kit for h's offers from the Wakeshift at base.
+func KitFor(h Harness, base string) string { return Kit(Route(h, base)) }
+
+func kit(h Harness) string {
+	switch {
+	case h.routed, h.Wake == Plugin, h.Plugin, h.Repo != "" && h.Installable:
+		return "plugin"
+	case PackageSpec(h) != "" && h.Package == ConnectPackage:
+		return "package"
+	}
+	return "hooks"
+}
+
+// pick is one or many, agreeing with Kit (hooks are many).
+func pick(h Harness, one, many string) string {
+	if kit(h) == "hooks" {
+		return many
+	}
+	return one
+}
+
+func delivers(h Harness) string { return pick(h, "delivers", "deliver") }
+func connects(h Harness) string { return pick(h, "connects", "connect") }
+func itThem(h Harness) string   { return pick(h, "it", "them") }
+func itThey(h Harness) string   { return pick(h, "it", "they") }
+
+// askShape is how the agent asks about an install and runs it: a real
+// yes/no question that quotes the exact command (the user sees what will
+// run before they agree), options in a neutral order, and on a yes the
+// command as given, with nothing looked up first (wakebench, November 2,
+// 2026: Codex's question left the command out, Copilot's only offered to
+// give it, and Codex's agent read its docs skill and searched the web
+// before running it).
+func askShape(h Harness, install string) string {
+	return "Ask it as a yes/no question that quotes this exact command, for example: \"Install " + Kit(h) + "? It runs `" + install + "`.\" " +
+		"If you offer options, put yes first and don't mark either as recommended. " +
+		"Only if they say yes, run exactly that command right away: it's complete as given, so don't read docs or search for it first."
+}
+
+// declined is what the agent tells the user after a no where nothing else
+// wakes the conversation (wakebench, November 2, 2026: opencode's agent
+// said it would "keep polling", which nothing does).
+const declined = "If they say no, install nothing, and tell them new messages will wait until your next call to this app's tools: nothing checks for them in the meantime."
+
 // installedAlready is the exception an install note ends with: the hooks
 // are installed if their note appears.
 func installedAlready(h Harness) string {
-	n := "Skip this if a note \"" + Connected + "\" appears " + h.NoteAt + ": the hooks are installed already."
+	n := "Skip this if a note \"" + Connected + "\" appears " + h.NoteAt + ": " + Kit(h) + " " + pick(h, "is", "are") + " installed already."
 	if h.Review && h.Trust != "" {
-		n += " If the user installed them but there's no such note, only the step in " + h.Name + " is needed."
+		n += " If the user installed " + itThem(h) + " but there's no such note, only the step in " + h.Name + " is needed."
 	}
 	return n
 }
@@ -1049,10 +1201,10 @@ func RetiredNote(h Harness) string {
 }
 
 // AskYes and AskNo are the options an agent with an AskTool offers for the
-// install (AskYes for harness h).
-func AskYes(h Harness) string { return "Yes, install Wakeshift's hooks for " + h.Name }
+// install (AskYes for harness h, as Route presents it), in that order.
+func AskYes(h Harness) string { return "Yes, install " + Kit(h) }
 
-const AskNo = "No, don't install them"
+const AskNo = "No, don't install anything"
 
 // askWith is how an agent in a harness with an AskTool asks about the
 // install: the tool, its two options, the command only on yes, and with a
@@ -1065,64 +1217,113 @@ func askWith(h Harness, install string) string {
 	return askWithNo(h, install, no)
 }
 
-// askWithNo is askWith with the "no" option's description given.
+// askWithNo is askWith with the "no" option's description given. The
+// question itself quotes the command too, and the options come yes first
+// with neither marked as recommended (wakebench, November 2, 2026: models
+// put "No" first and preselected it, or labelled it "(Recommended)").
 func askWithNo(h Harness, install, no string) string {
-	n := "Ask them with your " + h.AskTool + " tool, with two options: \"" + AskYes(h) + "\" (description: runs `" + install + "`, " + changes(h) + ") " +
+	n := "Ask them with your " + h.AskTool + " tool, quoting the exact command in the question itself, for example: \"Install " + Kit(h) + "? It runs `" + install + "`.\" " +
+		"Give two options, in this order, and mark neither as recommended: \"" + AskYes(h) + "\" (description: runs `" + install + "`, " + changes(h) + ") " +
 		"and \"" + AskNo + "\" (description: " + no + "). " +
-		"Run `" + install + "` only if they pick yes"
+		"Run `" + install + "` only if they pick yes, right away and as given (don't look anything up first)"
 	if h.UserShell != "" {
-		n += "; if running it is refused (auto mode or a permission denial), ask them to run it themselves by typing `" + h.UserShell + " " + install + "` (the " + h.UserShell + " prefix runs it as the user)"
+		n += "; if running it is refused (auto mode's classifier or a permission denial), give them the command to type themselves, as it is: `" + h.UserShell + " " + install + "` (the " + h.UserShell + " prefix runs it as the user)"
 	}
 	return n + "."
 }
 
-// monitorLimit is why the hooks are better for anything that runs long:
-// the Monitor has to be started again every 25 minutes (MonitorRestart),
-// and in manual permission mode each start asks the user to approve it
-// (Claude Code 2.1.312's "Yes" covers only that once).
-const monitorLimit = "Claude Code stops a Monitor after 30 minutes, so you start it again every 25, and in manual permission mode each start asks the user to approve it. "
+// Plugin first (Claude Code): a conversation that subscribes while nothing
+// wakes it asks the user about Wakeshift's plugin before it starts what
+// wakes it with nothing installed (the Monitor, or the MCP-tasks wait), and
+// starts that only after a no or an install that didn't happen. In manual
+// permission mode the Monitor's approval shows its whole wait loop with
+// Claude Code's "Quoted text in this command can't be checked" warning, the
+// scariest screen in any flow (wakebench, November 2, 2026), so a user who
+// says yes never sees it. Nothing is lost while the agent asks: new
+// messages are held for the conversation until the plugin connects it or
+// the fallback starts.
 
-// UpgradeNote, for a harness that's woken without installing anything
-// (Claude Code's Monitor), offers Wakeshift's hooks as the better path.
-func UpgradeNote(h Harness, base string) string { return upgradeNote(h, InstallCommand(h, base)) }
-
-func upgradeNote(h Harness, install string) string {
-	if !h.Installable {
-		return ""
+// waker is what wakes a Claude Code conversation with nothing installed:
+// the MCP-tasks wait (tasks) or the Monitor.
+func waker(tasks bool) string {
+	if tasks {
+		return WaitTool
 	}
-	var n string
-	if h.AskTool != "" {
-		n = monitorLimit + "For delivery without a Monitor, with no such limit, the user can install Wakeshift's hooks for " + h.Name + ". Start the Monitor first either way: it wakes you until the hooks connect. " + askWith(h, install)
+	return "the Monitor"
+}
+
+// PluginFirstNote is what a conversation in a harness with an AskTool and a
+// zero-install wake path (Claude Code) is told when it first subscribes
+// while nothing wakes it: ask about Wakeshift's plugin (as the Wakeshift at
+// base offers it) first; on a yes, install it and connect without starting
+// anything else; on a no, or if it doesn't install, fallback, the
+// zero-install path's instructions (what to start, and how). tasks: that path is the MCP-tasks wait, not the Monitor.
+func PluginFirstNote(h Harness, base string, tasks bool, fallback string) string {
+	return pluginFirst(Route(h, base), OfferCommand(h, base), tasks, fallback)
+}
+
+func pluginFirst(h Harness, install string, tasks bool, fallback string) string {
+	if !h.Installable || h.AskTool == "" || install == "" {
+		return fallback
+	}
+	w := waker(tasks)
+	why := "with no Monitor to start again every 25 minutes (in manual permission mode, each start asks the user to approve it)"
+	if tasks {
+		why = "and " + pick(h, "acknowledges", "acknowledge") + " each message as it reaches you"
+	}
+	// Information for the user and one question, not commands to run
+	// unasked: in the realistic bench tier (November 2, 2026), agents set
+	// aside a result that told them to start a background command against
+	// an external URL as an injected instruction.
+	n := "The user asked to be woken when messages arrive. Ask them one question before anything runs: whether to install " + Kit(h) + " (" + itThey(h) + " " + delivers(h) + " new messages to this conversation " + h.When + ", " + why + "). " +
+		"New messages are held for this conversation until then, so none are lost. " +
+		askWithNo(h, install, "messages wake this conversation through "+w+" instead")
+	n += " If they pick yes and it installs, nothing else needs to run: don't start " + w + ". "
+	if reloads(h) {
+		if t := TrustNote(h); t != "" {
+			n += "In your reply to the user, tell them this: " + t + " "
+		}
+		n += "Once they say they've loaded it, call this tool again: the plugin connects this conversation from that result, since its hooks run only once the plugin is loaded. "
 	} else {
-		n = "For delivery without a Monitor, the user can install Wakeshift's hooks for " + h.Name + " (it " + changes(h) + "). " +
-			"Ask them first. Only if they agree, run `" + install + "`."
+		n += "Call this tool again right away, in the same turn and without waiting for the user: the hooks work in this session already, but they connect this conversation only from a result that comes after the install. "
+		if t := TrustNote(h); t != "" {
+			n += "Then, in your reply to the user, also tell them this: " + t + " "
+		}
 	}
-	n += " After that, call this tool again right away, in the same turn and without waiting for the user: the hooks work in this session already, but they connect this conversation only from a result that comes after the install, so until you call it they can't wake you. Once they connect it, a note \"" + Connected + "\" appears " + h.NoteAt + ", and they deliver instead of the Monitor."
-	if t := TrustNote(h); t != "" {
-		// Last, for the reply after that call: placed before the call, an
-		// agent hurrying to call again skipped it (wakebench S6).
-		n += " Then, in your reply to the user, also tell them this: " + t
-	}
-	return n
+	n += confirmNote(h, w)
+	return n + " If they pick no, or it doesn't install (it fails, or it's refused and they don't run it themselves), use " + w + " instead: " + fallback
 }
 
-// TaskUpgradeNote is UpgradeNote for a conversation on the MCP task path
-// (TaskNote), which has no time limit: the hooks are an optional upgrade
-// there (an acknowledgment for each message, and Claude Code's other
-// apps), offered with the same consent.
-func TaskUpgradeNote(h Harness, base string) string {
-	if !h.Installable || h.AskTool == "" {
-		return ""
-	}
-	install := InstallCommand(h, base)
-	n := "The user can also install Wakeshift's hooks for " + h.Name + ", which deliver without " + WaitTool + " and acknowledge each message as it reaches you. Call " + WaitTool + " first either way: it wakes you until the hooks connect. " +
-		askWithNo(h, install, "messages still wake this conversation through "+WaitTool) +
-		" After that, call this tool again right away, in the same turn and without waiting for the user: the hooks work in this session already, but they connect this conversation only from a result that comes after the install. Once they connect it, a note \"" + Connected + "\" appears as " + WaitTool + "'s result, or with your next tool result or wake, and they deliver instead of " + WaitTool + "."
-	if t := TrustNote(h); t != "" {
-		n += " Then, in your reply to the user, also tell them this: " + t
-	}
-	return n
+// confirmNote is how the agent confirms the plugin connected, after the
+// call it connects from: the next result says so (the hooks' own note
+// reaches Claude Code's model only at the next user prompt), else it falls
+// back to waker, which ends by itself once the plugin connects.
+func confirmNote(h Harness, waker string) string {
+	return "After that, call this tool once more, to confirm: that result starts with \"" + Connected + "\" once " + itThey(h) + " " + pick(h, "has", "have") + " connected this conversation. If it doesn't, fall back to " + waker + " as below: it stops by itself once " + itThey(h) + " " + connects(h) + "."
 }
+
+// PluginPendingNote is what such a conversation is told on a later result
+// while nothing wakes it: if the user installed the plugin, this result
+// connects it (confirmNote), and otherwise again, the zero-install path's
+// instructions for an agent told them before.
+func PluginPendingNote(h Harness, base string, tasks bool, again string) string {
+	h = Route(h, base)
+	if !h.Installable || h.AskTool == "" {
+		return again
+	}
+	w := waker(tasks)
+	loaded, notYet := "", ""
+	if reloads(h) {
+		loaded = " and the user has loaded it (/reload-plugins, or a restart)"
+		notYet = " If you installed it but they haven't loaded it yet, don't start " + w + " either: ask them again to, and to send any message after."
+	}
+	return "If you installed " + Kit(h) + " in this conversation" + loaded + ", don't start " + w + ": " + itThey(h) + " " + connects(h) + " this conversation from this result. " +
+		confirmNote(h, w) + notYet + " Otherwise (the user said no, or " + itThey(h) + " " + pick(h, "isn't", "aren't") + " installed): " + again
+}
+
+// reloads reports whether h's offer (Route) is a plugin the user must load
+// in the running session first (Marketplace.Reload).
+func reloads(h Harness) bool { return h.routed && h.Marketplace != nil && h.Marketplace.Reload }
 
 // SubscribeNote is what a conversation that just asked to be woken is
 // told while Wakeshift's hooks haven't connected it: that the hooks say so
@@ -1150,17 +1351,21 @@ func RepeatNote(h Harness, base string) string {
 	return RepeatNoteFor(Route(h, base), OfferCommand(h, base))
 }
 
-// RepeatNoteFor is RepeatNote with the install command given.
+// RepeatNoteFor is RepeatNote with the install command given. It reads
+// true whether or not this very result connects the conversation: the
+// "connected" note comes after the result (wakebench, November 2, 2026:
+// Codex's result said its hooks hadn't connected, right above the note
+// that they had).
 func RepeatNoteFor(h Harness, install string) string {
 	if !h.Installable {
 		return unsure(h, installNote(h, install))
 	}
-	ask := "If you haven't asked the user yet whether to install them (it " + changes(h) + "), ask now. " + askAlso(h) + "If they agreed and it hasn't run, run `" + agreed(h, install) + "`." + sep(h.Run)
+	ask := "If you haven't asked the user yet whether to install " + itThem(h) + " (it " + changes(h) + "), ask now. " + askAlso(h) + askShape(h, agreed(h, install)) + " If they agreed and it hasn't run, run it." + sep(h.Run)
 	if h.AskTool != "" {
-		ask = "If you haven't asked the user yet whether to install them, ask now. " + askWith(h, install)
+		ask = "If you haven't asked the user yet whether to install " + itThem(h) + ", ask now. " + askWith(h, install)
 	}
-	return unsureShort(h, "Wakeshift's hooks for "+h.Name+" haven't connected this conversation yet: messages wait until you call this tool again. "+
-		"If they're installed, a note \""+Connected+"\" appears "+h.NoteAt+". "+ask+
+	return unsureShort(h, "If "+Kit(h)+" "+pick(h, "is", "are")+" installed, "+itThey(h)+" "+connects(h)+" this conversation from this result, and a note \""+Connected+"\" appears "+h.NoteAt+": "+
+		"then "+itThey(h)+" "+delivers(h)+" new messages, and the rest of this doesn't apply. Until then, messages wait until you call this tool again. "+ask+
 		" Don't ask again if they said no.")
 }
 
@@ -1178,6 +1383,10 @@ func askAlso(h Harness) string {
 // The command is InstallCommand's script and shell, with the variable set
 // for the shell; TestAgreed keeps every harness's in step with it.
 func agreed(h Harness, install string) string {
+	// A Package offer (the harness's own command): the record of the yes first.
+	if h.Agree != "" && strings.HasPrefix(install, h.ID+" ") {
+		return h.Agree + " && " + install
+	}
 	sh := toShell
 	if h.allowTools != "" {
 		sh = " | " + h.allowTools + " sh"

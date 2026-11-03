@@ -353,3 +353,57 @@ func TestLauncherUnpinned(t *testing.T) {
 		t.Fatalf("%v %s", err, out)
 	}
 }
+
+// A hook can pass the issuer the user chose (Claude Code's userConfig):
+// the connector trusts it in place of wakeshift.env's, and an address that
+// isn't a Wakeshift's origin is refused without running anything.
+func TestLauncherIssuerArgument(t *testing.T) {
+	r := newRelease(t)
+	l := newLane(t, shells(t)[0], r, "2026.11.02.1912", fakeConnector("2026.11.02.1912"))
+	out, errOut := l.run("{}", "--issuer", "https://app.staging.wakeshift.ai/", "hook", "--harness", "codex", "--rewake")
+	if out != "{\"ok\":true}\n" || errOut != "" {
+		t.Fatalf("%q %q", out, errOut)
+	}
+	want := "install install --harness codex --issuer https://app.staging.wakeshift.ai --yes --plugin\nrun hook --harness codex --rewake stdin={}\n"
+	if got := l.logged(); got != want {
+		t.Fatalf("log:\n%s\nwant:\n%s", got, want)
+	}
+	// The same issuer again: warm.
+	l.run("{}", "--issuer", "https://app.staging.wakeshift.ai", "hook", "--harness", "codex")
+	if strings.Count(l.logged(), "--plugin") != 1 {
+		t.Fatalf("trusted again: %s", l.logged())
+	}
+	before := l.logged()
+	for _, bad := range []string{"", "http://example.com", "https://example.com/x", "https://a.example$(id)", "javascript:x", "https://"} {
+		out, errOut := l.run("{}", "--issuer", bad, "hook", "--harness", "codex")
+		if out != "" || !strings.Contains(errOut, "issuer setting isn't") || l.logged() != before {
+			t.Fatalf("%q: %q %q %s", bad, out, errOut, l.logged())
+		}
+	}
+	if _, errOut := l.run("{}", "--issuer", "http://localhost:8370", "prepare"); errOut != "" || !strings.Contains(l.logged(), "--issuer http://localhost:8370 --yes --plugin") {
+		t.Fatalf("localhost: %q %s", errOut, l.logged())
+	}
+}
+
+// --if-ready runs the connector only when it's there and set up already:
+// it never fetches, installs or waits (a hook the harness waits on before
+// it shows the user a dialog), so before the first fetch it does nothing,
+// and afterwards it runs like any hook.
+func TestLauncherIfReady(t *testing.T) {
+	eachShell(t, func(t *testing.T, shell string) {
+		r := newRelease(t)
+		l := newLane(t, shell, r, "2026.11.02.1912+abc1234", fakeConnector("2026.11.02.1912+abc1234"))
+		out, errOut := l.run(`{"ask":1}`, "--if-ready", "hook", "--harness", "copilot", "--event", "permissionRequest")
+		if out != "" || errOut != "" || r.hits.Load() != 0 || l.logged() != "" {
+			t.Fatalf("not ready: stdout %q stderr %q hits %d log %q", out, errOut, r.hits.Load(), l.logged())
+		}
+		if _, err := os.Stat(l.bin()); err == nil {
+			t.Fatal("fetched")
+		}
+		l.run("", "prepare")
+		out, errOut = l.run(`{"ask":1}`, "--if-ready", "hook", "--harness", "copilot", "--event", "permissionRequest")
+		if out != "{\"ok\":true}\n" || errOut != "" || !strings.Contains(l.logged(), "run hook --harness copilot --event permissionRequest stdin={\"ask\":1}") {
+			t.Fatalf("ready: stdout %q stderr %q log %q", out, errOut, l.logged())
+		}
+	})
+}

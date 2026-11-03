@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { HooksControl } from "./control.js";
 import { bindMode, listensBeyondLoopback, type HooksConfig } from "./hooks.js";
 import { Wakeshift, hasBeaconLine, stripBeacon, type Host, type Options } from "./plugin.js";
+import { reset } from "./reset.js";
 import { Store } from "./store.js";
 import { hooksPath, wakeBody, wakeResult, type Route, type WakeRequest, type WakeResult } from "./wake.js";
 
@@ -22,6 +23,13 @@ interface Scheduler {
 }
 
 const ID = "wakeshift";
+
+/**
+ * The Wakeshift whose beacons the plugin trusts when
+ * plugins.entries.wakeshift.config.issuer isn't set: Wakeshift's own
+ * service. Another Wakeshift's install command sets the issuer first.
+ */
+export const DEFAULT_ISSUER = "https://app.wakeshift.ai";
 
 /** How long a wake request may wait for its turn to finish. */
 export const WAKE_TIMEOUT = 15 * 60 * 1000;
@@ -37,19 +45,72 @@ function stateDir(api: Api): string {
 }
 
 // register never throws into the gateway: a plugin that can't start (its
-// setting missing, its state directory unwritable, an OpenClaw without an
-// API it needs) logs why and does nothing. OpenClaw registers it again when
-// its setting changes.
+// state directory unwritable, an OpenClaw without an API it needs) logs why
+// and does nothing. OpenClaw registers it again when its setting changes.
 export function register(api: Api, overrides: Partial<Options> = {}) {
   const log = {
     info: (m: string) => api?.logger?.info?.(m),
     warn: (m: string) => api?.logger?.warn?.(m),
   };
   try {
+    registerCli(api);
+  } catch (e) {
+    log.warn(`wakeshift: no openclaw wakeshift command (${(e as Error)?.message ?? e})`);
+  }
+  // Collecting CLI commands for help: there's no runtime to start with.
+  if (api?.registrationMode === "cli-metadata") return;
+  try {
     start(api, log, overrides);
   } catch (e) {
     log.warn(`wakeshift: couldn't start (${(e as Error)?.message ?? e}); the plugin does nothing until it's installed again`);
   }
+}
+
+/** What the plugin uses of the Commander command OpenClaw's CLI hands a registrar. */
+export interface CliCommand {
+  command(name: string): CliCommand;
+  description(text: string): CliCommand;
+  action(fn: () => Promise<void>): CliCommand;
+}
+
+/** The plugin's root command, as openclaw.plugin.json's cliCommands declares it too. */
+export const CLI = { name: "wakeshift", description: "Wakeshift's plugin: undo what it turned on (reset)", hasSubcommands: true };
+
+/**
+ * `openclaw wakeshift reset`, run where the gateway runs, before
+ * `openclaw plugins uninstall wakeshift` (reset.ts says what it undoes).
+ */
+function registerCli(api: Api) {
+  if (typeof api?.registerCli !== "function") return;
+  api.registerCli(
+    ({ program }: { program: CliCommand }) => {
+      const root = program.command(CLI.name).description(CLI.description);
+      root
+        .command("reset")
+        .description(
+          "Undo what Wakeshift's plugin turned on: OpenClaw's hooks endpoint and the plugin's token for it, the hooks settings it added, the agreement to hooks on a gateway that listens beyond this computer, and the plugin's state. Then uninstall it with: openclaw plugins uninstall wakeshift --force",
+        )
+        .action(async () => {
+          try {
+            const config = api.runtime.config;
+            const lines = await reset({
+              dir: stateDir(api),
+              id: ID,
+              config: {
+                current: () => config.current?.(),
+                mutate: (fn) => config.mutateConfigFile({ mutate: fn, afterWrite: { mode: "auto" } }),
+              },
+            });
+            for (const l of lines) console.log(l);
+            console.log("To remove the plugin too: openclaw plugins uninstall wakeshift --force");
+          } catch (e) {
+            console.error(`wakeshift: couldn't reset (${(e as Error)?.message ?? e}); its state wasn't deleted, so openclaw wakeshift reset can be run again`);
+            process.exitCode = 1;
+          }
+        });
+    },
+    { descriptors: [CLI] },
+  );
 }
 
 /** The gateway's config now (the process snapshot). */
@@ -102,13 +163,9 @@ export async function wakeOnce(api: Api, f: typeof fetch, r: WakeRequest, timeou
 }
 
 function start(api: Api, log: { info: (m: string) => void; warn: (m: string) => void }, overrides: Partial<Options>) {
-  const issuer = typeof api.pluginConfig?.issuer === "string" ? api.pluginConfig.issuer.trim().replace(/\/$/, "") : "";
-  if (!issuer) {
-    log.warn(
-      "wakeshift: no issuer set, so the plugin does nothing until it is: run Wakeshift's installer for OpenClaw again (it sets plugins.entries.wakeshift.config.issuer)",
-    );
-    return;
-  }
+  // Installed with no setting (from npm), it trusts Wakeshift's own service.
+  const set = typeof api.pluginConfig?.issuer === "string" ? api.pluginConfig.issuer.trim().replace(/\/$/, "") : "";
+  const issuer = set || DEFAULT_ISSUER;
   let scheduler: Scheduler | undefined;
   let n = 0;
   // Runtime calls run inside the gateway's admission: a scheduler job of the

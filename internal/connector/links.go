@@ -286,3 +286,16 @@ func Prompt(ds []Delivery) string {
 	}
 	return framing.Frame("", ms...)
 }
+
+// prompt is Prompt, after framing.Headline for a harness whose hook's
+// first line is what a wake opens with (Hook.Headline).
+func (h *Hook) prompt(ds []Delivery) string {
+	if !h.Headline || len(ds) == 0 {
+		return Prompt(ds)
+	}
+	es := make([]framing.Event, len(ds))
+	for i, d := range ds {
+		es[i] = framing.FromWire(d.Event, d.App)
+	}
+	return framing.Headline(es...) + "\n" + Prompt(ds)
+}

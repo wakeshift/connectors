@@ -131,3 +131,34 @@ func TestInstallPluginClaudeRule(t *testing.T) {
 		t.Fatal("plugin-issuer left")
 	}
 }
+
+// An install from npx or the script over Wakeshift's plugin (Cursor's from
+// its Marketplace) forgets the plugin's issuer, so the plugin's launcher sets
+// it up again on its next hook, which takes the new hooks out again: the
+// harness never keeps running both.
+func TestInstallOverPlugin(t *testing.T) {
+	home := setHome(t)
+	spec, _ := Lookup("cursor")
+	installPlugin(t, spec, testBin, "https://app.wakeshift.ai")
+	stamp := filepath.Join(LoadSettings("cursor").Dir, PluginIssuerFile)
+	if _, err := os.Stat(stamp); err != nil {
+		t.Fatal(err)
+	}
+	install(t, spec, testBin)
+	if _, err := os.Stat(stamp); err == nil {
+		t.Fatal("plugin-issuer kept: the plugin's launcher wouldn't take the hooks out")
+	}
+	hooks := filepath.Join(home, ".cursor", "hooks.json")
+	if b, _ := os.ReadFile(hooks); !strings.Contains(string(b), "--harness cursor") {
+		t.Fatalf("hooks.json: %s", b)
+	}
+	// What the launcher then runs.
+	if out := installPlugin(t, spec, testBin, "https://app.wakeshift.ai"); !strings.Contains(out, "Removed the hooks an earlier Wakeshift install wrote to "+hooks) {
+		t.Fatalf("plugin again: %s", out)
+	}
+	if b, _ := os.ReadFile(hooks); strings.Contains(string(b), "--harness cursor") {
+		t.Fatalf("hooks.json after the plugin: %s", b)
+	}
+	// Without a plugin, the install works as ever.
+	install(t, spec, testBin)
+}

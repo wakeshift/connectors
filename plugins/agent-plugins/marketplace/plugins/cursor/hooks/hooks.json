@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "sh \"${CURSOR_PLUGIN_ROOT}/bin/wakeshift\" prepare",
+        "timeout": 120
+      }
+    ],
+    "afterMCPExecution": [
+      {
+        "command": "sh \"${CURSOR_PLUGIN_ROOT}/bin/wakeshift\" hook --harness cursor",
+        "timeout": 10
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "sh \"${CURSOR_PLUGIN_ROOT}/bin/wakeshift\" hook --harness cursor",
+        "matcher": "^MCP:",
+        "timeout": 20
+      }
+    ],
+    "stop": [
+      {
+        "command": "sh \"${CURSOR_PLUGIN_ROOT}/bin/wakeshift\" hook --harness cursor",
+        "timeout": 90,
+        "loop_limit": null
+      }
+    ]
+  }
+}

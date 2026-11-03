@@ -27,12 +27,26 @@ import (
 
 const claudeName = "claude-code"
 
+// How Claude Code presents a waiter's wake (its asyncRewake hook's
+// rewakeSummary and rewakeMessage, read from the hook's settings since
+// 2.1.280 at least). Without them the terminal labels each wake "Stop hook
+// feedback", which reads like an error, and the model's system reminder
+// starts `Stop hook blocking error from command "…":`.
+const (
+	// ClaudeRewakeSummary is the line the terminal shows for the wake.
+	ClaudeRewakeSummary = "Woken by Wakeshift"
+	// ClaudeRewakeMessage starts the system reminder the model gets,
+	// before the hook's text (the headline, then the framed messages).
+	ClaudeRewakeMessage = "Wakeshift woke this session (not the user)."
+)
+
 func init() {
 	register(Spec{Name: claudeName, Format: claudeFormat{}, Installer: claudeInstaller{},
 		When:       "as soon as they arrive, even while the session is idle",
 		RewakeWait: 23 * time.Hour, // under the hook's timeout (86400s)
 		Rule:       ClaudeRule,
 		Tools:      &claudeTools,
+		Headline:   true,
 	})
 }
 
@@ -298,7 +312,7 @@ func (claudeInstaller) path() string { return filepath.Join(ClaudeConfigDir(), "
 func (claudeInstaller) entries(bin string) []entry {
 	isOur := func(item json.RawMessage) bool { return commandIn(item, bin, claudeName) }
 	waiter := map[string]any{"hooks": []any{map[string]any{"type": "command", "command": HookCommand(bin, claudeName, "--rewake"),
-		"asyncRewake": true, "timeout": 86400}}}
+		"asyncRewake": true, "timeout": 86400, "rewakeSummary": ClaudeRewakeSummary, "rewakeMessage": ClaudeRewakeMessage}}}
 	return []entry{
 		{event: "PostToolUse", isOur: isOur, json: map[string]any{"matcher": "mcp__.*", "hooks": []any{map[string]any{"type": "command",
 			"command": HookCommand(bin, claudeName), "async": true, "timeout": 30}}}},

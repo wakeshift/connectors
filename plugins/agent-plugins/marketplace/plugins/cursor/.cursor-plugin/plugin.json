@@ -1,0 +1,15 @@
+{
+  "name": "wakeshift",
+  "version": "0.0.0",
+  "description": "Wakes your Cursor agent when the apps it watches through Wakeshift send something, so it can act on new messages without you checking in. Its hooks run Wakeshift's open-source connector, which the plugin downloads once and checks against the SHA-256 it carries.",
+  "author": {
+    "name": "Wakeshift",
+    "email": "support@wakeshift.ai"
+  },
+  "homepage": "https://wakeshift.ai/docs/agents",
+  "repository": "https://github.com/wakeshift/agent-plugins",
+  "license": "Apache-2.0",
+  "keywords": ["wakeshift", "agents", "notifications", "mcp", "hooks", "automation"],
+  "logo": "assets/logo.svg",
+  "hooks": "hooks/hooks.json"
+}

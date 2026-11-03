@@ -5,14 +5,20 @@
 //   @wakeshift/connect-<os>-<arch>   the connector (wakeshift) for one platform
 //   @wakeshift/connect               npx -y @wakeshift/connect <harness> (plugins/connect)
 //   @wakeshift/opencode              the plugin for opencode (plugins/opencode)
+//   @wakeshift/openclaw              the plugin for OpenClaw (plugins/openclaw),
+//                                    with --openclaw: its built directory
 //
-//	node plugins/pack-npm.mjs --version 1.5.0 --bin-dir dist --out dist [--issuer URL]
+//	node plugins/pack-npm.mjs --version 1.5.0 --bin-dir dist --out dist [--issuer URL] [--openclaw plugins/openclaw]
 //
 // --bin-dir holds wakeshift-<os>-<arch> for every platform (the release's
 // names, Go's arch: amd64). Every package gets --version, and the launcher
 // and the plugin depend on exactly that version of each platform package.
 // --issuer packs the launcher and the plugin to trust another Wakeshift by
 // default (a local core, for the bench); production's is the default.
+// --openclaw is plugins/openclaw after its build (npm run pack, which
+// stamps Wakeshift's own version into dist/version.js, the one the plugin
+// reports): its dist, manifest, README and LICENSE, with package.json at
+// --version and without its scripts.
 // .github/workflows/installers.yml runs it for a release tag; the tarballs
 // go into the signed release, and wakeshift/connectors' npm.yml publishes
 // them with provenance. Prints the tarballs' names, platform packages first
@@ -46,7 +52,7 @@ function fail(msg) {
 
 function args(argv) {
   const o = { issuer: PRODUCTION };
-  const keys = { "--version": "version", "--bin-dir": "binDir", "--out": "out", "--issuer": "issuer" };
+  const keys = { "--version": "version", "--bin-dir": "binDir", "--out": "out", "--issuer": "issuer", "--openclaw": "openclaw" };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const [k, v] = a.includes("=") ? a.split(/=(.*)/s) : [a, argv[++i]];
@@ -143,6 +149,27 @@ export function main(argv) {
     writeFileSync(join(oc, "package.json"), JSON.stringify(stamp(join(here, "opencode", "package.json"), o.version), null, 2) + "\n");
 
     names.push(pack(c, out), pack(oc, out));
+
+    // The plugin for OpenClaw, as built.
+    if (o.openclaw) {
+      const src = resolve(o.openclaw);
+      const cl = join(stage, "openclaw");
+      mkdirSync(join(cl, "dist"), { recursive: true });
+      let built;
+      try {
+        built = readFileSync(join(src, "dist", "index.js"), "utf8");
+      } catch {
+        fail(`${join(src, "dist", "index.js")} is missing: build the plugin first (cd plugins/openclaw && npm run pack)`);
+      }
+      if (/export const VERSION = "dev";/.test(readFileSync(join(src, "dist", "version.js"), "utf8"))) {
+        fail(`${join(src, "dist", "version.js")} says "dev" (version 0 to Wakeshift): build it with WAKESHIFT_VERSION set (npm run pack)`);
+      }
+      execFileSync("cp", ["-R", join(src, "dist") + "/.", join(cl, "dist")]);
+      writeFileSync(join(cl, "dist", "index.js"), replaceOnce(built, `export const DEFAULT_ISSUER = "${PRODUCTION}";`, `export const DEFAULT_ISSUER = ${JSON.stringify(o.issuer)};`, "plugins/openclaw/dist/index.js"));
+      for (const f of ["openclaw.plugin.json", "README.md", "LICENSE"]) copyFileSync(join(src, f), join(cl, f));
+      writeFileSync(join(cl, "package.json"), JSON.stringify(stamp(join(src, "package.json"), o.version), null, 2) + "\n");
+      names.push(pack(cl, out));
+    }
   } finally {
     rmSync(stage, { recursive: true, force: true });
   }

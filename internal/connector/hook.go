@@ -43,7 +43,19 @@ const (
 	// tool-result hook (Cursor's afterMCPExecution): recorded so the
 	// result's hook knows its server (CallServerFormat).
 	CallDone
+	// Approve: the harness is about to ask the user to approve a tool
+	// call (Copilot's permissionRequest); the hook approves Wakeshift's
+	// own wait command, exactly, and nothing else (ApproveFormat).
+	Approve
 )
+
+// ApproveFormat is a Format whose harness asks a hook before it asks the
+// user to approve a tool call (Approve): Shell says whether a tool is its
+// shell, and Approve is the answer that approves the call.
+type ApproveFormat interface {
+	Shell(tool string) bool
+	Approve() Output
+}
 
 // CallServerFormat is a Format whose tool-result hook doesn't name the MCP
 // server, but whose CallDone hook does, for the same call ID (Cursor).
@@ -72,7 +84,9 @@ type EventFormat interface {
 type Input struct {
 	Event        Event
 	Conversation string // the harness's conversation (session) ID
-	ToolName     string // for ToolResult
+	ToolName     string // for ToolResult, PreCall and Approve
+	// Command is the shell command an Approve asks about.
+	Command string
 	// MCPTool is the MCP tool that produced the result, by its bare name as
 	// the app's server lists it (ToolName without the harness's server
 	// prefix), "" if the harness doesn't say: a beacon is acted on only
@@ -212,6 +226,9 @@ type Hook struct {
 	// Tools, if set, pre-approves an app's MCP tools the user agreed to
 	// when the hook connects a conversation to it (toolrules.go).
 	Tools *ToolRules
+	// Headline: what the hook hands over starts with framing.Headline
+	// (Spec.Headline).
+	Headline bool
 	// Bin is this binary's path, for the commands notes give.
 	Bin string
 
@@ -240,6 +257,14 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout, stderr io.Write
 		in, err = ef.ParseEvent(h.EventName, b)
 	} else {
 		in, err = h.Format.Parse(b)
+	}
+	if err == nil && in.Event == Approve {
+		// It decides by the tool and its command alone: no conversation
+		// needed.
+		if out, ok := h.approve(in); ok {
+			stdout.Write(out.Stdout)
+		}
+		return 0
 	}
 	if err != nil || in.Conversation == "" {
 		return 0
@@ -319,6 +344,25 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout, stderr io.Write
 		handed()
 	}
 	return out.ExitCode
+}
+
+// approve approves the harness's shell running Wakeshift's wait command
+// (WaitCommand), exactly as Wakeshift's instructions give it: the binary's
+// absolute path and "wait", with nothing added (no argument, redirect,
+// pipe or second command: the whole command must be that text), and only
+// while the binary is the user's own (ownedByUser, as for Claude Code's
+// rule). Anything else gets no answer, so the harness asks the user as it
+// would have. It reads no links and makes no request, so it answers at
+// once.
+func (h *Hook) approve(in Input) (Output, bool) {
+	af, ok := h.Format.(ApproveFormat)
+	if !ok || h.WaitCommand == "" || !af.Shell(in.ToolName) || strings.TrimSpace(in.Command) != h.WaitCommand {
+		return Output{}, false
+	}
+	if bin := strings.TrimSuffix(h.WaitCommand, " wait"); WaitCommand(bin) != h.WaitCommand || ownedByUser(bin) != nil {
+		return Output{}, false
+	}
+	return af.Approve(), true
 }
 
 // toolResult connects the conversation on a beacon for it, and hands over
@@ -475,7 +519,11 @@ func (h *Hook) listen(ctx context.Context, in Input, wait time.Duration) (Output
 	// in a hook that couldn't add context) comes with this wake instead.
 	note := h.takeNote(in.Conversation)
 	if note != "" {
-		text = note + "\n\n" + text
+		if head, rest, ok := strings.Cut(text, "\n"); h.Headline && ok {
+			text = head + "\n" + note + "\n\n" + rest // the headline stays first
+		} else {
+			text = note + "\n\n" + text
+		}
 	}
 	out, ok := h.Format.Continue(in, text)
 	if ok {
@@ -507,7 +555,7 @@ func (h *Hook) take(ctx context.Context, conversation string, wait time.Duration
 		if len(ds) == 0 {
 			return "", nil
 		}
-		return Prompt(ds), ack
+		return h.prompt(ds), ack
 	}
 	type got struct {
 		ds  []Delivery
@@ -543,7 +591,7 @@ func (h *Hook) take(ctx context.Context, conversation string, wait time.Duration
 	if len(ds) == 0 {
 		return "", nil
 	}
-	return Prompt(ds), func() {
+	return h.prompt(ds), func() {
 		for _, a := range acks {
 			a()
 		}

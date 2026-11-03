@@ -387,12 +387,16 @@ func backgroundUpgrade(h Harness, install string) string {
 	if h.ZeroInstall != Background || !h.Installable {
 		return ""
 	}
-	n := "Optional: Wakeshift's hooks for " + h.Name + " also deliver messages when a turn ends, and confirm them (it " + changes(h) + "). " +
-		"Mention it to the user once. Only if they want it, run `" + install + "`."
+	// A real question with the command in it (wakebench, November 2, 2026:
+	// "Optional: … Say if you want the install command" had the user say
+	// yes to a question never asked, and the agent then doubted the command
+	// it had been given).
+	n := "Also ask the user once whether to install " + Kit(h) + ", which also " + delivers(h) + " messages when a turn ends and " + pick(h, "confirms", "confirm") + " them (it " + changes(h) + "). " +
+		askShape(h, install) + " If they say no, keep the background command alone."
 	if t := TrustNote(h); t != "" {
-		n += " Then tell them: " + t
+		n += " After the install, tell them: " + t
 	}
-	return n + " The hooks don't replace the background command: keep it running, and start it again after a restart. Starting the command doesn't install the hooks; only their own note says they're connected."
+	return n + " " + Kit(h) + " " + pick(h, "doesn't", "don't") + " replace the background command: keep it running, and start it again after a restart. Starting the command doesn't install " + itThem(h) + "; only " + pick(h, "its", "their") + " own note says " + pick(h, "it's", "they're") + " connected."
 }
 
 // NoMonitorNote is Claude Code's way to be woken without a Monitor tool
@@ -414,8 +418,9 @@ func NoMonitorNote(url string, brief bool) string {
 // ConnectedNote is what the core tells a conversation, once, after
 // Wakeshift's hooks first connect it (for harnesses whose hooks' own note
 // reaches the model late). It starts with Connected.
-func ConnectedNote(h Harness) string {
-	n := Connected + ". Wakeshift's hooks for " + h.Name + " deliver this conversation's messages now, " + h.When + "."
+func ConnectedNote(h Harness, base string) string {
+	h = Route(h, base)
+	n := Connected + ". " + Kit(h) + " " + delivers(h) + " this conversation's messages now, " + h.When + "."
 	switch h.ZeroInstall {
 	case Monitor:
 		n += " Stop the Wakeshift Monitor (or background command) if one is still running."
@@ -425,14 +430,25 @@ func ConnectedNote(h Harness) string {
 	return n
 }
 
+// DeliversNote is what subscribing tells a conversation that h's hooks or
+// plugin (Kit, as the Wakeshift at base offers it) have connected: they
+// deliver app's messages to it.
+func DeliversNote(h Harness, base, app string) string {
+	h = Route(h, base)
+	return Kit(h) + " " + delivers(h) + " to this conversation: new messages from " + app + " reach it " + h.When + "."
+}
+
 // UninstallNote says how to remove Wakeshift's hooks for a harness (""
 // if it has none to remove): with the uninstaller, not a settings backup,
 // which would undo the user's later changes.
 func UninstallNote(h Harness) string {
+	if h.Uninstall != "" && PackageSpec(h) != "" {
+		return "Wakeshift's plugin stays installed for every " + h.Name + " conversation; if the user wants it removed, run `" + h.Uninstall + "` (it puts back what the plugin changed; don't restore a settings backup instead: that would undo their later changes)."
+	}
 	if !h.Installable || h.Plugin {
 		return ""
 	}
-	if h.Package != "" {
+	if h.Package != "" && h.Package != ConnectPackage {
 		// opencode (1.19) has no command that removes a plugin.
 		return "Wakeshift's plugin stays installed for every " + h.Name + " session. If the user wants it removed: " + h.Name + " has no command for that, so delete the \"" + h.Package + "@…\" entry from the \"plugin\" list in ~/.config/opencode/opencode.json, keeping the rest of the file, and delete ~/.wakeshift/" + h.ID + " (the plugin's settings and connected sessions); if instead Wakeshift's installer wrote ~/.config/opencode/plugins/wakeshift.ts, run `~/.wakeshift/bin/wakeshift uninstall --harness " + h.ID + "`. Then they restart " + h.Name + " to unload it."
 	}
@@ -506,7 +522,10 @@ func UpdateNote(h Harness, base string) string {
 // the user.
 func updateChanges(h Harness, pluginRoute bool) string {
 	if pluginRoute {
-		return "it updates Wakeshift's plugin for " + h.Name + " from github.com/" + AgentPlugins + " with " + h.Name + "'s own plugin command, which replaces the plugin's files and keeps their settings and connected conversations"
+		return "it updates Wakeshift's plugin for " + h.Name + " from " + marketplaceRepo(h) + " with " + h.Name + "'s own plugin command, which replaces the plugin's files and keeps their settings and connected conversations"
+	}
+	if PackageSpec(h) != "" && h.PackageUpdateChanges != "" {
+		return h.PackageUpdateChanges
 	}
 	if PackageSpec(h) != "" {
 		return "it installs the new version of Wakeshift's plugin, the npm package " + h.Package + ", with " + h.Name + "'s own plugin command, which replaces the old version and keeps their settings and connected conversations"

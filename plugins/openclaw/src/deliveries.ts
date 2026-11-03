@@ -70,7 +70,7 @@
 import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { prompt } from "./framing.js";
+import { wakeText } from "./framing.js";
 import { writeAtomic } from "./store.js";
 import type { Delivery } from "./transport.js";
 import type { Route, WakeRequest, WakeResult } from "./wake.js";
@@ -391,7 +391,7 @@ export class Conversation {
     let req = {
       sessionKey: this.o.sessionKey,
       ...(this.o.agentId ? { agentId: this.o.agentId } : {}),
-      message: prompt(once(waiting).map((w) => w.delivery)),
+      message: wakeText(once(waiting).map((w) => w.delivery)),
       idempotencyKey: unsure ?? idempotencyKey(this.o.conversation, waiting.map((w) => w.id), attempt),
       // A request sent again as is (unsure) keeps the route it had.
       route: unsure ? waiting[0].unsureRoute : this.o.route?.(),

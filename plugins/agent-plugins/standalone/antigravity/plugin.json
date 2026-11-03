@@ -1,0 +1,12 @@
+{
+  "name": "wakeshift",
+  "version": "0.0.0",
+  "description": "Lets Wakeshift messages wake your Antigravity CLI conversations, for the apps you connect. Its hooks run Wakeshift's connector, ~/.wakeshift/bin/wakeshift, which it downloads and checks against the SHA-256 it carries.",
+  "author": {
+    "name": "Wakeshift",
+    "url": "https://wakeshift.ai"
+  },
+  "homepage": "https://wakeshift.ai/docs/agents",
+  "repository": "https://github.com/wakeshift/antigravity-plugin",
+  "license": "Apache-2.0"
+}

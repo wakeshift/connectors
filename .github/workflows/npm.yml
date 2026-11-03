@@ -2,7 +2,8 @@ name: npm
 
 # Publishes a release's npm packages: @wakeshift/connect-<os>-<arch> (the
 # connector for each platform), @wakeshift/connect (npx -y @wakeshift/connect
-# <harness>) and @wakeshift/opencode (the plugin for opencode).
+# <harness>), @wakeshift/opencode (the plugin for opencode) and
+# @wakeshift/openclaw (the plugin for OpenClaw).
 #
 # They're built in Wakeshift's private repository with the rest of the
 # installers' release (its installers.yml, from the same binaries) and
@@ -53,7 +54,7 @@ jobs:
           set -eu
           mkdir dist && cd dist
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'wakeshift-connect-*.tgz' --pattern 'wakeshift-opencode-*.tgz' \
+            --pattern 'wakeshift-connect-*.tgz' --pattern 'wakeshift-opencode-*.tgz' --pattern 'wakeshift-openclaw-*.tgz' \
             --pattern SHA256SUMS --pattern SHA256SUMS.sigstore.json
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: Check the signature and the checksums
@@ -65,14 +66,14 @@ jobs:
             --certificate-identity "https://github.com/wakeshift/wakeshift/.github/workflows/installers.yml@refs/tags/$TAG" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com SHA256SUMS
           v=${TAG#v}
-          want="wakeshift-connect-darwin-arm64-$v.tgz wakeshift-connect-darwin-x64-$v.tgz wakeshift-connect-linux-arm64-$v.tgz wakeshift-connect-linux-x64-$v.tgz wakeshift-connect-$v.tgz wakeshift-opencode-$v.tgz"
+          want="wakeshift-connect-darwin-arm64-$v.tgz wakeshift-connect-darwin-x64-$v.tgz wakeshift-connect-linux-arm64-$v.tgz wakeshift-connect-linux-x64-$v.tgz wakeshift-connect-$v.tgz wakeshift-opencode-$v.tgz wakeshift-openclaw-$v.tgz"
           for f in $want; do
             test -f "$f" || { echo "the release has no $f" >&2; exit 1; }
             grep -q "  $f\$" SHA256SUMS || { echo "SHA256SUMS doesn't list $f" >&2; exit 1; }
           done
           extra=$(ls wakeshift-*.tgz | grep -vxF -f <(printf '%s\n' $want) || true)
           if [ -n "$extra" ]; then echo "unexpected files: $extra" >&2; exit 1; fi
-          grep -E '  wakeshift-(connect|opencode)-' SHA256SUMS | sha256sum -c -
+          grep -E '  wakeshift-(connect|opencode|openclaw)-' SHA256SUMS | sha256sum -c -
           # Each is the package and version its name says.
           for f in $want; do
             tar -xzOf "$f" package/package.json | node -e '
@@ -129,7 +130,7 @@ jobs:
           *-*) dist_tag=next ;;
           *) dist_tag=latest ;;
           esac
-          for p in connect-darwin-arm64 connect-darwin-x64 connect-linux-arm64 connect-linux-x64 connect opencode; do
+          for p in connect-darwin-arm64 connect-darwin-x64 connect-linux-arm64 connect-linux-x64 connect opencode openclaw; do
             if [ "$(npm view "@wakeshift/$p@$v" version 2>/dev/null || true)" = "$v" ]; then
               echo "@wakeshift/$p@$v is published already"
               continue

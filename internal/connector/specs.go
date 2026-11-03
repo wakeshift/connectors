@@ -2,8 +2,10 @@ package connector
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -42,6 +44,10 @@ type Spec struct {
 	// with the user's yes (toolrules.go): only harnesses with exact
 	// per-tool rules.
 	Tools *ToolRules
+	// Headline: what its hooks hand over starts with a plain line naming
+	// what arrived (framing.Headline), before the framed messages: Claude
+	// Code, whose wakes open with their first line.
+	Headline bool
 }
 
 var specs = map[string]Spec{}
@@ -71,7 +77,7 @@ func (s Spec) NewHook(hc *http.Client, p Poller) *Hook {
 		p = &HTTPPoller{Harness: s.Name}
 	}
 	return &Hook{Harness: s.Name, Format: s.Format, Verifier: &Verifier{Settings: set, HTTP: hc}, Poller: p, Links: LinksFor(set), HTTP: hc,
-		When: s.When, StopWait: s.StopWait, RewakeWait: s.RewakeWait, Unbound: s.Unbound, RecordProcs: s.RecordProcs, Tools: s.Tools}
+		When: s.When, StopWait: s.StopWait, RewakeWait: s.RewakeWait, Unbound: s.Unbound, RecordProcs: s.RecordProcs, Tools: s.Tools, Headline: s.Headline}
 }
 
 // Install trusts issuer to sign beacons for this harness and adds its
@@ -102,6 +108,13 @@ func (s Spec) Install(bin, issuer string, out io.Writer) error {
 	}
 	fmt.Fprintf(out, "Wakeshift's hooks for %s run %s and trust beacons from %s.\n", s.Name, bin, issuer)
 	addRule(set, s, bin, out, was)
+	// If Wakeshift's plugin for the harness is installed too (Cursor's from
+	// its Marketplace, with this install from npx), its launcher runs
+	// InstallPlugin again on its next hook, which takes these hooks out, so
+	// the harness doesn't run both. Without the plugin, nothing reads it.
+	if err := os.Remove(filepath.Join(set.Dir, PluginIssuerFile)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
 	return nil
 }
 

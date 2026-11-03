@@ -67,8 +67,8 @@ func TestCodexMarketplace(t *testing.T) {
 		t.Errorf("uninstall: %s", n)
 	}
 	// Route leaves a harness without a marketplace as it is.
-	cc, _ := Get("claude-code")
-	if Route(cc, "https://app.wakeshift.ai").Changes != cc.Changes {
-		t.Error("claude-code routed")
+	cursor, _ := Get("cursor")
+	if Route(cursor, "https://app.wakeshift.ai").Changes != cursor.Changes {
+		t.Error("cursor routed")
 	}
 }

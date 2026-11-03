@@ -1,0 +1,48 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/sh",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/wakeshift", "--issuer", "${user_config.issuer}", "hook", "--harness", "claude-code"],
+            "async": true,
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/sh",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/wakeshift", "--issuer", "${user_config.issuer}", "hook", "--harness", "claude-code", "--rewake"],
+            "asyncRewake": true,
+            "rewakeSummary": "Woken by Wakeshift",
+            "rewakeMessage": "Wakeshift woke this session (not the user).",
+            "timeout": 86400
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/sh",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/wakeshift", "--issuer", "${user_config.issuer}", "hook", "--harness", "claude-code", "--rewake"],
+            "asyncRewake": true,
+            "rewakeSummary": "Woken by Wakeshift",
+            "rewakeMessage": "Wakeshift woke this session (not the user).",
+            "timeout": 86400
+          }
+        ]
+      }
+    ]
+  }
+}

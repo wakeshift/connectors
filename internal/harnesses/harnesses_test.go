@@ -20,7 +20,7 @@ func TestInstallerURL(t *testing.T) {
 	if got := ScriptURL(codex, "https://x.test"); got != "https://installers.example/releases/latest/download/codex.sh" {
 		t.Fatalf("script URL: %q", got)
 	}
-	if got := UpgradeNote(codex, "https://x.test"); strings.Contains(got, "x.test/install") || !strings.Contains(got, "releases/latest/download/codex.sh") {
+	if got := SubscribeNote(codex, "https://x.test"); strings.Contains(got, "x.test/install") || !strings.Contains(got, "releases/latest/download/codex.sh") {
 		t.Fatalf("upgrade note: %q", got)
 	}
 	// Updates fetch from the release too, for every harness without its own
@@ -155,18 +155,18 @@ func TestForClient(t *testing.T) {
 func TestInstallNote(t *testing.T) {
 	h, _ := Get("claude-code")
 	n := InstallNote(h, "https://app.wakeshift.ai/")
-	for _, want := range []string{"Ask them with your AskUserQuestion tool, with two options",
-		`"Yes, install Wakeshift's hooks for Claude Code" (description: runs ` + "`curl -fsSL https://app.wakeshift.ai/install/claude-code.sh | sh`, adds three hooks to ~/.claude/settings.json and pre-approves Wakeshift's own wait command there (~/.wakeshift/bin/wakeshift wait), so Claude Code runs it without asking, keeping a backup)",
-		`"No, don't install them" (description: messages still wake this conversation through the Monitor)`,
-		"only if they pick yes", "if running it is refused (auto mode or a permission denial)",
-		"by typing `! curl -fsSL https://app.wakeshift.ai/install/claude-code.sh | sh`",
-		"Yes, I trust this folder", "After that, call this tool again"} {
+	for _, want := range []string{"Ask them with your AskUserQuestion tool, quoting the exact command in the question itself",
+		`"Yes, install Wakeshift's plugin for Claude Code" (description: runs ` + "`claude plugin install wakeshift --marketplace wakeshift/agent-plugins --config issuer=https://app.wakeshift.ai`, installs Wakeshift's plugin for Claude Code from github.com/wakeshift/agent-plugins with Claude Code's own plugin installer, whose hooks fetch Wakeshift's connector into ~/.wakeshift/bin, checking its SHA-256; it also pre-approves Wakeshift's own wait command in ~/.claude/settings.json (~/.wakeshift/bin/wakeshift wait), so Claude Code runs it without asking)",
+		`"No, don't install anything" (description: messages wake this conversation through the Monitor instead)`,
+		"only if they pick yes", "if running it is refused (auto mode's classifier or a permission denial)",
+		"type themselves, as it is: `! claude plugin install wakeshift --marketplace wakeshift/agent-plugins --config issuer=https://app.wakeshift.ai`",
+		"don't start the Monitor", "type /reload-plugins here", "send any message here", "Once they say they've loaded it, call this tool again"} {
 		if !strings.Contains(n, want) {
 			t.Fatalf("missing %q in %s", want, n)
 		}
 	}
 	// The options it offers are the ones the bench and the note name.
-	if AskYes(h) != "Yes, install Wakeshift's hooks for Claude Code" || AskNo != "No, don't install them" {
+	if AskYes(Route(h, "https://app.wakeshift.ai")) != "Yes, install Wakeshift's plugin for Claude Code" || AskYes(h) != "Yes, install Wakeshift's hooks for Claude Code" || AskNo != "No, don't install anything" {
 		t.Fatal(AskYes(h), AskNo)
 	}
 	// Every path that offers Claude Code's install asks with the picker and
@@ -176,11 +176,11 @@ func TestInstallNote(t *testing.T) {
 	noMonitor := h
 	noMonitor.ZeroInstall = ""
 	for name, note := range map[string]string{
-		"subscribe": SubscribeNote(h, base), "upgrade": UpgradeNote(h, base), "repeat": RepeatNote(h, base),
+		"subscribe": SubscribeNote(h, base), "upgrade": PluginFirstNote(h, base, false, "FALLBACK."), "repeat": RepeatNote(h, base),
 		"unwoken": InstallNote(noMonitor, base), "unwoken repeat": RepeatNote(noMonitor, base),
 	} {
-		for _, want := range []string{"Ask them with your AskUserQuestion tool, with two options", `"Yes, install Wakeshift's hooks for Claude Code"`, `"No, don't install them"`,
-			"only if they pick yes", "by typing `! curl -fsSL https://app.wakeshift.ai/install/claude-code.sh | sh`"} {
+		for _, want := range []string{"Ask them with your AskUserQuestion tool, quoting the exact command in the question itself", `"Yes, install Wakeshift's plugin for Claude Code"`, `"No, don't install anything"`,
+			"only if they pick yes", "type themselves, as it is: `! claude plugin install wakeshift --marketplace wakeshift/agent-plugins --config issuer=https://app.wakeshift.ai`"} {
 			if !strings.Contains(note, want) {
 				t.Fatalf("%s: missing %q in %s", name, want, note)
 			}
@@ -211,7 +211,7 @@ func TestInstallNote(t *testing.T) {
 		t.Fatalf("Claude Code's note doesn't say Monitor works without installing: %s", n)
 	}
 	h, _ = Get("cursor")
-	if n := InstallNote(h, "https://x.test"); !strings.Contains(n, "in the background") || !strings.Contains(n, "Optional") || !strings.Contains(n, "~/.cursor/hooks.json") {
+	if n := InstallNote(h, "https://x.test"); !strings.Contains(n, "in the background") || !strings.Contains(n, "Also ask the user once") || !strings.Contains(n, "~/.cursor/hooks.json") {
 		t.Fatalf("%s", n)
 	}
 	h, _ = Get("goose")
@@ -312,7 +312,7 @@ func TestConnectedMarker(t *testing.T) {
 func TestCodexNote(t *testing.T) {
 	h, _ := Get("codex")
 	n := SubscribeNote(h, "https://x.test")
-	for _, want := range []string{"~/.codex/hooks.json", h.When, "/hooks", "only the step in Codex is needed", "Only if they agree", "call this tool again"} {
+	for _, want := range []string{"~/.codex/hooks.json", h.When, "/hooks", "only the step in Codex is needed", "Only if they say yes", "call this tool again"} {
 		if !strings.Contains(n, want) {
 			t.Errorf("missing %q: %s", want, n)
 		}
@@ -339,7 +339,7 @@ func TestNotesFromTheInstallLoop(t *testing.T) {
 		}
 	}
 	claude, _ := Get("claude-code")
-	if n := UpgradeNote(claude, "https://x.test"); !strings.Contains(n, "call this tool again") || !strings.Contains(n, `a note "Wakeshift: connected" appears as the Monitor's last line`) {
+	if n := PluginFirstNote(claude, "https://x.test", false, "FALLBACK."); !strings.Contains(n, "all this tool again") || !strings.Contains(n, `that result starts with "Wakeshift: connected"`) {
 		t.Errorf("claude code: %s", n)
 	}
 	for _, id := range []string{"cursor", "antigravity"} {
@@ -392,7 +392,7 @@ func TestNotesReadNaturally(t *testing.T) {
 		return strings.Join(parts, "")
 	}
 	for _, h := range All() {
-		for _, n := range []string{InstallNote(h, "https://x.test"), UpgradeNote(h, "https://x.test"), SubscribeNote(h, "https://x.test")} {
+		for _, n := range []string{InstallNote(h, "https://x.test"), PluginFirstNote(h, "https://x.test", false, "FALLBACK."), SubscribeNote(h, "https://x.test")} {
 			ws := words(withoutCode(n))
 			for i := 1; i < len(ws); i++ {
 				if ws[i] == ws[i-1] {
@@ -447,8 +447,8 @@ func TestUnsure(t *testing.T) {
 		t.Errorf("repeat: %s", n)
 	}
 	n := SubscribeNote(h, "https://x.test")
-	for _, want := range []string{"Ask the user", "Only if they agree", "`hermes plugins install wakeshift/hermes-plugin --enable && hermes config set plugins.entries.wakeshift.allow_gateway_injection true && hermes config set plugins.entries.wakeshift.settings.issuers '[\"https://x.test\"]'`", "$HERMES_HOME/plugins/wakeshift",
-		"inside its container", "put the exact command in your question", "never end your reply without it", `"Wakeshift: connected"`, "even while it's idle"} {
+	for _, want := range []string{"Ask the user", "Only if they say yes", "`hermes config set plugins.entries.wakeshift.settings.issuers '[\"https://x.test\"]' && hermes plugins install wakeshift/hermes-plugin --enable && hermes config set plugins.entries.wakeshift.allow_gateway_injection true`", "$HERMES_HOME/plugins/wakeshift",
+		"inside its container", "In your question, quote the command as it is", "never end your reply without it", `"Wakeshift: connected"`, "even while it's idle"} {
 		if !strings.Contains(n, want) {
 			t.Errorf("missing %q: %s", want, n)
 		}
@@ -476,8 +476,8 @@ func TestHermesOffer(t *testing.T) {
 	for base, want := range map[string]string{
 		"https://app.wakeshift.ai":   install,
 		"https://app.wakeshift.ai/":  install,
-		"https://staging.example":    install + ` && hermes config set plugins.entries.wakeshift.settings.issuers '["https://staging.example"]'`,
-		"http://localhost:8370/":     install + ` && hermes config set plugins.entries.wakeshift.settings.issuers '["http://localhost:8370"]'`,
+		"https://staging.example":    `hermes config set plugins.entries.wakeshift.settings.issuers '["https://staging.example"]' && ` + install,
+		"http://localhost:8370/":     `hermes config set plugins.entries.wakeshift.settings.issuers '["http://localhost:8370"]' && ` + install,
 		"https://x.test/'; rm -rf ~": "curl -fsSL https://x.test/'; rm -rf ~/install/hermes.sh | sh",
 	} {
 		if got := OfferCommand(h, base); got != want {
@@ -490,14 +490,14 @@ func TestHermesOffer(t *testing.T) {
 		if !strings.Contains(n, "`"+install+"`") || strings.Contains(n, "curl") || strings.Contains(n, "| sh") || strings.Contains(n, "Terms") {
 			t.Errorf("offer: %s", n)
 		}
-		for _, want := range []string{"put the exact command in your question", "If Hermes blocks the command, running it fails, or you can't run commands", "never end your reply without it", "inside its container", "`\"$HERMES_PYTHON\" -m hermes_cli.main`"} {
+		for _, want := range []string{"In your question, quote the command as it is", "If Hermes blocks the command, running it fails, or you can't run commands", "never end your reply without it", "inside its container", "`\"$HERMES_PYTHON\" -m hermes_cli.main`"} {
 			if !strings.Contains(n, want) {
 				t.Errorf("missing %q: %s", want, n)
 			}
 		}
 	}
 	// Consent: asked first, run only on a yes.
-	if !strings.Contains(sub, "Ask the user now") || !strings.Contains(sub, "Only if they agree, run `"+install+"`") || !strings.Contains(repeat, "Don't ask again if they said no") {
+	if !strings.Contains(sub, "Ask the user now") || !strings.Contains(sub, "It runs `"+install+"`.\" ") || !strings.Contains(repeat, "Don't ask again if they said no") {
 		t.Errorf("consent: %s\n%s", sub, repeat)
 	}
 	for _, other := range All() {
@@ -519,7 +519,7 @@ func TestHermesUpdate(t *testing.T) {
 	const update = "hermes plugins install wakeshift/hermes-plugin --enable --force && hermes config set plugins.entries.wakeshift.allow_gateway_injection true"
 	for base, want := range map[string]string{
 		"https://app.wakeshift.ai":          update,
-		"https://app.staging.wakeshift.ai/": update + ` && hermes config set plugins.entries.wakeshift.settings.issuers '["https://app.staging.wakeshift.ai"]'`,
+		"https://app.staging.wakeshift.ai/": `hermes config set plugins.entries.wakeshift.settings.issuers '["https://app.staging.wakeshift.ai"]' && ` + update,
 		"https://x.test/'; rm -rf ~":        "curl -fsSL https://x.test/'; rm -rf ~/install/hermes.sh | sh",
 	} {
 		if got := UpdateCommand(h, base); got != want {
@@ -534,7 +534,7 @@ func TestHermesUpdate(t *testing.T) {
 			if !strings.Contains(n, "`"+UpdateCommand(h, base)+"`") || strings.Contains(n, "curl") || strings.Contains(n, "| sh") {
 				t.Errorf("%s %s: %s", base, name, n)
 			}
-			for _, want := range []string{"Only if they agree, run `", "put the exact command in your question", "never end your reply without it", "`\"$HERMES_PYTHON\" -m hermes_cli.main`", h.AfterUpdate} {
+			for _, want := range []string{"Only if they agree, run `", "In your question, quote the command as it is", "never end your reply without it", "`\"$HERMES_PYTHON\" -m hermes_cli.main`", h.AfterUpdate} {
 				if !strings.Contains(n, want) {
 					t.Errorf("%s %s: missing %q: %s", base, name, want, n)
 				}

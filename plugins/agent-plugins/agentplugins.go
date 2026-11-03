@@ -1,7 +1,8 @@
 // Package agentplugins is Wakeshift's plugins for the harnesses that install
-// them from a marketplace repository with their own plugin command (Codex,
-// GitHub Copilot CLI), published as github.com/wakeshift/agent-plugins
-// (opensource/export.sh agent-plugins; docs/native-installs.md).
+// them from a marketplace repository with their own plugin command (Claude
+// Code, Codex, GitHub Copilot CLI) or from their own marketplace (Cursor),
+// published as github.com/wakeshift/agent-plugins (opensource/export.sh
+// agent-plugins; docs/native-installs.md).
 //
 // marketplace/ is the repository as published, but for what Render adds to
 // each plugin, plugins/<harness>:
@@ -18,13 +19,26 @@
 //
 // Each harness reads its own marketplace file, which names its own plugin
 // directory, so every harness installs "wakeshift@wakeshift": Codex
-// .agents/plugins/marketplace.json, Copilot .github/plugin/marketplace.json
-// (and Claude Code .claude-plugin/marketplace.json).
+// .agents/plugins/marketplace.json, Copilot .github/plugin/marketplace.json,
+// Claude Code .claude-plugin/marketplace.json and Cursor
+// .cursor-plugin/marketplace.json. Cursor's plugin isn't installed with a
+// command: the Cursor Marketplace lists it (it reviews each version), and
+// the user installs it from Cursor's Customize page.
+//
+// Claude Code's plugin trusts the Wakeshift the user chose in its issuer
+// option (userConfig), which its hooks pass to the launcher (--issuer), in
+// place of wakeshift.env's.
 //
 // A plugin's pin changes only when a release stamps it (Render with a Pin),
 // and is otherwise kept from the tree being rendered over: Codex asks the
 // user to trust a plugin's hooks again whenever any of its files changes, so
 // its plugin is released only when its files must change.
+//
+// standalone/<harness> is a plugin published as a repository of its own,
+// with the plugin at the repository's root, for a harness that installs
+// plugins only that way (Antigravity CLI: `agy plugin install <git URL>`,
+// github.com/wakeshift/antigravity-plugin). RenderStandalone adds the same
+// files to it, at the root.
 package agentplugins
 
 import (
@@ -47,7 +61,7 @@ import (
 	"strings"
 )
 
-//go:embed all:marketplace launcher.sh
+//go:embed all:marketplace all:standalone launcher.sh
 var files embed.FS
 
 // Platforms are the connector builds a plugin pins, as the release names
@@ -57,14 +71,28 @@ var Platforms = []string{"wakeshift-darwin-amd64", "wakeshift-darwin-arm64", "wa
 // manifests: each harness's plugin manifest, in its plugin directory, whose
 // "version" Render sets.
 var manifests = map[string]string{
-	"codex":   ".codex-plugin/plugin.json",
-	"copilot": "plugin.json",
+	"claude-code": ".claude-plugin/plugin.json",
+	"codex":       ".codex-plugin/plugin.json",
+	"copilot":     "plugin.json",
+	"cursor":      ".cursor-plugin/plugin.json",
+}
+
+// standalone: each plugin published as a repository of its own
+// (standalone/<harness>, RenderStandalone), and its manifest there.
+var standalone = map[string]string{
+	"antigravity": "plugin.json",
 }
 
 // Harnesses lists the plugins (marketplace/plugins/<harness>).
-func Harnesses() []string {
-	l := make([]string, 0, len(manifests))
-	for h := range manifests {
+func Harnesses() []string { return keys(manifests) }
+
+// Standalone lists the plugins published as repositories of their own
+// (standalone/<harness>).
+func Standalone() []string { return keys(standalone) }
+
+func keys(m map[string]string) []string {
+	l := make([]string, 0, len(m))
+	for h := range m {
 		l = append(l, h)
 	}
 	sort.Strings(l)
@@ -145,13 +173,14 @@ func (p Pin) sumsFile() []byte {
 	return []byte(b.String())
 }
 
-// envFile is a plugin's wakeshift.env. The launcher reads it line by line
-// (never runs it).
-func envFile(harness, issuer string, p *Pin) []byte {
+// envFile is a plugin's wakeshift.env, written by export.sh's target (the
+// repository it's published as). The launcher reads it line by line (never
+// runs it).
+func envFile(target, harness, issuer string, p *Pin) []byte {
 	var b strings.Builder
 	b.WriteString("# Wakeshift's plugin for " + harness + ": the Wakeshift it trusts, and the connector its\n")
 	b.WriteString("# hooks run (bin/wakeshift fetches it from connector_url and checks it against SHA256SUMS).\n")
-	b.WriteString("# Written by opensource/export.sh agent-plugins in github.com/wakeshift/wakeshift.\n")
+	b.WriteString("# Written by opensource/export.sh " + target + " in github.com/wakeshift/wakeshift.\n")
 	b.WriteString("harness=" + harness + "\n")
 	b.WriteString("issuer=" + issuer + "\n")
 	if p == nil {
@@ -167,7 +196,16 @@ func envFile(harness, issuer string, p *Pin) []byte {
 // ReadPin reads a rendered plugin's pin from dir (a rendered marketplace);
 // ok is false if it has none.
 func ReadPin(dir, harness string) (p Pin, ok bool, err error) {
-	root := filepath.Join(dir, "plugins", harness)
+	return readPinAt(filepath.Join(dir, "plugins", harness), harness)
+}
+
+// ReadStandalonePin reads a rendered standalone plugin's pin from dir (the
+// plugin's root, RenderStandalone); ok is false if it has none.
+func ReadStandalonePin(dir, harness string) (p Pin, ok bool, err error) {
+	return readPinAt(dir, harness)
+}
+
+func readPinAt(root, harness string) (p Pin, ok bool, err error) {
 	env, err := os.ReadFile(filepath.Join(root, "wakeshift.env"))
 	if errors.Is(err, fs.ErrNotExist) {
 		return Pin{}, false, nil
@@ -255,21 +293,13 @@ func Render(dir, issuer string, pins map[string]Pin) (changed []string, err erro
 		return nil, err
 	}
 	for _, h := range Harnesses() {
-		root := "plugins/" + h + "/"
-		want[root+"bin/wakeshift"] = Launcher()
-		want[root+"wakeshift.env"] = envFile(h, issuer, kept[h])
-		if p := kept[h]; p != nil {
-			want[root+"SHA256SUMS"] = p.sumsFile()
+		if err := addGenerated(want, "plugins/"+h+"/", h, manifests[h], issuer, kept[h]); err != nil {
+			return nil, err
 		}
-		m, err := setVersion(want[root+manifests[h]], pluginVersion(want, root, kept[h]))
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", h, err)
-		}
-		want[root+manifests[h]] = m
 	}
 	// What's there now under the marketplace's own paths, to replace.
 	have := map[string]bool{}
-	for _, top := range []string{"plugins", ".agents", ".github/plugin", ".claude-plugin"} {
+	for _, top := range []string{"plugins", ".agents", ".github/plugin", ".claude-plugin", ".cursor-plugin"} {
 		filepath.WalkDir(filepath.Join(dir, top), func(p string, d fs.DirEntry, err error) error {
 			if err == nil && !d.IsDir() {
 				rel, _ := filepath.Rel(dir, p)
@@ -287,26 +317,11 @@ func Render(dir, issuer string, pins map[string]Pin) (changed []string, err erro
 			touched[harnessOf(p)] = true
 		}
 	}
-	for p, b := range want {
-		full := filepath.Join(dir, filepath.FromSlash(p))
-		mode := os.FileMode(0o644)
-		if strings.HasSuffix(p, "/bin/wakeshift") {
-			mode = 0o755
-		}
-		if old, err := os.ReadFile(full); err == nil && bytes.Equal(old, b) {
-			if st, err := os.Stat(full); err == nil && st.Mode().Perm() == mode {
-				continue
-			}
-		}
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			return nil, err
-		}
-		if err := os.WriteFile(full, b, mode); err != nil {
-			return nil, err
-		}
-		if err := os.Chmod(full, mode); err != nil {
-			return nil, err
-		}
+	wrote, err := writeFiles(dir, want)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range wrote {
 		touched[harnessOf(p)] = true
 	}
 	removeEmptyDirs(filepath.Join(dir, "plugins"))
@@ -316,6 +331,108 @@ func Render(dir, issuer string, pins map[string]Pin) (changed []string, err erro
 		}
 	}
 	return changed, nil
+}
+
+// RenderStandalone writes the standalone plugin for harness (Standalone),
+// rendered for the Wakeshift at issuer, at dir's root, as Render writes each
+// plugin of the marketplace: its files, the launcher, wakeshift.env, the
+// pinned connector's SHA256SUMS and the manifest's version. The pin is pin
+// if it isn't nil, else the one already in dir (ReadStandalonePin), else
+// none. Files at dir's root that aren't the plugin's (a README, LICENSE,
+// .git) are kept, and so is a file the plugin no longer has: dir is an
+// empty directory or a fresh export (opensource/export.sh). It reports
+// whether any file changed.
+func RenderStandalone(dir, harness, issuer string, pin *Pin) (changed bool, err error) {
+	manifest, ok := standalone[harness]
+	if !ok {
+		return false, fmt.Errorf("no standalone plugin for %q (%s)", harness, strings.Join(Standalone(), ", "))
+	}
+	if err := CheckIssuer(issuer); err != nil {
+		return false, err
+	}
+	if pin != nil {
+		if err := pin.Check(); err != nil {
+			return false, fmt.Errorf("%s: %w", harness, err)
+		}
+	} else if p, ok, err := ReadStandalonePin(dir, harness); err != nil {
+		return false, err
+	} else if ok {
+		pin = &p
+	}
+	want := map[string][]byte{}
+	src := "standalone/" + harness
+	err = fs.WalkDir(files, src, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := files.ReadFile(p)
+		want[strings.TrimPrefix(p, src+"/")] = b
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	if err := addGenerated(want, "", harness, manifest, issuer, pin); err != nil {
+		return false, err
+	}
+	wrote, err := writeFiles(dir, want)
+	return len(wrote) > 0, err
+}
+
+// addGenerated adds what Render writes to each plugin, whose files are at
+// root in want ("" or "plugins/<harness>/"): the launcher, wakeshift.env,
+// the pin's SHA256SUMS and the version in its manifest.
+func addGenerated(want map[string][]byte, root, harness, manifest, issuer string, pin *Pin) error {
+	want[root+"bin/wakeshift"] = Launcher()
+	target := "agent-plugins"
+	if root == "" {
+		target = harness + "-plugin" // its own repository, wakeshift/<harness>-plugin
+	}
+	want[root+"wakeshift.env"] = envFile(target, harness, issuer, pin)
+	if pin != nil {
+		want[root+"SHA256SUMS"] = pin.sumsFile()
+	}
+	m, err := setVersion(want[root+manifest], pluginVersion(want, root, pin))
+	if err != nil {
+		return fmt.Errorf("%s: %w", harness, err)
+	}
+	want[root+manifest] = m
+	return nil
+}
+
+// writeFiles writes want (path in dir → content) into dir, the launchers
+// executable, skipping files that are already so. It returns the paths it
+// wrote.
+func writeFiles(dir string, want map[string][]byte) (wrote []string, err error) {
+	paths := make([]string, 0, len(want))
+	for p := range want {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	for _, p := range paths {
+		b := want[p]
+		full := filepath.Join(dir, filepath.FromSlash(p))
+		mode := os.FileMode(0o644)
+		if p == "bin/wakeshift" || strings.HasSuffix(p, "/bin/wakeshift") {
+			mode = 0o755
+		}
+		if old, err := os.ReadFile(full); err == nil && bytes.Equal(old, b) {
+			if st, err := os.Stat(full); err == nil && st.Mode().Perm() == mode {
+				continue
+			}
+		}
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			return wrote, err
+		}
+		if err := os.WriteFile(full, b, mode); err != nil {
+			return wrote, err
+		}
+		if err := os.Chmod(full, mode); err != nil {
+			return wrote, err
+		}
+		wrote = append(wrote, p)
+	}
+	return wrote, nil
 }
 
 // harnessOf is the plugin a marketplace path is in ("" for the marketplace

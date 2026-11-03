@@ -41,7 +41,7 @@ func TestOpenClaw(t *testing.T) {
 		t.Fatal("codex")
 	}
 	n := SubscribeNote(h, "https://x.test")
-	for _, want := range []string{"Ask the user", "Only if they agree", "`curl -fsSL https://x.test/install/openclaw.sh | WAKESHIFT_OPENCLAW_NETWORK_HOOKS=1 sh`", "exec tool", "openclaw plugins install", `"Wakeshift: connected"`} {
+	for _, want := range []string{"Ask the user", "Only if they say yes", "`curl -fsSL https://x.test/install/openclaw.sh | WAKESHIFT_OPENCLAW_NETWORK_HOOKS=1 sh`", "exec tool", "openclaw plugins install", `"Wakeshift: connected"`} {
 		if !strings.Contains(n, want) {
 			t.Fatalf("missing %q: %s", want, n)
 		}
@@ -67,5 +67,54 @@ func TestAgreed(t *testing.T) {
 	}
 	if got := agreed(Harness{AgreeEnv: "X=1"}, "something else"); got != "something else" {
 		t.Fatalf("%q", got)
+	}
+}
+
+// Once a release of @wakeshift/openclaw is offered (SetPackageVersion),
+// OpenClaw's offers give OpenClaw's own plugin installer with the package
+// at that version: the issuer first for a Wakeshift other than production,
+// the user's yes to the network question first in the agent's command
+// (Agree), the same chain to update, and the plugin's reset before
+// OpenClaw's uninstall. Without one, Wakeshift's installer as before.
+func TestOpenClawPackage(t *testing.T) {
+	t.Cleanup(func() { SetPackageVersion("openclaw", "") })
+	h, _ := Get("openclaw")
+	if c := OfferCommand(h, "https://app.wakeshift.ai"); !strings.HasPrefix(c, "curl -fsSL ") || UninstallNote(h) != "" {
+		t.Fatalf("no version set: %q", c)
+	}
+	SetPackageVersion("openclaw", "1.5.0")
+	const native = "openclaw plugins install npm:@wakeshift/openclaw@1.5.0 --force --accept-capabilities && openclaw plugins enable wakeshift --accept-capabilities"
+	for base, want := range map[string]string{
+		"https://app.wakeshift.ai":     native,
+		"https://app.wakeshift.ai/":    native,
+		"https://staging.wakeshift.ai": `openclaw config set plugins.entries.wakeshift.config.issuer '"https://staging.wakeshift.ai"' --strict-json && ` + native,
+		"http://localhost:8370":        `openclaw config set plugins.entries.wakeshift.config.issuer '"http://localhost:8370"' --strict-json && ` + native,
+	} {
+		if got := OfferCommand(h, base); got != want {
+			t.Errorf("offer %q: %s", base, got)
+		}
+		if got := UpdateCommand(h, base); got != want {
+			t.Errorf("update %q: %s", base, got)
+		}
+	}
+	if got := OfferCommand(h, "https://x.test/'; rm -rf ~"); !strings.HasPrefix(got, "curl -fsSL ") {
+		t.Errorf("odd base: %s", got)
+	}
+	const agree = "openclaw config set plugins.entries.wakeshift.config.allowNetworkHooks true --strict-json && "
+	for _, n := range []string{SubscribeNote(h, "https://app.wakeshift.ai"), RepeatNote(h, "https://app.wakeshift.ai")} {
+		if !strings.Contains(n, "`"+agree+native+"`") || !strings.Contains(n, "the npm package @wakeshift/openclaw") || strings.Contains(n, "openclaw.sh") {
+			t.Errorf("offer note: %s", n)
+		}
+	}
+	// One question: told before the yes, the command that records it after.
+	n := SubscribeNote(h, "https://app.wakeshift.ai")
+	if also, yes, cmd := strings.Index(n, "In the same question"), strings.Index(n, "Ask it as a yes/no question"), strings.Index(n, "allowNetworkHooks true"); also < 0 || also > yes || cmd < yes {
+		t.Errorf("one question: %s", n)
+	}
+	if u := UpdateNote(h, "https://app.wakeshift.ai"); !strings.Contains(u, "run `"+native+"`") || !strings.Contains(u, "the npm package @wakeshift/openclaw") {
+		t.Errorf("update note: %s", u)
+	}
+	if u := UninstallNote(h); !strings.Contains(u, "run `openclaw wakeshift reset && openclaw plugins uninstall wakeshift --force`") {
+		t.Errorf("uninstall note: %s", u)
 	}
 }

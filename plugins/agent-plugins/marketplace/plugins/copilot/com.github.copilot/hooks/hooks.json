@@ -22,6 +22,14 @@
         "timeoutSec": 20
       }
     ],
+    "permissionRequest": [
+      {
+        "type": "command",
+        "matcher": "bash",
+        "bash": "sh ./bin/wakeshift --if-ready hook --harness copilot --event permissionRequest",
+        "timeoutSec": 5
+      }
+    ],
     "agentStop": [
       {
         "type": "command",

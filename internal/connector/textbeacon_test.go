@@ -162,12 +162,13 @@ func TestCopilotInstall(t *testing.T) {
 	var f struct {
 		Version int
 		Hooks   map[string][]struct {
-			Type, Bash string
-			TimeoutSec int
+			Type, Bash, Matcher string
+			TimeoutSec          int
 		}
 	}
 	if json.Unmarshal(b, &f) != nil || f.Version != 1 || f.Hooks["preMcpToolCall"][0].Bash != bin+" hook --harness copilot --event preMcpToolCall" ||
-		f.Hooks["agentStop"][0].TimeoutSec == 0 || len(f.Hooks) != 3 {
+		f.Hooks["agentStop"][0].TimeoutSec == 0 || len(f.Hooks) != 4 ||
+		f.Hooks["permissionRequest"][0].Bash != bin+" hook --harness copilot --event permissionRequest" || f.Hooks["permissionRequest"][0].Matcher != "bash" {
 		t.Fatalf("%s", b)
 	}
 	out.Reset()

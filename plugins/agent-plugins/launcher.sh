@@ -5,6 +5,14 @@
 #
 #   bin/wakeshift hook --harness <h> ...   make sure the connector is there, then run it
 #   bin/wakeshift prepare                  only make sure (a session-start hook)
+#   bin/wakeshift --if-ready hook ...      run it only if it's there already: never fetch,
+#                                          set up or wait for another hook doing so (a hook
+#                                          the harness waits on before it shows the user
+#                                          something, like Copilot's permissionRequest)
+#   bin/wakeshift --issuer <origin> ...    the same, for the Wakeshift the user chose in
+#                                          the harness's own plugin settings (Claude Code's
+#                                          userConfig, which its hooks pass as an argument)
+#                                          rather than wakeshift.env's
 #
 # Making sure, which is all a warm run does (no network):
 #
@@ -56,6 +64,29 @@ fi
 case "$connector_version" in
 '' | none) say "this plugin pins no connector yet; update it"; exit 0 ;;
 esac
+
+# The Wakeshift the user chose, as the hook passes it. Only an argument the
+# plugin's own hooks write, never the environment (a project's settings can
+# set a hook's environment variables).
+if [ "${1:-}" = --issuer ]; then
+	v=${2:-}
+	v=${v%/}
+	case "$v" in
+	https://* | http://localhost | http://localhost:* | http://127.0.0.1 | http://127.0.0.1:*) ;;
+	*) say "the plugin's issuer setting isn't a Wakeshift's https address: ${v:-(empty)}"; exit 0 ;;
+	esac
+	case "${v#*://}" in
+	'' | *[!A-Za-z0-9.:-]*) say "the plugin's issuer setting isn't a Wakeshift's address (an origin, with no path): $v"; exit 0 ;;
+	esac
+	issuer=$v
+	shift 2
+fi
+
+ifready=
+if [ "${1:-}" = --if-ready ]; then
+	ifready=1
+	shift
+fi
 
 prepare=
 if [ "${1:-}" = prepare ]; then prepare=1; fi
@@ -196,6 +227,8 @@ trust() {
 }
 
 if ! current || ! trusted; then
+	# Not ready, and this hook mustn't wait: a later hook makes it so.
+	[ -n "$ifready" ] && exit 0
 	(umask 077 && mkdir -p "$home/bin") || { say "couldn't make $home/bin"; exit 0; }
 	take_lock || exit 0
 	# Again under the lock: another hook may have done it meanwhile.

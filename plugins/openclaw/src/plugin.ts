@@ -144,7 +144,13 @@ export const notePinned = (why: string, file: string) =>
 
 export class Wakeshift {
   private readonly f: typeof fetch;
-  private readonly install: string;
+  // This install's ID, read (or made) at first use: loading the plugin
+  // writes nothing (OpenClaw's CLI loads it too, `openclaw wakeshift reset`
+  // and `openclaw plugins uninstall` included).
+  private installID?: string;
+  private get install(): string {
+    return (this.installID ??= this.o.store.installId());
+  }
   // Per conversation: its one Conversation, and a transport per link (by
   // linkKey: its issuer and app), each with its link's stream ID.
   private readonly streams = new Map<string, { c: Conversation; ts: Map<string, { t: Transport; stream: string }> }>();
@@ -169,7 +175,6 @@ export class Wakeshift {
 
   constructor(private readonly o: Options) {
     this.f = o.fetch ?? fetch;
-    this.install = o.store.installId();
     this.ledger = new Ledger(join(o.store.dir, "deliveries"));
   }
 

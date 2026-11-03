@@ -2,24 +2,36 @@
   "id": "wakeshift",
   "name": "Wakeshift",
   "description": "Wakes OpenClaw sessions when an app they watch through Wakeshift sends something. Messages arrive as outside information, never as the user.",
-  "categories": ["integrations"],
+  "categories": [
+    "integrations"
+  ],
   "contracts": {
-    "agentToolResultMiddleware": ["openclaw", "codex"]
+    "agentToolResultMiddleware": [
+      "openclaw",
+      "codex"
+    ]
   },
   "activation": {
     "onStartup": true
   },
+  "cliCommands": [
+    {
+      "name": "wakeshift",
+      "description": "Wakeshift's plugin: undo what it turned on (reset)",
+      "hasSubcommands": true
+    }
+  ],
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
       "issuer": {
         "type": "string",
-        "description": "The Wakeshift whose beacons the plugin trusts, e.g. https://app.wakeshift.ai (the installer sets it)."
+        "description": "The Wakeshift whose beacons the plugin trusts. Unset: Wakeshift's own service, https://app.wakeshift.ai; the install command for another Wakeshift sets it."
       },
       "allowNetworkHooks": {
         "type": "boolean",
-        "description": "The user agreed to OpenClaw's hooks endpoint while the gateway listens beyond this computer (its bind isn't loopback): the hooks share its listener (the installer sets it, with WAKESHIFT_OPENCLAW_NETWORK_HOOKS=1)."
+        "description": "The user agreed to OpenClaw's hooks endpoint while the gateway listens beyond this computer (its bind isn't loopback): the hooks share its listener. Without it the plugin doesn't turn hooks on there. The install command sets it after the user's yes; openclaw wakeshift reset removes it."
       },
       "heartbeatTarget": {
         "type": "string",

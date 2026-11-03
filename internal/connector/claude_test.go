@@ -86,7 +86,7 @@ func TestClaudeInstall(t *testing.T) {
 	}
 	b, _ := os.ReadFile(path)
 	s := string(b)
-	if !has(s, `"lint.sh"`, `"say hi"`, `"Bash(ls)"`, `"asyncRewake": true`, `"timeout": 86400`, `"async": true`, `"matcher": "mcp__.*"`,
+	if !has(s, `"lint.sh"`, `"say hi"`, `"Bash(ls)"`, `"asyncRewake": true`, `"timeout": 86400`, `"rewakeSummary": "Woken by Wakeshift"`, `"rewakeMessage": "Wakeshift woke this session (not the user)."`, `"async": true`, `"matcher": "mcp__.*"`,
 		bin+" hook --harness claude-code --rewake") || strings.Index(s, `"model"`) > strings.Index(s, `"hooks"`) || strings.Index(s, `"hooks"`) > strings.Index(s, `"permissions"`) {
 		t.Fatalf("settings: %s", s)
 	}

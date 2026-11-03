@@ -1,0 +1,37 @@
+{
+  "wakeshift": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "sh ./bin/wakeshift prepare",
+        "timeout": 120
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "call_mcp_tool",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh ./bin/wakeshift hook --harness antigravity --event post-tool",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "sh ./bin/wakeshift hook --harness antigravity --event pre-invocation",
+        "timeout": 10
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "sh ./bin/wakeshift hook --harness antigravity --event stop",
+        "timeout": 90
+      }
+    ]
+  }
+}

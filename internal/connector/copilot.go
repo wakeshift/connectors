@@ -31,6 +31,16 @@ import (
 //   - agentStop: if messages are waiting, {"decision":"block","reason":…}
 //     continues the session (at most 8 in a row). It waits only briefly:
 //     what the user types queues behind a waiting stop hook.
+//   - permissionRequest (matcher "bash"): before Copilot asks the user to
+//     approve a shell command, {"behavior":"allow"} if it's exactly
+//     Wakeshift's wait command (Hook.approve), so the command that wakes
+//     an idle session doesn't ask once per wake. Copilot has no allowlist
+//     a user's config can hold for every folder (its persisted approvals
+//     are per location), so the hook is the rule. Nothing else is
+//     answered: Copilot asks as it would have. Copilot (1.0.105) runs the
+//     hook only where it would ask, and its answer also wins over a
+//     --deny-tool rule for that command (checked in a temp HOME): a user
+//     who wants Copilot to ask again removes Wakeshift's hooks.
 
 const copilotName = "copilot"
 
@@ -41,8 +51,9 @@ func init() {
 	register(Spec{Name: copilotName, Format: copilotFormat{}, Installer: copilotInstaller{},
 		When:     "when the agent finishes a turn; while it's idle, they wait for the next one",
 		StopWait: 5 * time.Second,
-		// No rule: Copilot CLI has no global allowlist for commands
-		// (docs/harnesses.md, "Pre-approving Wakeshift's commands").
+		// No Rule: Copilot CLI has no global allowlist for commands
+		// (docs/harnesses.md, "Pre-approving Wakeshift's commands"); its
+		// permissionRequest hook approves the wait command instead.
 		Wait: true, RecordProcs: true,
 	})
 }
@@ -56,7 +67,10 @@ type copilotInput struct {
 	ToolName       string          `json:"toolName"`
 	Meta           json.RawMessage `json:"_meta"`
 	StopHookActive bool            `json:"stop_hook_active"`
-	ToolResult     struct {
+	ToolInput      struct {
+		Command string `json:"command"`
+	} `json:"toolInput"`
+	ToolResult struct {
 		ResultType       string `json:"resultType"`
 		TextResultForLlm string `json:"textResultForLlm"`
 	} `json:"toolResult"`
@@ -78,9 +92,18 @@ func (copilotFormat) ParseEvent(event string, b []byte) (Input, error) {
 		in.ToolResult, _ = json.Marshal(c.ToolResult.TextResultForLlm)
 	case "agentStop":
 		in.Event = Stop
+	case "permissionRequest":
+		in.Event, in.ToolName, in.Command = Approve, c.ToolName, c.ToolInput.Command
 	}
 	return in, nil
 }
+
+// Shell: Copilot's shell tool is "bash" (also on Windows, where it runs
+// PowerShell, which the wait command isn't offered for).
+func (copilotFormat) Shell(tool string) bool { return tool == "bash" }
+
+// Approve is permissionRequest's answer that approves the call.
+func (copilotFormat) Approve() Output { return Output{Stdout: []byte(`{"behavior":"allow"}` + "\n")} }
 
 // Aliased: each MCP server is told its own name for the session.
 func (copilotFormat) Aliased() bool { return true }
@@ -170,10 +193,13 @@ func (copilotInstaller) file(bin string) []byte {
 	cmd := func(event string, timeout int) []any {
 		return []any{map[string]any{"type": "command", "bash": HookCommand(bin, copilotName, "--event", event), "timeoutSec": timeout}}
 	}
+	approve := cmd("permissionRequest", 5)
+	approve[0].(map[string]any)["matcher"] = "bash"
 	b, _ := json.MarshalIndent(map[string]any{"version": 1, "hooks": map[string]any{
-		"preMcpToolCall": cmd("preMcpToolCall", 5),
-		"postToolUse":    cmd("postToolUse", 20),
-		"agentStop":      cmd("agentStop", 15),
+		"preMcpToolCall":    cmd("preMcpToolCall", 5),
+		"postToolUse":       cmd("postToolUse", 20),
+		"agentStop":         cmd("agentStop", 15),
+		"permissionRequest": approve,
 	}}, "", "  ")
 	return append(b, '\n')
 }

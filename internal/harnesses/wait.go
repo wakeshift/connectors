@@ -96,7 +96,10 @@ func waitApproval(h Harness) string {
 		// redirect added after the command also matches.
 		return "It's the same command in every conversation. If agy asks to run it, allowing it in this conversation is enough; don't persist it to agy's settings (a saved rule would also allow it with a redirect into a file)."
 	case "copilot":
-		return "It's the same command in every conversation. Before you start it the first time, tell the user in one sentence: Copilot asks them to approve it each time it starts (once per wake), unless they run copilot with --allow-all-tools, which approves every tool, not just this one."
+		// Wakeshift's hooks approve exactly this command (Copilot's
+		// permissionRequest hook: connector.Hook.approve), and only these
+		// hooks give a wait command.
+		return "It's the same command in every conversation, and Wakeshift's hooks approve exactly this command, so Copilot doesn't ask the user to approve it."
 	}
 	return ""
 }

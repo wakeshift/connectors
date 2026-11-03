@@ -30,7 +30,9 @@
 // value: what the user changed since is theirs.
 //
 // Node built-ins only: dist/hooks.js is also copied to the state directory
-// as restore.mjs, which Wakeshift's uninstaller runs once the plugin is gone.
+// as restore.mjs, which Wakeshift's earlier uninstaller script
+// (/install/openclaw-uninstall.sh) runs once the plugin is gone. `openclaw
+// wakeshift reset` (reset.ts) undoes the same, from the plugin itself.
 
 import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -144,7 +146,7 @@ export function takeover(cur: HooksConfig | undefined, token: string, o: { netwo
 }
 
 export const NETWORK =
-  "this OpenClaw gateway listens beyond this computer (its bind isn't loopback), and OpenClaw's hooks share its listener, so turning them on would make the hooks endpoint reachable there too, guarded by a token. Ask the user whether that's all right; only if they agree, run Wakeshift's installer for OpenClaw again with WAKESHIFT_OPENCLAW_NETWORK_HOOKS=1, and suggest a firewall rule that blocks /hooks/ from other machines";
+  "this OpenClaw gateway listens beyond this computer (its bind isn't loopback), and OpenClaw's hooks share its listener, so turning them on would make the hooks endpoint reachable there too, guarded by a token. Ask the user whether that's all right; only if they agree, run `openclaw config set plugins.entries.wakeshift.config.allowNetworkHooks true --strict-json` where the gateway runs, then call the app's tool again in your next turn (the plugin reloads with the setting), and suggest a firewall rule that blocks /hooks/ from other machines";
 
 /** hooks.* letting this conversation be woken, or null when it already does. */
 export function addScope(cur: HooksConfig, changes: Changes, sessionKey: string, agentId?: string): { next: HooksConfig; changes: Changes } | null {

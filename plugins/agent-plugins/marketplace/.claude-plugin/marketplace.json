@@ -1,0 +1,17 @@
+{
+  "name": "wakeshift",
+  "owner": {
+    "name": "Wakeshift",
+    "url": "https://wakeshift.ai"
+  },
+  "metadata": {
+    "description": "Wakeshift's plugins: let Wakeshift messages wake your agent's conversations"
+  },
+  "plugins": [
+    {
+      "name": "wakeshift",
+      "source": "./plugins/claude-code",
+      "description": "Lets Wakeshift messages wake your Claude Code sessions, even while they're idle, for the apps you connect"
+    }
+  ]
+}

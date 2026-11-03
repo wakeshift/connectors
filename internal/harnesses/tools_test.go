@@ -13,6 +13,13 @@ func TestWithTools(t *testing.T) {
 	offer := ToolsOffer{App: "agentchat", AppName: "Agent Chat", Tools: []string{"list_channels", "history", "post"}}
 	const cmd = "curl -fsSL https://app.wakeshift.ai/install/claude-code.sh | WAKESHIFT_ALLOW_TOOLS=agentchat:list_channels,history,post sh"
 	cc, _ := Get("claude-code")
+	// Claude Code's offer is its plugin, whose install can't carry the yes:
+	// unchanged, and its hooks ask once they connect the conversation.
+	if h := Route(WithTools(cc, offer), base); h.Changes != Route(cc, base).Changes || OfferCommand(h, base) != OfferCommand(cc, base) || strings.Contains(PluginFirstNote(WithTools(cc, offer), base, false, "FALLBACK."), "WAKESHIFT_ALLOW_TOOLS") {
+		t.Fatalf("plugin offer: %s\n%s", OfferCommand(h, base), h.Changes)
+	}
+	// Wakeshift's own installer, as a harness offering it.
+	cc.Marketplace = nil
 	h := WithTools(cc, offer)
 	const consent = "; it also lets Claude Code run Agent Chat's list_channels, history and post tools without asking each time (no other tools)"
 	if InstallCommand(h, base) != cmd || !strings.HasSuffix(h.Changes, consent) {
@@ -20,9 +27,9 @@ func TestWithTools(t *testing.T) {
 	}
 	// In the picker's yes option, next to the command it runs, on every
 	// path that offers the install, and the ! fallback runs the same.
-	for name, note := range map[string]string{"subscribe": SubscribeNote(h, base), "upgrade": UpgradeNote(h, base), "repeat": RepeatNote(h, base)} {
+	for name, note := range map[string]string{"subscribe": SubscribeNote(h, base), "upgrade": PluginFirstNote(h, base, false, "FALLBACK."), "repeat": RepeatNote(h, base)} {
 		for _, want := range []string{`"Yes, install Wakeshift's hooks for Claude Code" (description: runs ` + "`" + cmd + "`, adds three hooks",
-			consent + ")", "by typing `! " + cmd + "`"} {
+			consent + ")", "type themselves, as it is: `! " + cmd + "`"} {
 			if !strings.Contains(note, want) {
 				t.Errorf("%s: missing %q in %s", name, want, note)
 			}
@@ -33,7 +40,7 @@ func TestWithTools(t *testing.T) {
 	h = WithTools(cursor, ToolsOffer{App: "agentchat", AppName: "Agent Chat", Tools: []string{"post"}})
 	n := BackgroundUpgradeNote(h, base)
 	if !strings.Contains(n, "it also lets Cursor run Agent Chat's post tool without asking each time (no other tools)") ||
-		!strings.Contains(n, "run `curl -fsSL https://app.wakeshift.ai/install/cursor.sh | WAKESHIFT_ALLOW_TOOLS=agentchat:post sh`") {
+		!strings.Contains(n, "It runs `curl -fsSL https://app.wakeshift.ai/install/cursor.sh | WAKESHIFT_ALLOW_TOOLS=agentchat:post sh`") {
 		t.Fatalf("cursor: %s", n)
 	}
 
