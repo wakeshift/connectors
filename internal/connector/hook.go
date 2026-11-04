@@ -51,10 +51,14 @@ const (
 
 // ApproveFormat is a Format whose harness asks a hook before it asks the
 // user to approve a tool call (Approve): Shell says whether a tool is its
-// shell, and Approve is the answer that approves the call.
+// shell, and Approve is the answer that approves the call. Denied says
+// whether the user has a rule of the harness's that denies (or asks for)
+// the command, or whether that can't be told: either way the hook doesn't
+// approve it.
 type ApproveFormat interface {
 	Shell(tool string) bool
 	Approve() Output
+	Denied(command string) bool
 }
 
 // CallServerFormat is a Format whose tool-result hook doesn't name the MCP
@@ -351,15 +355,20 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout, stderr io.Write
 // absolute path and "wait", with nothing added (no argument, redirect,
 // pipe or second command: the whole command must be that text), and only
 // while the binary is the user's own (ownedByUser, as for Claude Code's
-// rule). Anything else gets no answer, so the harness asks the user as it
-// would have. It reads no links and makes no request, so it answers at
-// once.
+// rule), and only while the user has no rule of the harness's that denies
+// or asks for it (ApproveFormat.Denied, which also says yes when it can't
+// tell). Anything else gets no answer, so the harness asks the user (or
+// applies their rule) as it would have. It reads no links and makes no
+// request, so it answers at once.
 func (h *Hook) approve(in Input) (Output, bool) {
 	af, ok := h.Format.(ApproveFormat)
 	if !ok || h.WaitCommand == "" || !af.Shell(in.ToolName) || strings.TrimSpace(in.Command) != h.WaitCommand {
 		return Output{}, false
 	}
 	if bin := strings.TrimSuffix(h.WaitCommand, " wait"); WaitCommand(bin) != h.WaitCommand || ownedByUser(bin) != nil {
+		return Output{}, false
+	}
+	if af.Denied(h.WaitCommand) {
 		return Output{}, false
 	}
 	return af.Approve(), true

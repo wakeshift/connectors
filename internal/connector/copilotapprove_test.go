@@ -32,6 +32,7 @@ func TestCopilotApprovesOnlyTheWaitCommand(t *testing.T) {
 	if err := ownedByUser(bin); err != nil {
 		t.Skipf("the temp directory can't hold the user's own binary: %v", err)
 	}
+	fakeCopilot(t, []string{"copilot"}, nil, false)
 	ws := newFakeWakeshift(t)
 	h := specHook(t, "copilot", ws, newFakePoller())
 	h.WaitCommand = wait

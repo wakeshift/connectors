@@ -54,6 +54,12 @@ func Home() string {
 type Settings struct {
 	Dir     string   `json:"-"`
 	Issuers []string `json:"issuers"` // the Wakeshifts trusted to sign beacons
+	// PluginIssuers are the Issuers that Wakeshift's plugin for the harness
+	// added (InstallPlugin), and nothing else did: when the plugin's issuer
+	// changes, those it added go. An issuer the user trusted another way (an
+	// install script, npx, an earlier plugin release that didn't record
+	// this) isn't listed, and stays.
+	PluginIssuers []string `json:"plugin_issuers,omitempty"`
 	// InstalledAt is when the hooks were last installed: a waiter whose
 	// conversation's last beacon is older tells its agent to call the tool
 	// again (Hook.installedSince). Zero for installs from before it.
@@ -110,12 +116,37 @@ func CheckIssuer(issuer string) (string, error) {
 	return issuer, nil
 }
 
-// Trust adds an issuer to the settings and saves them.
+// Trust adds an issuer to the settings and saves them. It's then trusted
+// apart from any plugin (an install the user ran): a plugin's change of
+// issuer leaves it.
 func (s *Settings) Trust(issuer string) error {
 	if !slices.Contains(s.Issuers, issuer) {
 		s.Issuers = append(s.Issuers, issuer)
 	}
+	s.PluginIssuers = slices.DeleteFunc(s.PluginIssuers, func(p string) bool { return p == issuer })
 	return s.Save()
+}
+
+// trustForPlugin makes issuer the one the harness's plugin trusts: added
+// (and recorded as the plugin's) if nothing trusts it yet, and any other
+// issuer the plugin alone added is dropped. Issuers trusted another way
+// stay. It doesn't save.
+func (s *Settings) trustForPlugin(issuer string) {
+	var kept []string
+	for _, p := range s.PluginIssuers {
+		if p == issuer {
+			kept = append(kept, p)
+			continue
+		}
+		s.Issuers = slices.DeleteFunc(s.Issuers, func(i string) bool { return i == p })
+	}
+	s.PluginIssuers = kept
+	if !slices.Contains(s.Issuers, issuer) {
+		s.Issuers = append(s.Issuers, issuer)
+		if !slices.Contains(s.PluginIssuers, issuer) {
+			s.PluginIssuers = append(s.PluginIssuers, issuer)
+		}
+	}
 }
 
 // Verifier checks beacons against a harness's settings, fetching and caching

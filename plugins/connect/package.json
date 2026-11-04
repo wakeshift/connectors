@@ -11,9 +11,15 @@
   },
   "keywords": [
     "wakeshift",
-    "cursor",
+    "ai-agents",
+    "claude-code",
     "codex",
-    "claude-code"
+    "cursor",
+    "copilot",
+    "antigravity",
+    "opencode",
+    "notifications",
+    "hooks"
   ],
   "bin": {
     "wakeshift-connect": "bin/wakeshift-connect.js"
@@ -33,5 +39,8 @@
     "@wakeshift/connect-darwin-x64": "0.0.0",
     "@wakeshift/connect-linux-arm64": "0.0.0",
     "@wakeshift/connect-linux-x64": "0.0.0"
+  },
+  "bugs": {
+    "url": "https://github.com/wakeshift/connectors/issues"
   }
 }

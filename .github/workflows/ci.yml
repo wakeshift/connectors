@@ -45,3 +45,5 @@ jobs:
         run: cd plugins/openclaw && npm ci --no-fund --no-audit && npm run lint && npm test
       - name: npm packages (@wakeshift/connect, @wakeshift/opencode)
         run: cd plugins/connect && npm test
+      - name: The developers' CLI (@wakeshift/cli)
+        run: cd sdk/cli && npm ci --ignore-scripts --no-fund --no-audit && npm run lint && npm test && npm pack --dry-run

@@ -39,7 +39,7 @@ func TestTaskTexts(t *testing.T) {
 			t.Errorf("missing %q: %s", want, first)
 		}
 	}
-	for _, text := range []string{first, TaskAgainNote("Chat", "wsc_abc"), TaskRunningNote("wsc_abc"), TaskResult("Chat", "wsc_abc", []string{`{"type":"event"}`}), PluginFirstNote(mustGet(t, "claude-code"), "https://x.test", true, "WAIT.")} {
+	for _, text := range []string{first, TaskAgainNote("Chat", "wsc_abc"), TaskRunningNote("wsc_abc"), TaskResult("Chat", "wsc_abc", []string{`{"type":"event"}`}), PluginFirstNote(mustGet(t, "claude-code"), "https://x.test", "App", true, "WAIT.")} {
 		if strings.Contains(text, "Monitor") || strings.Contains(strings.ToLower(text), "ask the user to") {
 			t.Errorf("%s", text)
 		}

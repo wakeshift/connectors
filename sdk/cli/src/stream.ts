@@ -1,0 +1,83 @@
+// Holding a conversation's stream as a generic agent does: the wait URL
+// from Wakeshift's block in a tool's reply (the command it offers an
+// agent it doesn't recognize, internal/harnesses GenericLoop), read in
+// rounds with the cursor, confirming what arrived. The URL is a
+// capability: it's never printed.
+
+import { clip } from "./redact.js";
+
+/** The wait URL in the command Wakeshift's block offers (u='…/v1/stream/wait?…'). */
+export function waitUrlOf(text: string): string | null {
+  const m = /u='(https?:\/\/[^'\s]+\/v1\/stream\/wait\?[^'\s]+)'/.exec(text);
+  return m ? m[1] : null;
+}
+
+/** The conversation's session key in Wakeshift's block, for its next calls. */
+export function sessionKeyOf(text: string): string | null {
+  const m = /session_key[="':\s]+(wsc_[A-Za-z0-9_-]+)/.exec(text);
+  return m ? m[1] : null;
+}
+
+export interface StreamEvent {
+  type: "event";
+  topic?: string;
+  subject?: string;
+  body?: string;
+  data?: unknown;
+  data_preview?: string;
+  id?: string;
+  redelivered?: boolean;
+  [k: string]: unknown;
+}
+
+export class StreamClosed extends Error {}
+
+export class Stream {
+  private cursor = "";
+  constructor(
+    private url: string,
+    private fetchFn: typeof fetch,
+    private roundSeconds = 10,
+  ) {}
+
+  /** Waits until an event matching match arrives, or deadline (ms since the epoch). Null on timeout. */
+  async next(deadline: number, match: (e: StreamEvent) => boolean, now = Date.now): Promise<StreamEvent | null> {
+    while (now() < deadline) {
+      const left = Math.max(1, Math.min(this.roundSeconds, Math.ceil((deadline - now()) / 1000)));
+      const u = `${this.url}&timeout=${left}s&after=${encodeURIComponent(this.cursor)}`;
+      let lines: string[];
+      try {
+        const res = await this.fetchFn(u, { signal: AbortSignal.timeout((left + 20) * 1000) });
+        const text = await res.text();
+        if (res.status !== 200) throw new StreamClosed(`the stream answered ${res.status}: ${clip(text, 200)}`);
+        lines = text.split("\n").filter(Boolean);
+      } catch (err) {
+        if (err instanceof StreamClosed) throw err;
+        throw new StreamClosed(`couldn't read the stream: ${clip(String((err as Error)?.message ?? err), 200)}`);
+      }
+      let found: StreamEvent | null = null;
+      for (const l of lines) {
+        let j: any;
+        try {
+          j = JSON.parse(l);
+        } catch {
+          continue;
+        }
+        if (j?.type === "event" && !found && match(j)) found = j as StreamEvent;
+        else if (j?.type === "cursor" && typeof j.after === "string") this.cursor = j.after;
+        else if (j?.type === "hub.next" && typeof j.url === "string" && /^https?:\/\//.test(j.url)) this.url = j.url.replace(/&timeout=[^&]*/, "");
+        else if (j?.type === "hub.closed") throw new StreamClosed(`the stream closed: ${clip(String(j.note ?? j.reason ?? ""), 200)}`);
+      }
+      if (found) return found;
+    }
+    return null;
+  }
+
+  /** Confirms what was read (as the agent's command does before it exits). */
+  async confirm(): Promise<void> {
+    if (!this.cursor) return;
+    await this.fetchFn(`${this.url}&after=${encodeURIComponent(this.cursor)}&confirm=1`, { signal: AbortSignal.timeout(10_000) })
+      .then((r) => r.text())
+      .catch(() => {});
+  }
+}

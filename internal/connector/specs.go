@@ -126,7 +126,8 @@ const PluginIssuerFile = "plugin-issuer"
 
 // InstallPlugin is Install for a harness whose hooks come from Wakeshift's
 // plugin for it (wakeshift/agent-plugins), installed with the harness's own
-// plugin command: it trusts issuer, stamps installed_at and adds the allow
+// plugin command: it trusts issuer (in place of an issuer the plugin alone
+// trusted before, when its setting changes), stamps installed_at and adds the allow
 // rules, but writes no hooks. Hooks an earlier install (/install/<harness>.sh)
 // wrote to the harness's user settings are removed, so a user who moves to
 // the plugin doesn't run both. The plugin's launcher runs it on a hook's
@@ -137,7 +138,10 @@ func (s Spec) InstallPlugin(bin, issuer string, out io.Writer) error {
 		return err
 	}
 	set := LoadSettings(s.Name)
-	if err := set.Trust(issuer); err != nil {
+	// The plugin's issuer replaces the one it trusted before (a changed
+	// setting), but never one the user trusted another way.
+	set.trustForPlugin(issuer)
+	if err := set.Save(); err != nil {
 		return err
 	}
 	s.removeUserHooks(set, bin, out)

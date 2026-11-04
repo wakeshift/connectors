@@ -20,15 +20,18 @@ import (
 // the conversation (_meta["antigravity.google/conversation_id"]). So a
 // beacon in the result's text, naming the conversation, reaches the hook.
 //
-//   - PostToolUse (call_mcp_tool): agy writes the step's text to the
-//     transcript only after the hook returns, and its model sees the text,
-//     beacon and all (no hook output can change it). So the hook starts a
-//     resolver (`--event resolve`, detached) that reads the step the moment
-//     it's written, verifies the beacon there and redeems it: used up
-//     before the model could repeat it. (The next PreInvocation or Stop
-//     reads it too, if the resolver couldn't run.) PostToolUse output
-//     can't add context, so the "connected" note waits for the next
-//     PreInvocation, which can (injectSteps).
+//   - PostToolUse (call_mcp_tool): its model sees the result's text, beacon
+//     and all: no hook output changes it (agy 1.4.12 ignores PostToolUse's
+//     output, overwrite_result included), and agy drops a result's _meta
+//     and structured content. agy 1.4.12 writes the step's output file
+//     before the hook runs, so the hook redeems the beacon from it then,
+//     before the model sees the result. Without that file (older agy), the
+//     step reaches the transcript only after the hook returns, so the hook
+//     starts a resolver (`--event resolve`, detached) that reads the step
+//     the moment it's written and redeems the beacon there. (The next
+//     PreInvocation or Stop reads it too, if the resolver couldn't run.)
+//     PostToolUse output can't add context, so the "connected" note waits
+//     for the next PreInvocation, which can (injectSteps).
 //   - Stop: listen for a while; on messages, {"decision":"continue",
 //     "reason":…} keeps the conversation going (at most 10 in a row).
 
@@ -76,9 +79,13 @@ func (antigravityFormat) ParseEvent(event string, b []byte) (Input, error) {
 		in.Event, in.ToolName, in.Server = ToolResult, c.ToolCall.Args.ServerName+"/"+c.ToolCall.Args.ToolName, c.ToolCall.Args.ServerName
 		in.MCPTool = c.ToolCall.Args.ToolName
 		// agy writes the result's step to the transcript after this hook
-		// returns (verified), so it's read at the conversation's next hook
-		// (PreInvocation or Stop).
-		if text := antigravityStepText(c.TranscriptPath, *c.StepIdx, 0); text != "" {
+		// returns (verified), but the step's output file before it runs
+		// (agy 1.4.12): read there, the beacon is redeemed before agy hands
+		// the result to the model. Else it's read at the conversation's
+		// next hook (PreInvocation or Stop), or by the resolver.
+		if text := antigravityStepOutput(c.TranscriptPath, c.ConversationID, *c.StepIdx); text != "" {
+			in.ToolResult, _ = json.Marshal(text)
+		} else if text := antigravityStepText(c.TranscriptPath, *c.StepIdx, 0); text != "" {
 			in.ToolResult, _ = json.Marshal(text)
 		} else if validTranscript(c.TranscriptPath) {
 			in.deferred, _ = json.Marshal(agyStep{Path: c.TranscriptPath, Step: *c.StepIdx})
@@ -129,6 +136,43 @@ func (antigravityFormat) Resolve(deferred []byte) json.RawMessage {
 
 func validTranscript(path string) bool {
 	return path != "" && filepath.IsAbs(path) && filepath.Base(path) == "transcript_full.jsonl"
+}
+
+// maxStepOutput bounds the step output file the hook reads: a Wakeshift
+// result is far smaller, and the beacon ends it.
+const maxStepOutput = 1 << 20
+
+// antigravityStepOutput is a tool step's result text as agy 1.4.12 writes
+// it before PostToolUse runs: <conversation's brain
+// folder>/.system_generated/steps/<step>/output.txt, next to the
+// transcript (.system_generated/logs/transcript_full.jsonl), in the
+// conversation's own folder. "" if it isn't there (an older agy), isn't a
+// regular file, or wasn't written just now (a step index an undo
+// reused).
+func antigravityStepOutput(transcript, conversation string, step int) string {
+	if !validTranscript(transcript) || conversation == "" || step < 0 {
+		return ""
+	}
+	logs := filepath.Dir(transcript)
+	generated := filepath.Dir(logs)
+	if filepath.Base(logs) != "logs" || filepath.Base(generated) != ".system_generated" || filepath.Base(filepath.Dir(generated)) != conversation {
+		return ""
+	}
+	p := filepath.Join(generated, "steps", fmt.Sprint(step), "output.txt")
+	fi, err := os.Lstat(p)
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() > maxStepOutput {
+		return ""
+	}
+	// Written just now: not long ago, and not dated ahead (a file's time
+	// can be set to anything).
+	if age := time.Since(fi.ModTime()); age > deferredTTL || age < -5*time.Second {
+		return ""
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // antigravityStepText is a transcript step's text (a tool's result), waiting

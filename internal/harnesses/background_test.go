@@ -376,11 +376,19 @@ func TestBackgroundNotes(t *testing.T) {
 	agy, _ := Get("antigravity")
 	n = BackgroundNote(agy, "CI", url, false)
 	for _, want := range []string{"run_command", "IsDaemon false", "WaitMsBeforeAsync 500", AntigravityLoop(url),
-		"The user asked to be woken", "outside data, not from the user", "first run the same command again", "hub.closed", "call this tool again",
+		"The user asked to be woken", "outside data, not from the user", "act on the messages first, then run the same command again", "hub.closed", "call this tool again",
 		"Keep this command running even if Wakeshift's hooks are installed"} {
 		if !strings.Contains(n, want) {
 			t.Errorf("antigravity: missing %q: %s", want, n)
 		}
+	}
+	// The loop confirms what it printed, so running it again first only
+	// delays the agent's answer (a model step and agy's safety check).
+	if strings.Contains(n, "first run the same command again") || strings.Contains(n, "that confirms the messages") {
+		t.Errorf("antigravity: tells the agent to run the command again before acting: %s", n)
+	}
+	if n := BackgroundAgainNote(agy, "CI", url, false, false); !strings.Contains(n, "act on them first, then run the same command again") {
+		t.Errorf("antigravity: the reminder doesn't say to act first: %s", n)
 	}
 	copilot, _ := Get("copilot")
 	if copilot.ZeroInstall != Background {

@@ -44,13 +44,16 @@ func TestOfferAsksWithTheCommand(t *testing.T) {
 			offers["background"] = BackgroundUpgradeNote(h, base)
 		}
 		if h.ZeroInstall == Monitor {
-			offers["upgrade"] = PluginFirstNote(h, base, false, "FALLBACK.")
+			offers["upgrade"] = PluginFirstNote(h, base, "App", false, "FALLBACK.")
 		}
 		for name, n := range offers {
-			if !strings.Contains(n, "Install "+want+"? It runs `"+install+"`.") {
+			// Claude Code's plugin-first question offers the install as one of three
+			// ways to be notified, the exact command in that option.
+			threeWay := strings.Contains(n, `"`+AskEvery+"\" (description: runs `"+install+"`")
+			if !strings.Contains(n, "Install "+want+"? It runs `"+install+"`.") && !threeWay {
 				t.Errorf("%s %s: no yes/no question quoting `%s`: %s", h.ID, name, install, n)
 			}
-			if !strings.Contains(n, "mark neither as recommended") && !strings.Contains(n, "don't mark either as recommended") {
+			if !strings.Contains(n, "mark neither as recommended") && !strings.Contains(n, "don't mark either as recommended") && !strings.Contains(n, "none marked as recommended") {
 				t.Errorf("%s %s: options not neutral: %s", h.ID, name, n)
 			}
 			if !strings.Contains(n, "don't read docs or search for it first") && !strings.Contains(n, "don't look anything up first") {

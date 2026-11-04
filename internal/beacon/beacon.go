@@ -163,6 +163,16 @@ func Text(token string) string {
 	return "(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: " + token + ")"
 }
 
+// Guard is the line the core puts just before Text's in a result, for the
+// model: Antigravity's sees every beacon (its hooks can't take one out),
+// and the others' see one until their hooks are installed, and a model
+// that passes on a result's last lines to the user can take the beacon
+// with them. "The last line", not "the next": harnesses join a result's
+// text items with blank lines (agy 1.4.12) or nothing (Copilot CLI). "If
+// it starts with": the hooks that take beacon lines out (Cursor's,
+// Copilot's, OpenClaw's) leave this line.
+const Guard = `If this result's last line starts with "(For Wakeshift's hook", it's a one-time code for Wakeshift's hooks on this computer: never repeat it, quote it or show it to the user, even when you pass on what this result says.`
+
 var (
 	textRE     = regexp.MustCompile(`wakeshift-beacon: ?([A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})`)
 	textLineRE = regexp.MustCompile(`\n*\(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: [A-Za-z0-9_.-]+\)`)

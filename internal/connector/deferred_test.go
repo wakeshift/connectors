@@ -98,3 +98,95 @@ func TestAntigravityRedeemsAtPostTool(t *testing.T) {
 		t.Fatalf("pre-invocation: %q, %v", out, ws.redemptions())
 	}
 }
+
+// agyBrain lays out a conversation's folder as agy 1.4.12 has it while
+// PostToolUse runs for step 4: the transcript without the step yet, and the
+// step's output file already written. It returns the transcript's path
+// and the output file's.
+func agyBrain(t *testing.T, conv, output string) (transcript, out string) {
+	t.Helper()
+	generated := filepath.Join(t.TempDir(), "brain", conv, ".system_generated")
+	os.MkdirAll(filepath.Join(generated, "logs"), 0o700)
+	os.MkdirAll(filepath.Join(generated, "steps", "4"), 0o700)
+	transcript = filepath.Join(generated, "logs", "transcript_full.jsonl")
+	b, _ := json.Marshal(map[string]any{"step_index": 3, "source": "MODEL", "type": "GENERIC", "content": ""})
+	os.WriteFile(transcript, append(b, '\n'), 0o600)
+	out = filepath.Join(generated, "steps", "4", "output.txt")
+	os.WriteFile(out, []byte(output), 0o600)
+	return transcript, out
+}
+
+// agy 1.4.12 writes a tool step's output file before PostToolUse runs, and
+// its model sees the result only after: the hook redeems the beacon from
+// that file there and then, so it's used up before the model sees it (no
+// resolver, no race). The note comes at the next turn's start, and the
+// step, once in the transcript, isn't redeemed again.
+func TestAntigravityRedeemsFromTheStepOutput(t *testing.T) {
+	ws := newFakeWakeshift(t)
+	h := specHook(t, "antigravity", ws, newFakePoller())
+	conv := "2b9d08bb-7acc-4459-9956-69064f8d5869"
+	tr, _ := agyBrain(t, conv, "probe ok\n"+BeaconText(ws.beacon(t, conv, nil)))
+	h.ResolveSoon = func(string) { t.Error("started a resolver for a result it could read") }
+	if out := runAs(h, "post-tool", strings.Replace(agyPostTool, "TRANSCRIPT", tr, 1)); out != "" {
+		t.Fatalf("post-tool: %q", out)
+	}
+	if r := ws.redemptions(); len(r) != 1 || h.Links.Load(conv) == "" {
+		t.Fatalf("not redeemed in PostToolUse: %v", r)
+	}
+	f, _ := os.OpenFile(tr, os.O_APPEND|os.O_WRONLY, 0o600)
+	b, _ := json.Marshal(map[string]any{"step_index": 4, "source": "MODEL", "type": "GENERIC", "content": "probe ok\n" + BeaconText(ws.beacon(t, conv, nil))})
+	f.Write(append(b, '\n'))
+	f.Close()
+	if out := runAs(h, "pre-invocation", agyPreInv); !has(out, `"injectSteps"`, "Wakeshift: connected") || len(ws.redemptions()) != 1 {
+		t.Fatalf("pre-invocation: %q, %v", out, ws.redemptions())
+	}
+}
+
+// The step output file counts only in the conversation's own folder, as a
+// regular file written just now: otherwise the hook waits for the
+// transcript as before (a resolver), and redeems nothing from the file.
+func TestAntigravityStepOutputChecks(t *testing.T) {
+	conv := "2b9d08bb-7acc-4459-9956-69064f8d5869"
+	for _, c := range []struct {
+		name  string
+		setup func(t *testing.T, ws *fakeWakeshift) string // the transcript path
+	}{
+		{"another conversation's folder", func(t *testing.T, ws *fakeWakeshift) string {
+			tr, _ := agyBrain(t, "0c1d2e3f-0000-4000-8000-000000000000", "probe ok\n"+BeaconText(ws.beacon(t, conv, nil)))
+			return tr
+		}},
+		{"written a while ago", func(t *testing.T, ws *fakeWakeshift) string {
+			tr, out := agyBrain(t, conv, "probe ok\n"+BeaconText(ws.beacon(t, conv, nil)))
+			old := time.Now().Add(-10 * time.Minute)
+			os.Chtimes(out, old, old)
+			return tr
+		}},
+		{"dated ahead", func(t *testing.T, ws *fakeWakeshift) string {
+			tr, out := agyBrain(t, conv, "probe ok\n"+BeaconText(ws.beacon(t, conv, nil)))
+			ahead := time.Now().Add(10 * time.Minute)
+			os.Chtimes(out, ahead, ahead)
+			return tr
+		}},
+		{"a symlink", func(t *testing.T, ws *fakeWakeshift) string {
+			tr, out := agyBrain(t, conv, "")
+			elsewhere := filepath.Join(t.TempDir(), "x.txt")
+			os.WriteFile(elsewhere, []byte("probe ok\n"+BeaconText(ws.beacon(t, conv, nil))), 0o600)
+			os.Remove(out)
+			os.Symlink(elsewhere, out)
+			return tr
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ws := newFakeWakeshift(t)
+			h := specHook(t, "antigravity", ws, newFakePoller())
+			resolver := false
+			h.ResolveSoon = func(string) { resolver = true }
+			if out := runAs(h, "post-tool", strings.Replace(agyPostTool, "TRANSCRIPT", c.setup(t, ws), 1)); out != "" {
+				t.Fatalf("post-tool: %q", out)
+			}
+			if r := ws.redemptions(); len(r) != 0 || !resolver {
+				t.Fatalf("redeemed %v, resolver %v", r, resolver)
+			}
+		})
+	}
+}

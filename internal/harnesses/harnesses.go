@@ -346,7 +346,7 @@ var all = []Harness{
 			Update:      "claude plugin install wakeshift --marketplace {source} --config issuer={origin} && claude plugin marketplace update wakeshift && claude plugin update wakeshift@wakeshift",
 			Remove:      "claude plugin uninstall wakeshift@wakeshift",
 			RefSep:      "#",
-			Changes:     "installs Wakeshift's plugin for Claude Code from github.com/wakeshift/agent-plugins with Claude Code's own plugin installer, whose hooks fetch Wakeshift's connector into ~/.wakeshift/bin, checking its SHA-256; it also pre-approves Wakeshift's own wait command in ~/.claude/settings.json (~/.wakeshift/bin/wakeshift wait), so Claude Code runs it without asking",
+			Changes:     "installs Wakeshift's plugin for Claude Code from github.com/wakeshift/agent-plugins with Claude Code's own plugin installer; its hooks fetch Wakeshift's connector into ~/.wakeshift/bin, checking its SHA-256, and it adds one permission rule to ~/.claude/settings.json so Claude Code runs Wakeshift's wait command (~/.wakeshift/bin/wakeshift wait) without asking each time",
 			Trust:       "There's nothing to approve, but Claude Code loads a newly installed plugin only when a session starts: type /reload-plugins here (or restart with claude --continue).",
 			Resume:      "Then send any message here (\"done\" is enough), so I can connect this conversation.",
 			AfterUpdate: "Type /reload-plugins here (or restart Claude Code), so it runs the new version.",
@@ -1098,7 +1098,7 @@ func installNote(h Harness, install string) string {
 		return CantWake(h.Name)
 	}
 	if h.ZeroInstall == Monitor {
-		return pluginFirst(h, install, false, "start the Monitor tool on your stream link, as this result says.")
+		return pluginFirst(h, "", install, false, "start the Monitor tool on your stream link, as this result says.")
 	}
 	if h.ZeroInstall == Background {
 		return "You can be woken now, within seconds even while idle, by a command you start in the background (subscribing gives it). " + backgroundUpgrade(h, install)
@@ -1254,31 +1254,63 @@ func waker(tasks bool) string {
 
 // PluginFirstNote is what a conversation in a harness with an AskTool and a
 // zero-install wake path (Claude Code) is told when it first subscribes
-// while nothing wakes it: ask about Wakeshift's plugin (as the Wakeshift at
-// base offers it) first; on a yes, install it and connect without starting
-// anything else; on a no, or if it doesn't install, fallback, the
-// zero-install path's instructions (what to start, and how). tasks: that path is the MCP-tasks wait, not the Monitor.
-func PluginFirstNote(h Harness, base string, tasks bool, fallback string) string {
-	return pluginFirst(Route(h, base), OfferCommand(h, base), tasks, fallback)
+// while nothing wakes it, for the app named app: that subscribing alone
+// won't reach it, and one question to the user, with three answers: be
+// notified while this session is open (fallback, the zero-install path:
+// what to start, and how), in every session (Wakeshift's plugin, as the
+// Wakeshift at base offers it, then connect without starting anything
+// else), or not at all. Nothing runs before the answer. tasks: the
+// zero-install path is the MCP-tasks wait, not the Monitor.
+func PluginFirstNote(h Harness, base, app string, tasks bool, fallback string) string {
+	return pluginFirst(Route(h, base), app, OfferCommand(h, base), tasks, fallback)
 }
 
-func pluginFirst(h Harness, install string, tasks bool, fallback string) string {
+// The three answers to the plugin-first question, in the order offered.
+const (
+	AskSession = "Notify me while this session is open"
+	AskEvery   = "Notify me in every session"
+	AskNone    = "Don't notify me"
+)
+
+// sessionOnly is the description of AskSession: what runs, for this
+// session only, with nothing installed.
+func sessionOnly(tasks bool) string {
+	if tasks {
+		return "waits on this app's own " + WaitTool + " tool for this session only; nothing is installed"
+	}
+	return "starts a background listener (the Monitor) for this session only; nothing is installed"
+}
+
+func pluginFirst(h Harness, app, install string, tasks bool, fallback string) string {
 	if !h.Installable || h.AskTool == "" || install == "" {
 		return fallback
 	}
-	w := waker(tasks)
-	why := "with no Monitor to start again every 25 minutes (in manual permission mode, each start asks the user to approve it)"
-	if tasks {
-		why = "and " + pick(h, "acknowledges", "acknowledge") + " each message as it reaches you"
+	svc := "the service " + app + " uses to notify agents"
+	if app == "" {
+		app, svc = "This app", "the service it uses to notify agents"
 	}
-	// Information for the user and one question, not commands to run
-	// unasked: in the realistic bench tier (November 2, 2026), agents set
-	// aside a result that told them to start a background command against
-	// an external URL as an injected instruction.
-	n := "The user asked to be woken when messages arrive. Ask them one question before anything runs: whether to install " + Kit(h) + " (" + itThey(h) + " " + delivers(h) + " new messages to this conversation " + h.When + ", " + why + "). " +
-		"New messages are held for this conversation until then, so none are lost. " +
-		askWithNo(h, install, "messages wake this conversation through "+w+" instead")
-	n += " If they pick yes and it installs, nothing else needs to run: don't start " + w + ". "
+	w := waker(tasks)
+	// A fact first, then one question with every way to be notified, and
+	// nothing to run before the answer. In the realistic bench tier
+	// (wakebench R1-R5, November 2-3, 2026), Claude Code set aside a result
+	// that told it to start a background command against an external URL,
+	// or to offer "a third-party plugin" that "would edit your settings",
+	// as an unrequested or injected instruction, believing the app's own
+	// watch would tell it anyway ("Shipyard's own watch should notify me").
+	// Saying first that subscribing alone won't reach the conversation, and
+	// offering the listener, the plugin and nothing as the user's choice,
+	// took it from 0/10 to asking or listening in nearly every run.
+	n := "Subscribed, but that alone won't tell you when something arrives: " + app + " delivers its notifications through Wakeshift, " + svc + ", and they reach this conversation only once the user picks how. " +
+		"The user asked to hear about it, so ask them now; nothing runs until they answer, and new messages are held for this conversation until then, so none are lost. " +
+		"Ask them one question with your " + h.AskTool + " tool, \"How should I notify you here when it arrives, even while I'm idle?\", with three options, in this order, none marked as recommended: " +
+		"\"" + AskSession + "\" (description: " + sessionOnly(tasks) + "), " +
+		"\"" + AskEvery + "\" (description: runs `" + install + "` (" + Kit(h) + "), which " + changes(h) + "), " +
+		"and \"" + AskNone + "\" (description: nothing runs; new messages wait until you ask me). " +
+		"Only if they pick \"" + AskEvery + "\", run `" + install + "` right away and as given (don't look anything up first)"
+	if h.UserShell != "" {
+		n += "; if running it is refused (auto mode's classifier or a permission denial), give them the command to type themselves, as it is: `" + h.UserShell + " " + install + "` (the " + h.UserShell + " prefix runs it as the user)"
+	}
+	n += ". If it installs, nothing else needs to run: don't start " + w + ". "
 	if reloads(h) {
 		if t := TrustNote(h); t != "" {
 			n += "In your reply to the user, tell them this: " + t + " "
@@ -1291,7 +1323,8 @@ func pluginFirst(h Harness, install string, tasks bool, fallback string) string 
 		}
 	}
 	n += confirmNote(h, w)
-	return n + " If they pick no, or it doesn't install (it fails, or it's refused and they don't run it themselves), use " + w + " instead: " + fallback
+	n += " If they pick \"" + AskNone + "\", start nothing: new messages wait until your next call to this app's tools."
+	return n + " If they pick \"" + AskSession + "\", or the plugin doesn't install (it fails, or it's refused and they don't run it themselves), use " + w + ": " + fallback
 }
 
 // confirmNote is how the agent confirms the plugin connected, after the
@@ -1299,7 +1332,21 @@ func pluginFirst(h Harness, install string, tasks bool, fallback string) string 
 // reaches Claude Code's model only at the next user prompt), else it falls
 // back to waker, which ends by itself once the plugin connects.
 func confirmNote(h Harness, waker string) string {
-	return "After that, call this tool once more, to confirm: that result starts with \"" + Connected + "\" once " + itThey(h) + " " + pick(h, "has", "have") + " connected this conversation. If it doesn't, fall back to " + waker + " as below: it stops by itself once " + itThey(h) + " " + connects(h) + "."
+	return "After that result has come back, call this tool once more, on its own (not alongside another call), to confirm: that result starts with \"" + Connected + "\" once " + itThey(h) + " " + pick(h, "has", "have") + " connected this conversation. " +
+		"If it doesn't, call it once more a few seconds later: connecting takes a moment. If that one doesn't either, fall back to " + waker + " as below: it stops by itself once " + itThey(h) + " " + connects(h) + "."
+}
+
+// PluginConnectingNote is what such a conversation is told on a result
+// while the result of its call just before is still connecting the plugin
+// (its hooks haven't redeemed that result's beacon yet; they do within
+// seconds): don't fall back yet, call again in a moment (wakebench,
+// November 2, 2026: an agent that called twice at once got no "connected"
+// and started the Monitor, which in manual mode means its approval on the
+// happy path).
+func PluginConnectingNote(h Harness, base string, tasks bool) string {
+	h = Route(h, base)
+	return "Your previous call's result is connecting " + Kit(h) + " to this conversation, which takes a few seconds. Don't start " + waker(tasks) + ". " +
+		"Call this tool again in a few seconds, on its own: its result starts with \"" + Connected + "\" once " + itThey(h) + " " + pick(h, "has", "have") + " connected."
 }
 
 // PluginPendingNote is what such a conversation is told on a later result
@@ -1318,7 +1365,7 @@ func PluginPendingNote(h Harness, base string, tasks bool, again string) string 
 		notYet = " If you installed it but they haven't loaded it yet, don't start " + w + " either: ask them again to, and to send any message after."
 	}
 	return "If you installed " + Kit(h) + " in this conversation" + loaded + ", don't start " + w + ": " + itThey(h) + " " + connects(h) + " this conversation from this result. " +
-		confirmNote(h, w) + notYet + " Otherwise (the user said no, or " + itThey(h) + " " + pick(h, "isn't", "aren't") + " installed): " + again
+		confirmNote(h, w) + notYet + " If the user chose not to be notified (\"" + AskNone + "\"), start nothing. Otherwise (they chose this session only, or " + itThey(h) + " " + pick(h, "isn't", "aren't") + " installed): " + again
 }
 
 // reloads reports whether h's offer (Route) is a plugin the user must load

@@ -155,10 +155,10 @@ func TestForClient(t *testing.T) {
 func TestInstallNote(t *testing.T) {
 	h, _ := Get("claude-code")
 	n := InstallNote(h, "https://app.wakeshift.ai/")
-	for _, want := range []string{"Ask them with your AskUserQuestion tool, quoting the exact command in the question itself",
-		`"Yes, install Wakeshift's plugin for Claude Code" (description: runs ` + "`claude plugin install wakeshift --marketplace wakeshift/agent-plugins --config issuer=https://app.wakeshift.ai`, installs Wakeshift's plugin for Claude Code from github.com/wakeshift/agent-plugins with Claude Code's own plugin installer, whose hooks fetch Wakeshift's connector into ~/.wakeshift/bin, checking its SHA-256; it also pre-approves Wakeshift's own wait command in ~/.claude/settings.json (~/.wakeshift/bin/wakeshift wait), so Claude Code runs it without asking)",
-		`"No, don't install anything" (description: messages wake this conversation through the Monitor instead)`,
-		"only if they pick yes", "if running it is refused (auto mode's classifier or a permission denial)",
+	for _, want := range []string{"Ask them one question with your AskUserQuestion tool",
+		`"Notify me in every session" (description: runs ` + "`claude plugin install wakeshift --marketplace wakeshift/agent-plugins --config issuer=https://app.wakeshift.ai` (Wakeshift's plugin for Claude Code), which installs Wakeshift's plugin for Claude Code from github.com/wakeshift/agent-plugins with Claude Code's own plugin installer; its hooks fetch Wakeshift's connector into ~/.wakeshift/bin, checking its SHA-256, and it adds one permission rule to ~/.claude/settings.json so Claude Code runs Wakeshift's wait command (~/.wakeshift/bin/wakeshift wait) without asking each time)",
+		`"Notify me while this session is open" (description: starts a background listener (the Monitor) for this session only; nothing is installed)`,
+		`Only if they pick "Notify me in every session", run`, "if running it is refused (auto mode's classifier or a permission denial)",
 		"type themselves, as it is: `! claude plugin install wakeshift --marketplace wakeshift/agent-plugins --config issuer=https://app.wakeshift.ai`",
 		"don't start the Monitor", "type /reload-plugins here", "send any message here", "Once they say they've loaded it, call this tool again"} {
 		if !strings.Contains(n, want) {
@@ -176,11 +176,15 @@ func TestInstallNote(t *testing.T) {
 	noMonitor := h
 	noMonitor.ZeroInstall = ""
 	for name, note := range map[string]string{
-		"subscribe": SubscribeNote(h, base), "upgrade": PluginFirstNote(h, base, false, "FALLBACK."), "repeat": RepeatNote(h, base),
+		"subscribe": SubscribeNote(h, base), "upgrade": PluginFirstNote(h, base, "App", false, "FALLBACK."), "repeat": RepeatNote(h, base),
 		"unwoken": InstallNote(noMonitor, base), "unwoken repeat": RepeatNote(noMonitor, base),
 	} {
-		for _, want := range []string{"Ask them with your AskUserQuestion tool, quoting the exact command in the question itself", `"Yes, install Wakeshift's plugin for Claude Code"`, `"No, don't install anything"`,
-			"only if they pick yes", "type themselves, as it is: `! claude plugin install wakeshift --marketplace wakeshift/agent-plugins --config issuer=https://app.wakeshift.ai`"} {
+		wants := []string{"Ask them with your AskUserQuestion tool, quoting the exact command in the question itself", `"Yes, install Wakeshift's plugin for Claude Code"`, `"No, don't install anything"`, "only if they pick yes"}
+		// The first watch while nothing wakes the conversation: one question, three ways to be notified.
+		if name == "subscribe" || name == "upgrade" {
+			wants = []string{"Ask them one question with your AskUserQuestion tool", `"` + AskEvery + "\" (description: runs `claude plugin install", `"` + AskSession + `"`, `"` + AskNone + `"`, `Only if they pick "` + AskEvery + `"`}
+		}
+		for _, want := range append(wants, "type themselves, as it is: `! claude plugin install wakeshift --marketplace wakeshift/agent-plugins --config issuer=https://app.wakeshift.ai`") {
 			if !strings.Contains(note, want) {
 				t.Fatalf("%s: missing %q in %s", name, want, note)
 			}
@@ -339,7 +343,7 @@ func TestNotesFromTheInstallLoop(t *testing.T) {
 		}
 	}
 	claude, _ := Get("claude-code")
-	if n := PluginFirstNote(claude, "https://x.test", false, "FALLBACK."); !strings.Contains(n, "all this tool again") || !strings.Contains(n, `that result starts with "Wakeshift: connected"`) {
+	if n := PluginFirstNote(claude, "https://x.test", "App", false, "FALLBACK."); !strings.Contains(n, "all this tool again") || !strings.Contains(n, `that result starts with "Wakeshift: connected"`) {
 		t.Errorf("claude code: %s", n)
 	}
 	for _, id := range []string{"cursor", "antigravity"} {
@@ -392,7 +396,7 @@ func TestNotesReadNaturally(t *testing.T) {
 		return strings.Join(parts, "")
 	}
 	for _, h := range All() {
-		for _, n := range []string{InstallNote(h, "https://x.test"), PluginFirstNote(h, "https://x.test", false, "FALLBACK."), SubscribeNote(h, "https://x.test")} {
+		for _, n := range []string{InstallNote(h, "https://x.test"), PluginFirstNote(h, "https://x.test", "App", false, "FALLBACK."), SubscribeNote(h, "https://x.test")} {
 			ws := words(withoutCode(n))
 			for i := 1; i < len(ws); i++ {
 				if ws[i] == ws[i-1] {

@@ -1,0 +1,47 @@
+{
+  "name": "@wakeshift/cli",
+  "version": "0.1.0",
+  "description": "Wakeshift's command line for developers: create an app with a key made on your machine, check it, and verify your MCP server wakes agents.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wakeshift/connectors.git",
+    "directory": "sdk/cli"
+  },
+  "homepage": "https://wakeshift.ai/docs/sdk",
+  "bugs": {
+    "url": "https://github.com/wakeshift/connectors/issues"
+  },
+  "keywords": [
+    "wakeshift",
+    "mcp",
+    "model-context-protocol",
+    "mcp-events",
+    "ai-agents",
+    "cli"
+  ],
+  "type": "module",
+  "bin": {
+    "wakeshift-cli": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.json && chmod +x dist/cli.js",
+    "lint": "tsc -p tsconfig.test.json --noEmit",
+    "test": "rm -rf build-test && tsc -p tsconfig.test.json && node --test 'build-test/test/*.test.js'",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^7.0.2"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -162,3 +163,67 @@ func TestInstallOverPlugin(t *testing.T) {
 	// Without a plugin, the install works as ever.
 	install(t, spec, testBin)
 }
+
+// When the plugin's issuer setting changes, the issuer the plugin alone
+// added goes; one the user trusted another way (an install script) stays,
+// as does an entry from a config.json written before the plugin recorded
+// its own; and installing again with the same issuer changes nothing.
+func TestInstallPluginReplacesItsOwnIssuer(t *testing.T) {
+	home := setHome(t)
+	t.Setenv("HERMES_HOME", home+"/.hermes")
+	spec, _ := Lookup("claude-code")
+	const a, b, user = "https://a.example", "https://b.example", "https://user.example"
+	issuers := func() []string { return LoadSettings("claude-code").Issuers }
+
+	installPlugin(t, spec, testBin, a)
+	cfg := filepath.Join(LoadSettings("claude-code").Dir, "config.json")
+	first, _ := os.ReadFile(cfg)
+	// The same issuer again: no change to what's trusted, or to the record.
+	installPlugin(t, spec, testBin, a)
+	again, _ := os.ReadFile(cfg)
+	if got := issuers(); len(got) != 1 || got[0] != a {
+		t.Fatalf("after reinstalling with %s: %v", a, got)
+	}
+	if strip := func(b []byte) string { return regexpInstalledAt.ReplaceAllString(string(b), "") }; strip(first) != strip(again) {
+		t.Fatalf("reinstall changed config.json:\n%s\n%s", first, again)
+	}
+
+	// The user trusts another Wakeshift with an install script.
+	set := LoadSettings("claude-code")
+	if err := set.Trust(user); err != nil {
+		t.Fatal(err)
+	}
+
+	// The setting changes from a to b: a goes, the user's stays.
+	installPlugin(t, spec, testBin, b)
+	if got := issuers(); len(got) != 2 || got[0] != user || got[1] != b {
+		t.Fatalf("after changing to %s: %v", b, got)
+	}
+
+	// The plugin set to the user's own issuer, then away: it stays (the
+	// plugin didn't add it).
+	installPlugin(t, spec, testBin, user)
+	installPlugin(t, spec, testBin, a)
+	if got := issuers(); len(got) != 2 || got[0] != user || got[1] != a {
+		t.Fatalf("after %s then %s: %v", user, a, got)
+	}
+
+	// An install script trusting the plugin's issuer makes it the user's too.
+	set = LoadSettings("claude-code")
+	if err := set.Trust(a); err != nil {
+		t.Fatal(err)
+	}
+	installPlugin(t, spec, testBin, b)
+	if got := issuers(); len(got) != 3 {
+		t.Fatalf("an issuer an install also trusted was dropped: %v", got)
+	}
+
+	// A config.json from before plugin_issuers: its entries all stay.
+	os.WriteFile(cfg, []byte(`{"issuers":["`+a+`"],"installed_at":"2026-10-01T00:00:00Z"}`+"\n"), 0o600)
+	installPlugin(t, spec, testBin, b)
+	if got := issuers(); len(got) != 2 || got[0] != a || got[1] != b {
+		t.Fatalf("an old config's issuer was dropped: %v", got)
+	}
+}
+
+var regexpInstalledAt = regexp.MustCompile(`"installed_at": "[^"]*"`)

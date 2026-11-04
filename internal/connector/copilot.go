@@ -38,9 +38,10 @@ import (
 //     a user's config can hold for every folder (its persisted approvals
 //     are per location), so the hook is the rule. Nothing else is
 //     answered: Copilot asks as it would have. Copilot (1.0.105) runs the
-//     hook only where it would ask, and its answer also wins over a
-//     --deny-tool rule for that command (checked in a temp HOME): a user
-//     who wants Copilot to ask again removes Wakeshift's hooks.
+//     hook before its own permission rules, and an allow wins over a
+//     --deny-tool rule (checked in a temp HOME), so the hook gives no
+//     answer while the user denies the command, or shell commands, or
+//     while it can't tell whether they do (copilotdeny.go).
 
 const copilotName = "copilot"
 
@@ -104,6 +105,13 @@ func (copilotFormat) Shell(tool string) bool { return tool == "bash" }
 
 // Approve is permissionRequest's answer that approves the call.
 func (copilotFormat) Approve() Output { return Output{Stdout: []byte(`{"behavior":"allow"}` + "\n")} }
+
+// Denied: the user's --deny-tool rules or their organization's managed
+// rules cover the command, or they can't be read (copilotdeny.go).
+func (copilotFormat) Denied(command string) bool {
+	denied, _ := copilotDeniesWait(command)
+	return denied
+}
 
 // Aliased: each MCP server is told its own name for the session.
 func (copilotFormat) Aliased() bool { return true }

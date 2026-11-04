@@ -15,7 +15,7 @@ func TestWithTools(t *testing.T) {
 	cc, _ := Get("claude-code")
 	// Claude Code's offer is its plugin, whose install can't carry the yes:
 	// unchanged, and its hooks ask once they connect the conversation.
-	if h := Route(WithTools(cc, offer), base); h.Changes != Route(cc, base).Changes || OfferCommand(h, base) != OfferCommand(cc, base) || strings.Contains(PluginFirstNote(WithTools(cc, offer), base, false, "FALLBACK."), "WAKESHIFT_ALLOW_TOOLS") {
+	if h := Route(WithTools(cc, offer), base); h.Changes != Route(cc, base).Changes || OfferCommand(h, base) != OfferCommand(cc, base) || strings.Contains(PluginFirstNote(WithTools(cc, offer), base, "App", false, "FALLBACK."), "WAKESHIFT_ALLOW_TOOLS") {
 		t.Fatalf("plugin offer: %s\n%s", OfferCommand(h, base), h.Changes)
 	}
 	// Wakeshift's own installer, as a harness offering it.
@@ -27,8 +27,12 @@ func TestWithTools(t *testing.T) {
 	}
 	// In the picker's yes option, next to the command it runs, on every
 	// path that offers the install, and the ! fallback runs the same.
-	for name, note := range map[string]string{"subscribe": SubscribeNote(h, base), "upgrade": PluginFirstNote(h, base, false, "FALLBACK."), "repeat": RepeatNote(h, base)} {
-		for _, want := range []string{`"Yes, install Wakeshift's hooks for Claude Code" (description: runs ` + "`" + cmd + "`, adds three hooks",
+	for name, note := range map[string]string{"subscribe": SubscribeNote(h, base), "upgrade": PluginFirstNote(h, base, "App", false, "FALLBACK."), "repeat": RepeatNote(h, base)} {
+		yes := `"Notify me in every session" (description: runs ` + "`" + cmd + "` (Wakeshift's hooks for Claude Code), which adds three hooks"
+		if name == "repeat" {
+			yes = `"Yes, install Wakeshift's hooks for Claude Code" (description: runs ` + "`" + cmd + "`, adds three hooks"
+		}
+		for _, want := range []string{yes,
 			consent + ")", "type themselves, as it is: `! " + cmd + "`"} {
 			if !strings.Contains(note, want) {
 				t.Errorf("%s: missing %q in %s", name, want, note)

@@ -15,7 +15,10 @@
   "keywords": [
     "openclaw",
     "openclaw-plugin",
-    "wakeshift"
+    "wakeshift",
+    "ai-agents",
+    "mcp-events",
+    "notifications"
   ],
   "type": "module",
   "main": "./dist/index.js",

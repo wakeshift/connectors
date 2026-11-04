@@ -54,7 +54,7 @@ func TestOffersAskWithoutNotice(t *testing.T) {
 	// option's description, or the user's own shell after a refusal, or it is
 	// followed by "only if they pick yes".
 	command := regexp.MustCompile("`([^`]*/install/|[a-z]+ plugins install |[a-z]+ plugin marketplace add |[a-z]+ plugin update |[a-z]+ plugin install )[^`]*`") // Wakeshift's installer, or the harness's own (OfferCommand)
-	gate := regexp.MustCompile(`(?i)(only if they (agree|want it)[^.` + "`" + `]*, run |if they agreed and it hasn't run, run |\(description: runs |by typing |\? It runs )$`)
+	gate := regexp.MustCompile(`(?i)(only if they (agree|want it)[^.` + "`" + `]*, run |only if they pick "[^"]+", run |if they agreed and it hasn't run, run |\(description: runs |by typing |\? It runs )$`)
 	if bad := "Install Wakeshift's hooks: run `curl -fsSL https://x/install/codex.sh | sh` now."; gate.MatchString(bad[:strings.Index(bad, "`")]) {
 		t.Errorf("the gate accepts an ungated command: %s", bad)
 	}
@@ -70,7 +70,7 @@ func TestOffersAskWithoutNotice(t *testing.T) {
 			"refusal":   UpdateRequired(h, base),
 		}
 		if h.ZeroInstall == Monitor {
-			offers["upgrade"] = PluginFirstNote(h, base, false, "FALLBACK.")
+			offers["upgrade"] = PluginFirstNote(h, base, "App", false, "FALLBACK.")
 		}
 		if h.ZeroInstall == Background {
 			offers["background"] = BackgroundUpgradeNote(h, base)
