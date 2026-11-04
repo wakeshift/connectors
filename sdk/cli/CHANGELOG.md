@@ -2,7 +2,7 @@
 
 What changed in each release of `@wakeshift/cli`.
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-11-04)
 
 The first release.
 
