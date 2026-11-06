@@ -28,6 +28,8 @@ export interface Sub {
   link: string;
   user: string;
   ended: boolean;
+  /** Ends after its first delivery (call.subscribe's once). */
+  once?: boolean;
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -125,8 +127,8 @@ export class FakeCore {
   }
 
   /** A subscription, as a wrapped tool's call.subscribe makes one. */
-  subscribe(event: string, args: Record<string, unknown>, user = "u1"): Sub {
-    const sub = { id: `00000000-0000-4000-8000-${String(this.subs.length + 1).padStart(12, "0")}`, event, args, link: `link${this.subs.length + 1}x`, user, ended: false };
+  subscribe(event: string, args: Record<string, unknown>, user = "u1", once = false): Sub {
+    const sub = { id: `00000000-0000-4000-8000-${String(this.subs.length + 1).padStart(12, "0")}`, event, args, link: `link${this.subs.length + 1}x`, user, ended: false, once };
     this.subs.push(sub);
     this.queues.set(sub.link, []);
     return sub;
@@ -143,6 +145,7 @@ export class FakeCore {
   deliver(event: string, args: unknown, line: Record<string, unknown>): number {
     const subs = this.live(event, args);
     if (!this.dropEmits) for (const s of subs) this.queues.get(s.link)!.push(JSON.stringify({ type: "event", topic: `app/${event}`, from: "app:x", trust: "outside data", ...line }));
+    for (const s of subs) if (s.once) s.ended = true;
     return subs.length;
   }
 
@@ -214,6 +217,8 @@ export interface FakeMcpOptions {
   noBlock?: boolean;
   /** watch_build leaves Wakeshift's harness argument out of what it subscribes with. */
   dropHarness?: boolean;
+  /** watch_build subscribes with once: the subscription ends with its first delivery. */
+  once?: boolean;
   /** watch_build answers with this error text. */
   errorText?: string;
   /** attach's tools aren't served. */
@@ -277,7 +282,7 @@ export class FakeMcp {
       case "watch_build": {
         if (this.o.errorText) return text(this.o.errorText, true);
         if (this.o.noBlock) return text(`Watching build #${n}.`);
-        const sub = this.core.subscribe(BUILD_FINISHED.name, { pipeline: this.pipeline, number: n });
+        const sub = this.core.subscribe(BUILD_FINISHED.name, { pipeline: this.pipeline, number: n }, "u1", this.o.once);
         const key = `Pass session_key="wsc_secretsessionkey${sub.id.slice(-2)}" to this app's tools from now on.`;
         // As the core answers: the Monitor's command for Claude Code, and
         // for a program it doesn't recognize only that it can't wake it.

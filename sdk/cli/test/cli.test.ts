@@ -296,6 +296,21 @@ test("verify: a synthetic emit when no trigger is given, with a payload fitting 
   }
 });
 
+test("verify: a subscription made with once ends with the wake, and cleanup passes", async () => {
+  const { c } = await verifyApp("once-dev");
+  const mcp = await new FakeMcp(core, { once: true }, "pipe-once").start();
+  try {
+    assert.equal(await run(c, ["verify", "--url", mcp.url, "--tool", "watch_build", "--args", '{"number":8}']), 0);
+    assert.match(c.out, /PASS +wake/);
+    assert.match(c.out, /PASS +cleanup +nothing left to unsubscribe/);
+    assert.doesNotMatch(c.out, /WARN/);
+    assert.ok(!mcp.calls.some((x) => x.name === "unsubscribe_events" || x.name === "unwatch_build"), "it unsubscribed an ended subscription");
+  } finally {
+    await mcp.stop();
+    c.cleanup();
+  }
+});
+
 test("verify: the guard refuses to emit when anyone else is subscribed", async () => {
   const { c } = await verifyApp("guard-dev");
   const mcp = await new FakeMcp(core, {}, "pipe-guard").start();
@@ -363,7 +378,7 @@ test("verify: a tool trigger is guarded too", async () => {
 test("verify: each failure says what to fix", async () => {
   const cases: { name: string; o: ConstructorParameters<typeof FakeMcp>[1]; args?: string[]; check: string; want: RegExp; fix: RegExp }[] = [
     { name: "no sentence", o: { description: "Watch a build." }, check: "description", want: /doesn't say it notifies/, fix: /subscribes/ },
-    { name: "no inputs", o: { noInputs: true }, check: "tool", want: /lacks Wakeshift's inputs/, fix: /attached\.events/ },
+    { name: "no inputs", o: { noInputs: true }, check: "tool", want: /lacks Wakeshift's inputs/, fix: /attached\.registerTool/ },
     { name: "no block", o: { noBlock: true }, check: "subscribe", want: /no Wakeshift block/, fix: /call\.subscribe/ },
     { name: "the harness argument dropped", o: { dropHarness: true }, check: "subscribe", want: /Wakeshift's block, but no command to wait with/, fix: /call\.subscribe/ },
     { name: "error reply quoting a key", o: { errorText: "denied for wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV" }, check: "subscribe", want: /answered with an error: denied for wst_\[redacted\]/, fix: /--args/ },

@@ -3,8 +3,8 @@
 `wakeshift-cli` sets up a [Wakeshift](https://wakeshift.ai) app for your MCP server and checks that the server wakes agents. Your coding agent can run it for you, and it never shows the app's key to anyone: not on the screen, not in a link, not in the agent's transcript.
 
 ```sh
-npx -y @wakeshift/cli@0.1.0 init
-npx -y @wakeshift/cli@0.1.0 verify --url http://localhost:3000/mcp --tool watch_build --args '{"number":412}'
+npx -y @wakeshift/cli@0.1.1 init
+npx -y @wakeshift/cli@0.1.1 verify --url http://localhost:3000/mcp --tool watch_build --args '{"number":412}'
 ```
 
 It needs Node 22 or later, and has no dependencies beyond Node itself.
@@ -60,7 +60,7 @@ With your server running (and `.env` loaded), `verify` acts as an agent (Claude 
 | guard | nobody but verify is subscribed with those arguments |
 | trigger | the event is made to happen: `--trigger tool:<name>[:<json>]` calls one of your tools, `--trigger cmd:<command>` runs a command (a request to your webhook route), and without `--trigger` verify emits a test event itself |
 | wake | the event reaches verify's conversation within 30 seconds (`--timeout`) |
-| cleanup | verify's subscription is gone (through `unsubscribe_events`, or an `un<tool>` next to the tool) |
+| cleanup | verify's subscription is gone: it ended with the wake (a tool that subscribes with `once`), or verify ended it through `unsubscribe_events` or an `un<tool>` next to the tool |
 
 Each failure comes with what to fix. `verify` exits 0 only when nothing failed.
 

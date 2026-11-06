@@ -2,9 +2,11 @@
 
 What changed in each release of `@wakeshift/cli`.
 
-## Unreleased
+## 0.1.1 (2026-11-06)
 
 - **`verify`** subscribes as Claude Code (the tool's `harness` argument) and holds the stream as Claude Code's Monitor does: Wakeshift no longer gives a program it doesn't recognize a command to wait with, so the subscribe check failed against it. A tool whose reply has Wakeshift's block but no command still fails that check, and verify now unsubscribes after it.
+- **`verify`'s cleanup passes when the subscription ended with the wake**, as one made with `once` does (the quickstart's `start_crawl`), rather than warning that it couldn't unsubscribe.
+- **`verify`'s fixes name the SDKs' current API** (TypeScript `attached.registerTool` with `subscribes`, Go `wakeshift.AddTool`), from TypeScript 0.11.0 and Go v0.10.0 on.
 
 ## 0.1.0 (2026-11-04)
 

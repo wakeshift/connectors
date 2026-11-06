@@ -47,7 +47,7 @@ class Failed extends Error {
 export const isDevApp = (id: string) => /(^|-)(dev|test)\d*(-|$)/.test(id);
 
 const WRAP_FIX =
-  "Wrap the tool with attach's wrapper and subscribe the conversation in its handler: TypeScript attached.events(name, { subscribes: [event] }, handler) and call.subscribe(event, args); Go wakeshift.Events with wakeshift.Subscribes; Python @attached.tool(subscribes=[event]).";
+  "Wrap the tool with attach's wrapper and subscribe the conversation in its handler: TypeScript attached.registerTool(name, { …, subscribes: [event] }, handler) and call.subscribe(event, args); Go wakeshift.AddTool with wakeshift.Subscribes; Python @attached.tool(subscribes=[event]). A tool registered some other way is named in attach's wrap.";
 
 interface Options {
   url: string;
@@ -222,7 +222,7 @@ export async function runChecks(ctx: Ctx, out: Out, core: Core, o: Options): Pro
       if (!s) {
         throw new Failed(
           `${o.tool}'s description doesn't say it notifies: agents set Wakeshift's part of its reply aside without that sentence`,
-          "Declare the events the tool subscribes to (TypeScript attached.events(name, { subscribes: [event] }, handler); Go wakeshift.Subscribes; Python @attached.tool(subscribes=[event])): tools/list then adds the sentence.",
+          "Declare the events the tool subscribes to (TypeScript subscribes in attached.registerTool's config; Go wakeshift.Subscribes; Python @attached.tool(subscribes=[event])): tools/list then adds the sentence.",
         );
       }
       if (!s.descriptions.length) return { detail: "says it notifies (notifies' own wording); declaring subscribes writes it from the events' descriptions", value: s, status: "warn" };
@@ -461,6 +461,18 @@ class Stop extends Error {}
 async function cleanup(core: Core, mcp: McpClient, o: Options, checks: Check[], session: string | null, ev: EventDef | null, eventArgs: Record<string, unknown> | null, tools: Tool[], subscriptionId: string | null): Promise<void> {
   const has = (n: string) => tools.some((t) => t.name === n);
   const sk = session ? { session_key: session } : {};
+  // A subscription made with once ends with the wake: nothing to undo.
+  if (ev && eventArgs) {
+    try {
+      const st = await core.eventStatus(ev.name, eventArgs, ev.personal ? o.user : undefined);
+      if (st.subscriptions === 0) {
+        checks.push({ name: "cleanup", status: "pass", detail: "nothing left to unsubscribe: the subscription ended with the wake (once)" });
+        return;
+      }
+    } catch {
+      // unsubscribe below
+    }
+  }
   let how = "";
   try {
     if (ev && eventArgs && has("unsubscribe_events")) {
