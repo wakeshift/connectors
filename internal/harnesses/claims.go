@@ -15,7 +15,7 @@ import "strings"
 // would do (Recognize). A claim that contradicts what the call was
 // recognized as is ignored (Refine).
 
-// The tool arguments' names, as the SDK's ws.args and appkit's Args have
+// The tool arguments' names, as the SDK's ws.args and wakeshift's Args have
 // them.
 const (
 	SessionArg      = "session_key"
@@ -140,10 +140,4 @@ func Refine(detected Harness, ok bool, claim string) (Harness, Outcome) {
 		return c, Refined
 	}
 	return detected, Ignored
-}
-
-// AskNote asks the agent to say which program it runs in and its
-// conversation's ID, when they'd change its instructions.
-func AskNote() string {
-	return "To give you the right instructions, call this again with " + HarnessArg + " and " + ConversationArg + "."
 }

@@ -21,10 +21,10 @@ func TestUpdateNotes(t *testing.T) {
 		}
 		install := UpdateCommand(h, base)
 		n := UpdateNote(h, base)
-		wants := []string{Outdated(h), "Ask the user now whether to update them", "Only if they agree, run `" + install + "`.", Route(h, base).AfterUpdate, `"` + Connected + `" confirms it`, "held for you"}
+		wants := []string{Outdated(h), "Ask the user now whether to update them", "Only if they agree, run `" + install + "`.", Route(h, base).AfterUpdate, "they deliver to this conversation again by themselves: don't call this app's tools again for it"}
 		if h.AskTool != "" { // Claude Code: its AskUserQuestion, two options, and the user's own shell if refused
 			wants = []string{Outdated(h), "with your " + h.AskTool + " tool", `"` + UpdateYes(h) + `"`, `"` + UpdateNo + `"`, "Only if they agree (they pick yes), run `" + install + "`",
-				"typing `" + h.UserShell + " " + install + "`", Route(h, base).AfterUpdate, `"` + Connected + `" confirms it`}
+				"typing `" + h.UserShell + " " + install + "`", Route(h, base).AfterUpdate, "they deliver to this conversation again by themselves"}
 		}
 		for _, want := range wants {
 			if !strings.Contains(n, want) {

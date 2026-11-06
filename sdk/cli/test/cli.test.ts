@@ -265,8 +265,10 @@ test("verify: passes with a tool trigger, the subscription found by list_subscri
     ]);
     assert.match(checks.find((x) => x.name === "arguments")!.detail, /\{"number":412,"pipeline":"acme-web-1a2b"\} \(from list_subscriptions\)/);
     assert.equal(core.subs.filter((s) => !s.ended).length, 0);
-    // An unrecognized client, as a generic agent.
+    // Its own client name, subscribing as Claude Code (the harness argument),
+    // with the tool's own arguments.
     assert.deepEqual(mcp.calls[0].client, { name: "wakeshift-verify", version: "1" });
+    assert.deepEqual(mcp.calls.find((x) => x.name === "watch_build")!.args, { harness: "claude-code", number: 412 });
     // The stream link and session key never show.
     assert.ok(!c.out.includes("link1x") && !c.out.includes("wsc_secret"));
   } finally {
@@ -363,6 +365,7 @@ test("verify: each failure says what to fix", async () => {
     { name: "no sentence", o: { description: "Watch a build." }, check: "description", want: /doesn't say it notifies/, fix: /subscribes/ },
     { name: "no inputs", o: { noInputs: true }, check: "tool", want: /lacks Wakeshift's inputs/, fix: /attached\.events/ },
     { name: "no block", o: { noBlock: true }, check: "subscribe", want: /no Wakeshift block/, fix: /call\.subscribe/ },
+    { name: "the harness argument dropped", o: { dropHarness: true }, check: "subscribe", want: /Wakeshift's block, but no command to wait with/, fix: /call\.subscribe/ },
     { name: "error reply quoting a key", o: { errorText: "denied for wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV" }, check: "subscribe", want: /answered with an error: denied for wst_\[redacted\]/, fix: /--args/ },
     { name: "no tool", o: {}, args: ["--tool", "nope"], check: "tool", want: /lists no tool nope/, fix: /--tool/ },
     { name: "a trigger that leaks", o: {}, args: ["--trigger", "tool:leak"], check: "trigger", want: /wst_\[redacted\]/, fix: /arguments/ },

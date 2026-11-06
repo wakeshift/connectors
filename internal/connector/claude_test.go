@@ -148,3 +148,39 @@ func TestClaudeInstallFiles(t *testing.T) {
 		t.Fatal("a plain-http issuer")
 	}
 }
+
+// The plugin's session-context hook (SessionStart) adds the mark for the
+// model to pass as an app's harness argument, not under claude -p; any other
+// event named session-context adds nothing.
+func TestClaudeSessionContext(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_SESSION_ATTENDED", "")
+	in, err := claudeFormat{}.ParseEvent(ClaudeSessionContextEvent, []byte(`{"session_id":"s1","transcript_path":"/x.jsonl","hook_event_name":"SessionStart","source":"startup"}`))
+	if err != nil || in.Event != SessionContext || in.Conversation != "s1" {
+		t.Fatalf("parse: %+v %v", in, err)
+	}
+	if in, _ := (claudeFormat{}).ParseEvent(ClaudeSessionContextEvent, []byte(claudeStop)); in.Event != OtherEvent {
+		t.Fatalf("a Stop read as the session's context: %+v", in)
+	}
+	if in, _ := (claudeFormat{}).ParseEvent("", []byte(claudeStop)); in.Event != Stop {
+		t.Fatalf("no event: %+v", in)
+	}
+	const mark = "claude-code; wakeshift-plugin=1.0; trusts=0123456789abcdef"
+	out, ok := claudeFormat{}.SessionContext(mark)
+	var o struct {
+		HookSpecificOutput struct {
+			HookEventName     string `json:"hookEventName"`
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if !ok || json.Unmarshal(out.Stdout, &o) != nil || o.HookSpecificOutput.HookEventName != "SessionStart" ||
+		!strings.Contains(o.HookSpecificOutput.AdditionalContext, `pass harness="`+mark+`"`) {
+		t.Fatalf("context: %s %v", out.Stdout, ok)
+	}
+	if _, ok := (claudeFormat{}).SessionContext(""); ok {
+		t.Error("context with no mark")
+	}
+	t.Setenv("CLAUDE_CODE_SESSION_ATTENDED", "0")
+	if _, ok := (claudeFormat{}).SessionContext(mark); ok {
+		t.Error("context under claude -p")
+	}
+}

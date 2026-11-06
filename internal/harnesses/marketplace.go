@@ -37,10 +37,10 @@ type Marketplace struct {
 	// for the plugin route ("" keeps the harness's).
 	Changes, Run, Trust, Resume, AfterUpdate string
 	// Reload: a running session loads the plugin only when the user says
-	// (Claude Code's /reload-plugins), so after the install the agent keeps
-	// what wakes it now running and calls the tool again only after the
-	// user's message (reloadNote), where Wakeshift's installer's hooks
-	// worked in the running session at once.
+	// (Claude Code's /reload-plugins), so after the install the user sends
+	// a message once they've loaded it, and the waiter that runs when that
+	// turn ends connects the conversation (connector.installedSince), where
+	// Wakeshift's installer's hooks worked in the running session at once.
 	Reload bool
 }
 

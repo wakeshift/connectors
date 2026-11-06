@@ -215,6 +215,8 @@ func (w *Window) Watch(ctx context.Context) <-chan string {
 		t := time.NewTicker(every)
 		defer t.Stop()
 		giveUp := time.Now().Add(bindWithin)
+		first := true
+		stale := "" // why the window first bound was already gone
 		for {
 			select {
 			case <-ctx.Done():
@@ -229,9 +231,32 @@ func (w *Window) Watch(ctx context.Context) <-chan string {
 					continue
 				}
 			}
-			if open, why, err := w.Open(ctx, b); err == nil && !open {
+			if stale != "" {
+				// A window that closed before the connector started is
+				// the one before a restart (codex resume, then the user's
+				// first prompt starts the connector before the log shows
+				// the new TUI's resume): look for the new one until
+				// bindWithin, and only then take the old one's word.
+				if nb, found := w.Bind(ctx); found && nb != b {
+					b, stale = nb, ""
+				} else if time.Now().After(giveUp) {
+					out <- stale
+					return
+				} else {
+					continue
+				}
+			}
+			open, why, err := w.Open(ctx, b)
+			if err == nil && !open {
+				if first {
+					stale, first = why, false
+					continue
+				}
 				out <- why
 				return
+			}
+			if err == nil {
+				first = false
 			}
 		}
 	}()

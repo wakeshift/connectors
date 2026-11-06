@@ -46,7 +46,7 @@ The app and key in `.env`, and whether Wakeshift has your server's events yet (y
 npx -y @wakeshift/cli verify --url <mcp url> --tool <name> [--args <json>] [--trigger tool:<name>[:<json>] | --trigger cmd:<command>] [--header-env <NAME>] [--json]
 ```
 
-With your server running (and `.env` loaded), `verify` acts as an agent:
+With your server running (and `.env` loaded), `verify` acts as an agent (Claude Code, as the tool's `harness` argument says, holding the stream as its Monitor does):
 
 | Check | Passes when |
 | --- | --- |

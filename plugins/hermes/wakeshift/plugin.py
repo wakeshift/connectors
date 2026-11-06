@@ -45,10 +45,13 @@ be tested without them (``__init__.register`` wires it in).
    not the model said so, even where the app never sees Hermes's client name.
    It names the program only: what a beacon is redeemed for, and for which
    conversation, is checked as before. A call that passes no session_key gets
-   this conversation's own for that app (session_key_for): the one Wakeshift
-   gave it in the result whose beacon connected it, from the MCP server
-   pinned to that app, checked against the session the redeem answered,
-   never another conversation's or another app's.
+   this conversation's own for that app (session_key_for): the one Wakeshift's
+   redeem answered for this conversation when the beacon connected it, from
+   the MCP server pinned to that app, never another conversation's or another
+   app's. So the model never has to pass it: Hermes shows MCP results to the
+   model as untrusted data, and models often won't pass a key from one. (From
+   a Wakeshift whose redeem doesn't answer it: the one that result tells the
+   model to pass back, if it names the session the redeem answered.)
 6. A beacon it should act on but can't (Wakeshift unreachable for its keys or
    the redeem, after a few quick tries) is logged and the result says so, with
    how to retry: never dropped silently.
@@ -664,7 +667,7 @@ class Wakeshift:
         held = prior or legacy
         supersedes = held["link"] if held and _same_origin(held["link"], claims.get("iss", "")) else ""
         try:
-            link, session = _redeem(claims, session_id, call, supersedes, sleep=self.sleep)
+            link, session, redeemed_key = _redeem(claims, session_id, call, supersedes, sleep=self.sleep)
         except Outdated as e:
             log.warning("wakeshift: Wakeshift refused this plugin's version: %s", e)
             return wire.add_note(stripped, NOTE_OUTDATED.format(e))
@@ -678,10 +681,11 @@ class Wakeshift:
             # A link on another host would get the token: refused, unused.
             return wire.add_note(stripped, NOTE_FAILED.format("its stream link wasn't on the Wakeshift this plugin trusts"))
         # The session_key Wakeshift gave the conversation for this app: the
-        # one this result tells it to pass back that names the session the
-        # redeem just answered for this conversation (wire.session_key_in),
-        # never a line the tool's own text may carry.
-        handle = wire.session_key_in(stripped, session)
+        # one the redeem just answered for this conversation; from an older
+        # Wakeshift, the one this result tells it to pass back that names
+        # the session the redeem answered (wire.session_key_in). Never a
+        # line the tool's own text may carry.
+        handle = redeemed_key or wire.session_key_in(stripped, session)
         with self.lock:
             if handle:
                 self.handles[(session_id, key)] = handle
@@ -1039,8 +1043,8 @@ UNAVAILABLE = {502, 503, 504}
 
 def _redeem(claims: dict, conversation: str, call: str, supersedes: str = "", sleep: Callable[[float], None] = time.sleep) -> tuple:
     """POST <redeem> {"ticket", "thread"[, "call", "supersedes"]} -> the conversation's
-    stream link and its session's handle (<agent>@<label>; "" if the answer
-    has none), tried again (RETRY_WAITS) when Wakeshift couldn't be reached or
+    stream link, its session's handle (<agent>@<label>; "" if the answer
+    has none) and its session_key ("" if the answer has none), tried again (RETRY_WAITS) when Wakeshift couldn't be reached or
     answered that it's unavailable."""
     for wait in RETRY_WAITS + (None,):
         try:
@@ -1102,7 +1106,7 @@ def _redeem_once(claims: dict, conversation: str, call: str, supersedes: str = "
     except ValueError:
         raise RedeemError("Wakeshift's answer had no link")
     session = out.get("session")
-    return url, (session if isinstance(session, str) and len(session) <= 512 else "")
+    return url, (session if isinstance(session, str) and len(session) <= 512 else ""), wire.redeemed_key(out.get("session_key"))
 
 
 def _get(url: str) -> Optional[bytes]:

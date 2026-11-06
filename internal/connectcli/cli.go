@@ -61,11 +61,14 @@ var Confirm = func(question string) (bool, error) {
 	return a == "y" || a == "yes", nil
 }
 
-// AfterInstall is the installer's last line: an agent that ran it for its
-// conversation calls the app's tool again, since the hooks connect a
-// conversation only from a beacon in a result that comes after the install.
-const AfterInstall = "In the conversation that asked for this install: tell the user the step above, if there is one, and once it's done (if it needs nothing from them, right away, without waiting for them) call the app's tool that offered the install again. " +
-	"The hooks connect a conversation only from a tool result that comes after the install, so until that call they can't wake it."
+// AfterInstall is the installer's last line, for the agent that ran it:
+// relay the harness's step, and don't call the app's tool again to
+// connect. That tool may have side effects (it sends a message, starts a
+// paid job); the hooks connect the conversation by themselves (Claude
+// Code's waiter, from the transcript: connector.installedSince) or from
+// the next result of the app's tools the agent calls anyway.
+const AfterInstall = "In the conversation that asked for this install: tell the user the step above, if there is one. " +
+	"Don't call the app's tools again just to connect: the hooks connect the conversation by themselves, or from the next result of the app's tools you call anyway."
 
 // lease: a Codex connector whose thread nobody but it has used for this
 // long stops (the app's next result for the thread starts it again).
@@ -258,6 +261,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			switch {
 			case h.ReplacedBy != "":
 				how = "retired: " + h.Blocker
+			case !h.Installable && h.ZeroInstall == harnesses.Background:
+				how += ": nothing to install"
 			case !h.Installable:
 				how = "not yet: " + h.Blocker
 			}

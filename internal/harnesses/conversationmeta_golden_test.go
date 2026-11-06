@@ -12,7 +12,7 @@ import (
 // The TypeScript and Python SDKs' wrapped tools ask Wakeshift for a call's
 // block only when something names the conversation: a session_key, a
 // conversation_id, or a harness's conversation in the call's _meta (as
-// appkit does with Conversation). conversationMetaGolden lists those _meta
+// wakeshift does with Conversation). conversationMetaGolden lists those _meta
 // keys (ConversationMeta, dotted for nested objects); this test checks it's
 // current (go test -run TestConversationMetaGolden -update-meta rewrites
 // it), and the SDKs' tests read it.

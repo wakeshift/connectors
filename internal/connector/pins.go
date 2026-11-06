@@ -172,7 +172,7 @@ func MCPToolOf(tool string) string {
 func noRedirects(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 // NotePinned is the note for a beacon refused by the pins.
-const NotePinned = "Wakeshift: didn't connect this conversation: %s. If that's the server you use for this app (you renamed or re-added it), remove its line from %s and call the app's tool again."
+const NotePinned = "Wakeshift: didn't connect this conversation: %s. If that's the server you use for this app (you renamed or re-added it), remove its line from %s: the next result of the app's tools then connects it."
 
 // NotePinFile is the note when the pins can't be read.
-const NotePinFile = "Wakeshift: didn't connect this conversation: %s can't be read, so Wakeshift can't check which MCP server carries this app's messages. Fix the file, or remove it to start over, and call the app's tool again."
+const NotePinFile = "Wakeshift: didn't connect this conversation: %s can't be read, so Wakeshift can't check which MCP server carries this app's messages. Fix the file, or remove it to start over: the next result of the app's tools then connects it."

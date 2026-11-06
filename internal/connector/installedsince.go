@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,69 +27,71 @@ type FoundBeacon struct {
 	ToolName string // as the harness names the tool (mcp__<server>__<tool>)
 }
 
-// NoteInstalledSince wakes an agent whose hooks were installed after the
-// last result that could have connected its conversation: nothing will
-// connect it until the agent calls the tool again. In wakebench S11 an
-// agent that installed mid-conversation took "nothing to approve" as done,
-// never called another tool, and missed its turns.
-const NoteInstalledSince = "Wakeshift: its hooks were installed after your last result from %s, so they haven't connected this conversation and can't wake it yet. " +
-	"Call %s again now, without waiting for the user: its result connects them."
-
 // installedSinceWindow: a beacon older than this is from a conversation
-// the user has moved on from; resuming it doesn't wake the agent.
+// the user has moved on from; the waiter doesn't connect from it. The core
+// accepts a late redeem for as long (appapi.LateRedeemWithin).
 const installedSinceWindow = time.Hour
 
-// installedSince, for a waiter whose conversation has no link, wakes the
-// agent once to call the tool again when the conversation's newest beacon
-// came before the hooks were installed (so no hook saw it), within the
-// last hour. The beacon is checked as a hook would (signed by an issuer
-// trusted here, bound to its call, from the tool it names), except for its
-// expiry: it's evidence the conversation asked to be woken, not redeemed.
-// Once per conversation, so an agent that doesn't connect isn't woken
-// again and again.
-func (h *Hook) installedSince(ctx context.Context, in Input) (Output, bool) {
+// installedSince, for a waiter whose conversation has no link, connects
+// the conversation from the newest beacon in its own record (Claude Code's
+// transcript) when that beacon came before the hooks were installed (so no
+// hook saw it), within the last hour: the result that offered the install
+// went by before there was a hook to read it, and asking the agent to call
+// the tool again would repeat whatever that tool does (it may send a
+// message or start a paid job). The beacon is checked as a hook would
+// (signed by an issuer trusted here, bound to its call, from the tool it
+// names, from the server pinned to its app), except for its expiry, and
+// redeemed as a late redeem, which the core accepts only for a session no
+// connector has connected yet, within the hour. The "connected" note then
+// comes with the first wake. Once per conversation (a marker in nudged/),
+// so a conversation whose late redeem is refused isn't tried at every
+// stop; it connects from the next result of the app's tools instead.
+// Reports whether it connected the conversation.
+func (h *Hook) installedSince(ctx context.Context, in Input) bool {
 	hf, ok := h.Format.(HistoryFormat)
 	if !ok || h.Verifier == nil {
-		return Output{}, false
+		return false
 	}
 	installed := h.Verifier.Settings.InstalledAt
 	if installed.IsZero() {
-		return Output{}, false
+		return false
 	}
 	marker := h.nudgedPath(in.Conversation)
 	if _, err := os.Stat(marker); err == nil {
-		return Output{}, false
+		return false
 	}
 	found, ok := hf.LastBeacon(in)
 	if !ok || found.Token == "" || found.Call == "" {
-		return Output{}, false
+		return false
 	}
 	iat := peekIssuedAt(found.Token)
 	if iat == 0 || !time.Unix(iat, 0).Before(installed) || time.Since(time.Unix(iat, 0)) > installedSinceWindow {
-		return Output{}, false
+		return false
 	}
 	v := *h.Verifier
 	v.Now = func() time.Time { return time.Unix(iat, 0) }
 	claims, err := v.VerifyBound(ctx, found.Token, beacon.Binding{Conversation: in.Conversation, Call: found.Call, Unbound: h.Unbound})
 	if err != nil {
-		return Output{}, false
+		return false
 	}
-	call := Input{Conversation: in.Conversation, ToolName: found.ToolName, MCPTool: MCPToolOf(found.ToolName), ToolCallID: found.Call}
+	call := Input{Conversation: in.Conversation, ToolName: found.ToolName, MCPTool: MCPToolOf(found.ToolName), Server: MCPServerOf(found.ToolName), ToolCallID: found.Call}
 	if !acceptable(claims, InResultMeta, call) {
-		return Output{}, false
+		return false
 	}
-	tool := safeToolName(found.ToolName)
-	out, ok := h.Format.Continue(in, fmt.Sprintf(NoteInstalledSince, tool, tool))
-	if !ok {
-		return Output{}, false
-	}
-	// Said once: if the marker can't be written, say nothing rather than
-	// risk waking the agent on every stop.
+	// Tried once: if the marker can't be written, don't try at all rather
+	// than at every stop.
 	if os.MkdirAll(filepath.Dir(marker), 0o700) != nil || os.WriteFile(marker, nil, 0o600) != nil {
-		return Output{}, false
+		return false
 	}
-	h.why = "told the agent to call its tool again: the hooks were installed after its last beacon"
-	return out, true
+	note := h.connectVerified(ctx, call, claims, in.Conversation, true)
+	if h.Links.Load(in.Conversation) == "" {
+		h.why = "couldn't connect from the beacon before the install: " + note
+		return false
+	}
+	// Said with the first wake (listen puts a saved note before it).
+	h.saveNote(in.Conversation, note)
+	h.why = "connected from the result before the install"
+	return true
 }
 
 func (h *Hook) nudgedPath(conversation string) string {
@@ -115,22 +116,4 @@ func peekIssuedAt(token string) int64 {
 		return 0
 	}
 	return c.IssuedAt
-}
-
-// safeToolName is a tool name fit to quote to the model: letters, digits,
-// _ and - only (Claude Code's own tool names are), at most 128 characters.
-func safeToolName(name string) string {
-	var b strings.Builder
-	for _, r := range name {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' {
-			b.WriteRune(r)
-		}
-		if b.Len() >= 128 {
-			break
-		}
-	}
-	if b.Len() == 0 {
-		return "the app's tool"
-	}
-	return b.String()
 }

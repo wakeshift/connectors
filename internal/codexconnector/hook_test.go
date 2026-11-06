@@ -84,6 +84,7 @@ type fakeWakeshift struct {
 	*httptest.Server
 	key      ed25519.PrivateKey
 	redeemed []string
+	late     []bool // each redeem's "late"
 	status   int
 }
 
@@ -96,9 +97,13 @@ func newFakeWakeshift(t *testing.T) *fakeWakeshift {
 			"x": base64.RawURLEncoding.EncodeToString(pub)}}})
 	})
 	mux.HandleFunc("POST /v1/connector/redeem", func(w http.ResponseWriter, r *http.Request) {
-		var in struct{ Ticket, Thread string }
+		var in struct {
+			Ticket, Thread string
+			Late           bool
+		}
 		json.NewDecoder(r.Body).Decode(&in)
 		f.redeemed = append(f.redeemed, in.Ticket+"@"+in.Thread)
+		f.late = append(f.late, in.Late)
 		w.WriteHeader(f.status)
 		if f.status == http.StatusUpgradeRequired {
 			json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": "update_required", "message": "Wakeshift's hooks for Codex are out of date. Ask the user."}})

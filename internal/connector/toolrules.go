@@ -231,7 +231,7 @@ func (s Spec) changeTools(app string, out io.Writer, change func(*appTools)) err
 	if errors.As(err, &unreadable) {
 		// The answer is kept, and a no's rules are gone; new ones wait for
 		// the pins to be readable.
-		fmt.Fprintf(out, "Wakeshift can't read %s, so it adds no rules for now; fix or remove that file, then call the app's tool again.\n", unreadable.Path)
+		fmt.Fprintf(out, "Wakeshift can't read %s, so it adds no rules for now; fix or remove that file, and the next connect adds them.\n", unreadable.Path)
 		err = nil
 	}
 	if err != nil {

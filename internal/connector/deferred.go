@@ -45,6 +45,13 @@ func (h *Hook) connect(ctx context.Context, in Input, token string, carried Carr
 	if err != nil || !acceptable(claims, carried, in) {
 		return ""
 	}
+	return h.connectVerified(ctx, in, claims, conv, false)
+}
+
+// connectVerified is connect once the beacon checks out: the server's pin,
+// the redeem, and the link kept. late: a beacon from the conversation's
+// own record, minted before the hooks were installed (installedSince).
+func (h *Hook) connectVerified(ctx context.Context, in Input, claims beacon.Claims, conv string, late bool) string {
 	if in.Server != "" {
 		var pinned *ErrPinned
 		var unreadable *ErrPinFile
@@ -77,7 +84,7 @@ func (h *Hook) connect(ctx context.Context, in Input, token string, carried Carr
 	if held == "" {
 		held = h.Links.LoadFor(in.Conversation, "") // saved before links named their app
 	}
-	link, app, err := redeemHeld(ctx, h.HTTP, h.Harness, claims, conv, call, held, h.WaitCommand)
+	link, app, err := redeemHeld(ctx, h.HTTP, h.Harness, claims, conv, call, held, h.WaitCommand, late)
 	var outdated *UpdateRequired
 	if errors.As(err, &outdated) {
 		return fmt.Sprintf(NoteOutdated, outdated.Message)

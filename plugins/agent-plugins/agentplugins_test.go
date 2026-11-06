@@ -286,6 +286,15 @@ func TestClaudeCodePlugin(t *testing.T) {
 	if len(hooks.Hooks) != len(want) {
 		t.Fatalf("events: %v", hooks.Hooks)
 	}
+	// SessionStart's first entry tells the model the plugin's mark
+	// (internal/pluginmark): a plain hook, run once per session; the waiter
+	// is the second.
+	start := hooks.Hooks["SessionStart"]
+	if len(start) != 2 || len(start[0].Hooks) != 1 || strings.Join(start[0].Hooks[0].Args, " ") != "${CLAUDE_PLUGIN_ROOT}/bin/wakeshift --issuer ${user_config.issuer} hook --harness claude-code --event "+connector.ClaudeSessionContextEvent ||
+		start[0].Hooks[0].Async || start[0].Hooks[0].AsyncRewake || start[0].Hooks[0].Timeout != 60 {
+		t.Fatalf("SessionStart: %+v", start)
+	}
+	hooks.Hooks["SessionStart"] = start[1:]
 	for ev, tail := range want {
 		g := hooks.Hooks[ev]
 		if len(g) != 1 || len(g[0].Hooks) != 1 {
@@ -296,8 +305,15 @@ func TestClaudeCodePlugin(t *testing.T) {
 		if h.Command != "/bin/sh" || args != "${CLAUDE_PLUGIN_ROOT}/bin/wakeshift --issuer ${user_config.issuer} "+tail {
 			t.Fatalf("%s: %+v", ev, h)
 		}
-		if ev == "PostToolUse" && (g[0].Matcher != "mcp__.*" || !h.Async || h.Timeout != 30) || ev != "PostToolUse" && (!h.AsyncRewake || h.Timeout != 86400) {
-			t.Fatalf("%s: %+v", ev, g[0])
+		switch ev {
+		case "PostToolUse":
+			if g[0].Matcher != "mcp__.*" || !h.Async || h.Timeout != 30 {
+				t.Fatalf("%s: %+v", ev, g[0])
+			}
+		default:
+			if !h.AsyncRewake || h.Timeout != 86400 {
+				t.Fatalf("%s: %+v", ev, g[0])
+			}
 		}
 		// The waiters' wakes are presented as the installer's are.
 		if ev != "PostToolUse" && (h.RewakeSummary != connector.ClaudeRewakeSummary || h.RewakeMessage != connector.ClaudeRewakeMessage) {

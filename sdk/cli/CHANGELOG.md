@@ -2,6 +2,10 @@
 
 What changed in each release of `@wakeshift/cli`.
 
+## Unreleased
+
+- **`verify`** subscribes as Claude Code (the tool's `harness` argument) and holds the stream as Claude Code's Monitor does: Wakeshift no longer gives a program it doesn't recognize a command to wait with, so the subscribe check failed against it. A tool whose reply has Wakeshift's block but no command still fails that check, and verify now unsubscribes after it.
+
 ## 0.1.0 (2026-11-04)
 
 The first release.

@@ -119,7 +119,10 @@ func TestInstallEach(t *testing.T) {
 	if out, code := run("wakeshift", "install", "--harness", "gemini", "--issuer", "https://app.wakeshift.ai", "--yes"); code != 1 || !strings.Contains(out, "unknown harness") {
 		t.Fatalf("gemini: %d %s", code, out)
 	}
-	if out, _ := run("wakeshift", "harnesses"); !strings.Contains(out, "retired: Google replaced Gemini CLI with Antigravity CLI (agy)") {
+	// Capy (a webhook watch it registers) and Muse (a command it starts):
+	// nothing to install (Muse's finishes with each batch: one-shot).
+	if out, _ := run("wakeshift", "harnesses"); !strings.Contains(out, "retired: Google replaced Gemini CLI with Antigravity CLI (agy)") ||
+		!strings.Contains(out, "Capy (agent-webhook: nothing to install)") || !strings.Contains(out, "Muse (one-shot: nothing to install)") {
 		t.Fatalf("harnesses: %s", out)
 	}
 	// An unknown harness's hook still never fails the harness.

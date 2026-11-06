@@ -19,6 +19,8 @@ import { Stream, StreamClosed, sessionKeyOf, waitUrlOf } from "./stream.js";
 
 /** Wakeshift's arguments on every wrapped tool. */
 export const WAKESHIFT_INPUTS = ["session_key", "harness", "conversation_id"];
+/** The harness verify says it is when it subscribes (the tool's harness argument). */
+export const VERIFY_HARNESS = "claude-code";
 /** attach's own tools. */
 export const ATTACH_TOOLS = ["subscribe_events", "unsubscribe_events", "list_subscriptions"];
 
@@ -45,7 +47,7 @@ class Failed extends Error {
 export const isDevApp = (id: string) => /(^|-)(dev|test)\d*(-|$)/.test(id);
 
 const WRAP_FIX =
-  "Wrap the tool with attach's wrapper and subscribe the conversation in its handler: TypeScript attached.events(name, { subscribes: [event] }, handler) and call.subscribe(event, args); Go appkit.Events with appkit.Subscribes; Python @attached.tool(subscribes=[event]).";
+  "Wrap the tool with attach's wrapper and subscribe the conversation in its handler: TypeScript attached.events(name, { subscribes: [event] }, handler) and call.subscribe(event, args); Go wakeshift.Events with wakeshift.Subscribes; Python @attached.tool(subscribes=[event]).";
 
 interface Options {
   url: string;
@@ -220,7 +222,7 @@ export async function runChecks(ctx: Ctx, out: Out, core: Core, o: Options): Pro
       if (!s) {
         throw new Failed(
           `${o.tool}'s description doesn't say it notifies: agents set Wakeshift's part of its reply aside without that sentence`,
-          "Declare the events the tool subscribes to (TypeScript attached.events(name, { subscribes: [event] }, handler); Go appkit.Subscribes; Python @attached.tool(subscribes=[event])): tools/list then adds the sentence.",
+          "Declare the events the tool subscribes to (TypeScript attached.events(name, { subscribes: [event] }, handler); Go wakeshift.Subscribes; Python @attached.tool(subscribes=[event])): tools/list then adds the sentence.",
         );
       }
       if (!s.descriptions.length) return { detail: "says it notifies (notifies' own wording); declaring subscribes writes it from the events' descriptions", value: s, status: "warn" };
@@ -276,7 +278,10 @@ export async function runChecks(ctx: Ctx, out: Out, core: Core, o: Options): Pro
     await check("subscribe", async () => {
       let r: ToolResult;
       try {
-        r = await mcp.callTool(o.tool, { ...o.args });
+        // As Claude Code: Wakeshift gives a program it doesn't recognize
+        // no command to wait with (it can't wake it), so verify says which
+        // program it holds the stream as, and reads the Monitor's command.
+        r = await mcp.callTool(o.tool, { harness: VERIFY_HARNESS, ...o.args });
       } catch (err) {
         throw new Failed(err instanceof Error ? err.message : String(err), "Check --args against the tool's input schema.");
       }
@@ -285,7 +290,11 @@ export async function runChecks(ctx: Ctx, out: Out, core: Core, o: Options): Pro
       session = sessionKeyOf(text);
       const wait = waitUrlOf(text);
       if (!wait) {
-        if (/Wakeshift/.test(text)) throw new Failed("the reply has Wakeshift's block, but no command to wait with", "Check the tool subscribes the calling conversation (call.subscribe) rather than relaying another result.");
+        if (/Wakeshift/.test(text)) {
+          // It subscribed all the same: clean up after it.
+          subscribed = !!session;
+          throw new Failed("the reply has Wakeshift's block, but no command to wait with", "Check the tool subscribes the calling conversation (call.subscribe), passing Wakeshift's arguments (harness, session_key) through, rather than relaying another result.");
+        }
         throw new Failed(`${o.tool}'s reply has no Wakeshift block, so it didn't subscribe the conversation`, WRAP_FIX);
       }
       subscribed = true;

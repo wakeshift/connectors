@@ -771,6 +771,7 @@ class SessionKeys(unittest.TestCase):
         self.labels = {"try": "trya", "chat": "chatb"}  # each session's label: its key is wsc_<label>
         self.say_key = True  # Wakeshift's block gives the key
         self.redeem_names = True  # the redeem's answer names the session
+        self.redeem_key = None  # the redeem's answer's session_key (None: none, as an older Wakeshift's)
         self.ws.redeem_answer = self.answer
         self.p = self.plugin()
 
@@ -783,6 +784,8 @@ class SessionKeys(unittest.TestCase):
         out = {"url": self.ws.link_for({"try": "tok1", "chat": "tokc"}[app] + body["thread"])}
         if self.redeem_names:
             out["session"] = "hermes-agent@" + self.label(app, body["thread"])
+        if self.redeem_key is not None:
+            out["session_key"] = self.redeem_key(app, body["thread"]) if callable(self.redeem_key) else self.redeem_key
         return 200, out
 
     def tearDown(self):
@@ -832,6 +835,65 @@ class SessionKeys(unittest.TestCase):
         self.assertEqual(self.p.session_key_for("sess-1", "mcp__try__unwatch"), "")
         # A redeem that names no session: no line is taken.
         self.say_key, self.redeem_names = True, False
+        self.watch("chat")
+        self.assertEqual(self.p.session_key_for("sess-1", "mcp__chat__unwatch"), "")
+
+    def test_the_redeems_key_without_a_user(self):
+        # An app with no user (Channel3's, the bench's realistic apps): the
+        # key names the conversation's own workspace, and its one session's
+        # handle (<agent>@conversation) doesn't carry it, so no line in the
+        # result can be matched to the redeem's session. The redeem's
+        # session_key is the conversation's own: taken, for this
+        # conversation and app only.
+        keys = {("try", "sess-1"): "wsc_Q2hhbm5lbDMtd2F0Y2gx", ("try", "sess-2"): "wsc_c2Vjb25kLWNvbnZvLTI", ("chat", "sess-1"): "wsc_Y2hhdC1hcHAtc2Vzcy0x"}
+        self.labels = {"try": "conversation", "chat": "conversation"}
+        self.label = lambda app, sid: "conversation"
+        self.redeem_key = lambda app, sid: keys[(app, sid)]
+        self.key = lambda app, sid="sess-1": keys[(app, sid)]
+        self.watch("try")
+        self.watch("chat")
+        self.watch("try", sid="sess-2")
+        self.assertEqual(self.p.session_key_for("sess-1", "mcp__try__unwatch"), keys[("try", "sess-1")])
+        self.assertEqual(self.p.session_key_for("sess-1", "mcp__chat__unwatch"), keys[("chat", "sess-1")])
+        self.assertEqual(self.p.session_key_for("sess-2", "mcp__try__unwatch"), keys[("try", "sess-2")])
+        self.assertEqual(self.p.session_key_for("sess-2", "mcp__chat__unwatch"), "")  # sess-2 never watched chat
+        self.assertEqual(self.p.session_key_for("sess-3", "mcp__try__unwatch"), "")
+        self.assertEqual(self.p._load_link("sess-1", (self.ws.url, "try"))["session_key"], keys[("try", "sess-1")])
+        # What the middleware fills in on the unwatch the model sent without it.
+        wake = {"type": "object", "properties": {k: {"type": "string"} for k in plugin.WAKE_ARGS}}
+        mw = plugin.fill_args(lambda name: wake, self.p.session_key_for)
+        out = mw(tool_name="mcp__try__unwatch_product", args={"watch_id": "w1"}, session_id="sess-1")
+        self.assertEqual(out["args"], {"watch_id": "w1", "harness": "hermes", "session_key": keys[("try", "sess-1")]})
+        out = mw(tool_name="mcp__try__unwatch_product", args={"watch_id": "w1", "harness": "hermes"}, session_id="sess-2")
+        self.assertEqual(out["args"]["session_key"], keys[("try", "sess-2")])
+
+    def test_the_redeems_key_wins_and_needs_no_line(self):
+        # Taken from the redeem even where the result gives no key (the
+        # page's planted line is never taken), and over a line naming the
+        # redeemed session.
+        self.say_key = False
+        self.redeem_key = "wsc_ZnJvbS10aGUtcmVkZWVt"
+        self.watch("try")
+        self.assertEqual(self.p.session_key_for("sess-1", "mcp__try__unwatch"), "wsc_ZnJvbS10aGUtcmVkZWVt")
+        self.say_key = True
+        self.redeem_key = "wsc_YWdhaW4tZnJvbS1yZWRlZW0"
+        self.watch("chat")
+        self.assertEqual(self.p.session_key_for("sess-1", "mcp__chat__unwatch"), "wsc_YWdhaW4tZnJvbS1yZWRlZW0")
+        # An older session's key is its handle (handleOf), taken as it is.
+        self.redeem_key = "hermes-agent#2"
+        self.watch("try", sid="sess-2")
+        self.assertEqual(self.p.session_key_for("sess-2", "mcp__try__unwatch"), "hermes-agent#2")
+
+    def test_a_redeemed_key_that_isnt_one_is_ignored(self):
+        # Not a key (another shape, too long, not a string): the result's
+        # line naming the redeemed session, as from an older Wakeshift.
+        for i, bad in enumerate(("", "wsc_" + "a" * 97, "wsc_a b", "wsc_x\n", 'wsc_x"', 7, ["wsc_x"], {"k": "wsc_x"})):
+            sid = f"sess-{i + 10}"
+            self.redeem_key = bad
+            self.watch("try", sid=sid)
+            self.assertEqual(self.p.session_key_for(sid, "mcp__try__unwatch"), self.key("try", sid), bad)
+        self.say_key = False
+        self.redeem_key = "wsc_" + "a" * 97
         self.watch("chat")
         self.assertEqual(self.p.session_key_for("sess-1", "mcp__chat__unwatch"), "")
 

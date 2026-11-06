@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -19,6 +20,12 @@ import (
 //   - PostToolUse (async, MCP tools): find the result's _meta in the
 //     transcript by tool_use_id, verify the beacon (bound to that call),
 //     redeem it with the session ID.
+//   - SessionStart (Wakeshift's plugin only, --event session-context): add
+//     context telling the model the plugin's mark (internal/pluginmark) to
+//     pass as the harness argument of an app's tools, so the core leaves the
+//     install question and the Monitor out of the subscribing result. A
+//     PreToolUse hook can't set it: Claude Code's auto mode refuses a call
+//     whose input a hook changed after its review (2.1.316).
 //   - SessionStart and Stop (asyncRewake): wait on the session's link; on a
 //     message, write it to stderr and exit 2, which wakes the idle session
 //     (or reaches a busy one between tool calls). One waiter per Claude
@@ -210,6 +217,43 @@ func (claudeFormat) LastBeacon(in Input) (FoundBeacon, bool) {
 	}
 	found.ToolName = names[found.Call]
 	return found, found.ToolName != ""
+}
+
+// ClaudeSessionContextEvent is the --event of the plugin's SessionStart
+// hook that adds the mark's context (SessionContext).
+const ClaudeSessionContextEvent = "session-context"
+
+// ParseEvent: the plugin's session-context hook names its event; any
+// other hook is read as Parse reads it.
+func (f claudeFormat) ParseEvent(event string, b []byte) (Input, error) {
+	in, err := f.Parse(b)
+	if err != nil || event != ClaudeSessionContextEvent {
+		return in, err
+	}
+	var c claudeInput
+	json.Unmarshal(b, &c)
+	if c.HookEventName != "SessionStart" {
+		return Input{}, nil
+	}
+	return Input{Event: SessionContext, Conversation: c.SessionID}, nil
+}
+
+// ClaudeMarkNote is the context the plugin's SessionStart hook adds, with
+// the mark (%s) to pass.
+const ClaudeMarkNote = "Wakeshift's plugin is installed in this Claude Code session, so apps that notify through Wakeshift can wake this conversation by themselves, even while it's idle. " +
+	"When you call an app's tool that takes a `harness` argument, pass harness=%q (exactly this): it tells the app the plugin is here, so its result won't ask you to set notifications up."
+
+// SessionContext is the SessionStart output that adds the mark's note, if
+// there's a mark (none under claude -p, where nothing wakes the session).
+func (claudeFormat) SessionContext(mark string) (Output, bool) {
+	if mark == "" || ClaudeUnattended() {
+		return Output{}, false
+	}
+	b, err := json.Marshal(map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "SessionStart", "additionalContext": fmt.Sprintf(ClaudeMarkNote, mark)}})
+	if err != nil {
+		return Output{}, false
+	}
+	return Output{Stdout: append(b, '\n')}, true
 }
 
 func (claudeFormat) Context(in Input, text string) (Output, bool) {

@@ -225,6 +225,15 @@ def tool_matches(claim: Any, tool: str) -> bool:
 
 
 SESSION_KEY_RE = re.compile(r'Pass session_key="([A-Za-z0-9_@#:.~-]{1,100})"')
+# A session_key as Wakeshift's redeem answers it (wsc_<token>, or an older
+# session's handle), as SESSION_KEY_RE reads one.
+REDEEMED_KEY_RE = re.compile(r"[A-Za-z0-9_@#:.~-]{1,100}")
+
+
+def redeemed_key(v) -> str:
+    """The session_key in a redeem's answer, "" if it has none (an older
+    Wakeshift) or it isn't one."""
+    return v if isinstance(v, str) and REDEEMED_KEY_RE.fullmatch(v) else ""
 
 
 def session_key_in(result: str, session: str) -> str:

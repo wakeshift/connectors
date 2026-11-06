@@ -212,6 +212,8 @@ export interface FakeMcpOptions {
   noInputs?: boolean;
   /** watch_build replies without Wakeshift's block. */
   noBlock?: boolean;
+  /** watch_build leaves Wakeshift's harness argument out of what it subscribes with. */
+  dropHarness?: boolean;
   /** watch_build answers with this error text. */
   errorText?: string;
   /** attach's tools aren't served. */
@@ -276,15 +278,14 @@ export class FakeMcp {
         if (this.o.errorText) return text(this.o.errorText, true);
         if (this.o.noBlock) return text(`Watching build #${n}.`);
         const sub = this.core.subscribe(BUILD_FINISHED.name, { pipeline: this.pipeline, number: n });
-        return {
-          content: [
-            { type: "text", text: `Watching build #${n}.` },
-            {
-              type: "text",
-              text: `Wakeshift can't wake this agent yet, so new messages are held for you. If you can run a command in the background: start this command in the background now: u='${this.core.waitUrl(sub)}'; c=; p=$PPID; while :; do …; done . Pass session_key="wsc_secretsessionkey${sub.id.slice(-2)}" on your next calls.`,
-            },
-          ],
-        };
+        const key = `Pass session_key="wsc_secretsessionkey${sub.id.slice(-2)}" to this app's tools from now on.`;
+        // As the core answers: the Monitor's command for Claude Code, and
+        // for a program it doesn't recognize only that it can't wake it.
+        const block =
+          args.harness === "claude-code" && !this.o.dropHarness
+            ? `To be woken when Shipyard sends something, start the Monitor tool now (timeout_ms 1800000) with this command: u='${this.core.waitUrl(sub)}&until=hooks&timeout=50s'; c=; p=$PPID; while :; do …; done . ${key}`
+            : `Wakeshift can't wake this agent, so nothing will notify you here when something arrives. ${key}`;
+        return { content: [{ type: "text", text: `Watching build #${n}.` }, { type: "text", text: block }] };
       }
       case "unwatch_build":
       case "unsubscribe_events": {

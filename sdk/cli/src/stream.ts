@@ -1,8 +1,8 @@
-// Holding a conversation's stream as a generic agent does: the wait URL
-// from Wakeshift's block in a tool's reply (the command it offers an
-// agent it doesn't recognize, internal/harnesses GenericLoop), read in
-// rounds with the cursor, confirming what arrived. The URL is a
-// capability: it's never printed.
+// Holding a conversation's stream as Claude Code's Monitor does: the wait
+// URL from Wakeshift's block in a tool's reply (the command it offers
+// Claude Code, internal/harnesses MonitorLoop), read in rounds with the
+// cursor, confirming what arrived. The URL is a capability: it's never
+// printed.
 
 import { clip } from "./redact.js";
 
@@ -34,11 +34,15 @@ export class StreamClosed extends Error {}
 
 export class Stream {
   private cursor = "";
+  private url: string;
   constructor(
-    private url: string,
+    url: string,
     private fetchFn: typeof fetch,
     private roundSeconds = 10,
-  ) {}
+  ) {
+    // Each round sets its own timeout (the command's is for its rounds).
+    this.url = url.replace(/&timeout=[^&]*/, "");
+  }
 
   /** Waits until an event matching match arrives, or deadline (ms since the epoch). Null on timeout. */
   async next(deadline: number, match: (e: StreamEvent) => boolean, now = Date.now): Promise<StreamEvent | null> {

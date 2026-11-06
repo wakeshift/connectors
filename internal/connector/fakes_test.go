@@ -31,6 +31,8 @@ type fakeWakeshift struct {
 	tool string
 	// held is the link each redeem said the hook held ("" for none).
 	held []string
+	// late is whether each redeem said it was late (installedSince).
+	late []bool
 	// app, if set, is what redeems say about the beacon's app.
 	app *RedeemedApp
 }
@@ -45,11 +47,15 @@ func newFakeWakeshift(t *testing.T) *fakeWakeshift {
 			"x": base64.RawURLEncoding.EncodeToString(pub)}}})
 	})
 	mux.HandleFunc("POST /v1/connector/redeem", func(w http.ResponseWriter, r *http.Request) {
-		var in struct{ Ticket, Thread, Held string }
+		var in struct {
+			Ticket, Thread, Held string
+			Late                 bool
+		}
 		json.NewDecoder(r.Body).Decode(&in)
 		f.mu.Lock()
 		f.redeemed = append(f.redeemed, in.Ticket+"@"+in.Thread)
 		f.held = append(f.held, in.Held)
+		f.late = append(f.late, in.Late)
 		status, code, app := f.status, f.code, f.app
 		f.mu.Unlock()
 		w.WriteHeader(status)

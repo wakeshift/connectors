@@ -57,27 +57,44 @@ func sinceStop(h *Hook, transcript string) (string, int) {
 
 // Hooks installed after the conversation's last beacon (the agent asked,
 // the user said yes, the agent ran the installer and stopped): the first
-// waiter wakes the agent, once, to call the tool again, since nothing else
-// would connect the conversation.
+// waiter connects the conversation from that beacon itself, as a late
+// redeem, and listens; the "connected" note comes with the first wake.
+// Nothing asks the agent to call the tool again (it may have side effects).
 func TestWaiterInstalledSince(t *testing.T) {
 	old := LinkGrace
 	LinkGrace = 100 * time.Millisecond
 	defer func() { LinkGrace = old }()
 	ws := newFakeWakeshift(t)
-	minted := time.Now().Add(-2 * time.Minute) // expired: it's evidence, not redeemed
+	minted := time.Now().Add(-2 * time.Minute) // expired: redeemed late
 	tr := sinceTranscript(t, sinceBeacon(t, ws, nil, "toolu_1", "probe", minted))
 
 	h := sinceHook(t, ws, minted.Add(30*time.Second))
+	link := "ws://" + strings.TrimPrefix(ws.URL, "http://") + "/v1/stream?link=tok-" + sinceSession
+	h.Poller.(*fakePoller).add(link, msg("d1", "first message"))
 	out, code := sinceStop(h, tr)
-	if code != 2 || !strings.Contains(out, "Call mcp__wsprobe__probe again now") || !strings.HasPrefix(out, "Wakeshift: ") {
+	if code != 2 || !strings.HasPrefix(out, "Wakeshift: connected") || !strings.Contains(out, "first message") || strings.Contains(out, "again") {
 		t.Fatalf("%d %q", code, out)
 	}
-	if len(ws.redemptions()) != 0 {
-		t.Fatal("redeemed an expired beacon")
+	if r := ws.redemptions(); len(r) != 1 || r[0] != "wst_t@"+sinceSession || !ws.late[0] {
+		t.Fatalf("redeemed %v late %v", r, ws.late)
 	}
-	// Once per conversation.
-	if out, code := sinceStop(h, tr); code != 0 || out != "" {
-		t.Fatalf("again: %d %q", code, out)
+	if h.Links.Load(sinceSession) != link {
+		t.Fatal("the link wasn't kept")
+	}
+
+	// Refused (the core's window passed, or a connector connected it
+	// since): tried once per conversation, and nothing asks for a call.
+	refused := newFakeWakeshift(t)
+	refused.status, refused.code = 404, "unknown_ticket"
+	tr2 := sinceTranscript(t, sinceBeacon(t, refused, nil, "toolu_1", "probe", minted))
+	h = sinceHook(t, refused, minted.Add(30*time.Second))
+	for range 2 {
+		if out, code := sinceStop(h, tr2); code != 0 || out != "" {
+			t.Fatalf("refused: %d %q", code, out)
+		}
+	}
+	if len(refused.redemptions()) != 1 {
+		t.Fatalf("tried %d times", len(refused.redemptions()))
 	}
 
 	_, other, _ := ed25519.GenerateKey(rand.Reader)
@@ -97,14 +114,20 @@ func TestWaiterInstalledSince(t *testing.T) {
 			t.Fatalf("%s: %d %q", name, code, out)
 		}
 	}
+	if len(ws.redemptions()) != 1 {
+		t.Fatalf("redeemed %v", ws.redemptions())
+	}
 
 	// A conversation with a link listens as before.
 	h = sinceHook(t, ws, minted.Add(30*time.Second))
-	link := "wss://wakeshift.test/v1/stream?link=a"
-	h.Links.Save(sinceSession, link)
-	h.Poller.(*fakePoller).add(link, msg("d1", "first message"))
-	if out, code := sinceStop(h, tr); code != 2 || !strings.Contains(out, "first message") || strings.Contains(out, "again now") {
+	own := "wss://wakeshift.test/v1/stream?link=a"
+	h.Links.Save(sinceSession, own)
+	h.Poller.(*fakePoller).add(own, msg("d1", "first message"))
+	if out, code := sinceStop(h, tr); code != 2 || !strings.Contains(out, "first message") || strings.Contains(out, "Wakeshift: connected") {
 		t.Fatalf("connected: %d %q", code, out)
+	}
+	if len(ws.redemptions()) != 1 {
+		t.Fatalf("redeemed again: %v", ws.redemptions())
 	}
 }
 

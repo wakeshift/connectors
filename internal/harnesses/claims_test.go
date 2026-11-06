@@ -79,22 +79,27 @@ func TestRefine(t *testing.T) {
 
 // The harness argument's description lists the harnesses an agent can
 // name, from the harness entries, and lets any other give its own name.
-// The TypeScript SDK (its wrapper, src/toolcall.ts) and appkit describe
-// the arguments the same way.
+// The TypeScript SDK names the arguments the same way (its wrapper,
+// src/toolcall.ts) and gives these descriptions to its wait tool's
+// arguments (src/tasks.ts; tools/list's own are the compact ones).
 func TestArgDescriptions(t *testing.T) {
 	d := ArgDescription()
 	want := "The program you're running in: codex, claude-code, cursor (local CLI or IDE), cursor-cloud (Cursor cloud agent), grok-bot, copilot-cli, opencode, antigravity, openclaw (even when it runs your turns in Codex), hermes, chatgpt, or your program's name if it isn't listed"
 	if d != want {
 		t.Fatalf("%q", d)
 	}
-	ts, err := os.ReadFile("../../sdk/typescript/src/toolcall.ts")
-	if errors.Is(err, fs.ErrNotExist) {
-		// The published connectors (opensource/export.sh) have no SDK; this
-		// repository always does, so the check runs here.
-		t.Skip("the TypeScript SDK isn't in this tree")
-	}
-	if err != nil {
-		t.Fatal(err)
+	var ts []byte
+	for _, f := range []string{"toolcall.ts", "tasks.ts"} {
+		b, err := os.ReadFile("../../sdk/typescript/src/" + f)
+		if errors.Is(err, fs.ErrNotExist) {
+			// The published connectors (opensource/export.sh) have no SDK; this
+			// repository always does, so the check runs here.
+			t.Skip("the TypeScript SDK isn't in this tree")
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		ts = append(ts, b...)
 	}
 	for _, s := range []string{SessionDescription, d, ConversationDescription,
 		`SESSION_ARG = "` + SessionArg + `"`, `HARNESS_ARG = "` + HarnessArg + `"`, `CONVERSATION_ARG = "` + ConversationArg + `"`} {
@@ -121,14 +126,7 @@ func TestForegroundNote(t *testing.T) {
 	if strings.Contains(ForegroundNote(grok, "CI", url, false), "printenv") {
 		t.Error("asks for an ID it has")
 	}
-	again := ForegroundAgainNote("CI", url)
-	if !strings.Contains(again, "curl -sN '"+url+"'") || !strings.Contains(again, "blocked") || len(again) >= len(n) {
-		t.Errorf("again: %s", again)
-	}
-	if !strings.Contains(CursorCloudNote(), "can't wake yet") || !strings.Contains(CursorCloudNote(), "call this tool again") {
+	if !strings.Contains(CursorCloudNote(), "can't wake yet") || strings.Contains(CursorCloudNote(), "again") {
 		t.Errorf("cloud: %s", CursorCloudNote())
-	}
-	if AskNote() != "To give you the right instructions, call this again with harness and conversation_id." {
-		t.Errorf("ask: %s", AskNote())
 	}
 }

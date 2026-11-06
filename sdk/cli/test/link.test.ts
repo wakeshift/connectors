@@ -136,6 +136,10 @@ test("--trigger", () => {
 test("the wait URL and session key in Wakeshift's block, and JSON-RPC answers", () => {
   const block = `start this command in the background now: u='https://app.wakeshift.ai/v1/stream/wait?link=a.b'; c=; p=$PPID; … Pass session_key="wsc_Ab-9" next time.`;
   assert.equal(waitUrlOf(block), "https://app.wakeshift.ai/v1/stream/wait?link=a.b");
+  // Claude Code's Monitor command (internal/harnesses MonitorLoop), the one verify reads.
+  const monitor = `start the Monitor tool now (timeout_ms 1800000) with this command: u='https://app.wakeshift.ai/v1/stream/wait?link=a.b&until=hooks&timeout=50s'; c=; p=$PPID; kill -0 "$p" 2>/dev/null || p=; s=$(date +%s); while :; do …; done . Pass session_key="wsc_Ab-9" to this app's tools from now on.`;
+  assert.equal(waitUrlOf(monitor), "https://app.wakeshift.ai/v1/stream/wait?link=a.b&until=hooks&timeout=50s");
+  assert.equal(sessionKeyOf(monitor), "wsc_Ab-9");
   assert.equal(sessionKeyOf(block), "wsc_Ab-9");
   assert.equal(waitUrlOf("nothing here"), null);
   assert.deepEqual(messageFrom("text/event-stream", 'event: message\ndata: {"jsonrpc":"2.0","id":3,"result":{"ok":1}}\n\n', 3)?.result, { ok: 1 });

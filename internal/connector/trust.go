@@ -301,7 +301,17 @@ func RedeemCall(ctx context.Context, hc *http.Client, harness string, c beacon.C
 // which Wakeshift's instructions then give the agent instead of a loop on
 // the session's wait URL.
 func RedeemHeld(ctx context.Context, hc *http.Client, harness string, c beacon.Claims, conversation, call, held, wait string) (string, error) {
-	link, _, err := redeemHeld(ctx, hc, harness, c, conversation, call, held, wait)
+	link, _, err := redeemHeld(ctx, hc, harness, c, conversation, call, held, wait, false)
+	return link, err
+}
+
+// RedeemLate is Redeem for a beacon found in the conversation's own record,
+// minted before the hooks were installed (Codex's late redeem, from the
+// rollout): its ticket may have expired, which Wakeshift accepts only for a
+// ticket it minted late-redeemable, within the hour, for a session no
+// connector has connected.
+func RedeemLate(ctx context.Context, hc *http.Client, harness string, c beacon.Claims, conversation string) (string, error) {
+	link, _, err := redeemHeld(ctx, hc, harness, c, conversation, "", "", "", true)
 	return link, err
 }
 
@@ -314,9 +324,14 @@ type RedeemedApp struct {
 	PreapproveTools []string `json:"preapprove_tools"`
 }
 
-// redeemHeld is RedeemHeld with what the redeem said about the app.
-func redeemHeld(ctx context.Context, hc *http.Client, harness string, c beacon.Claims, conversation, call, held, wait string) (string, RedeemedApp, error) {
-	in := map[string]string{"ticket": c.Ticket, "thread": conversation}
+// redeemHeld is RedeemHeld with what the redeem said about the app. late:
+// the beacon came from the conversation's own record, minted before the
+// hooks were installed (installedSince), so its ticket may have expired.
+func redeemHeld(ctx context.Context, hc *http.Client, harness string, c beacon.Claims, conversation, call, held, wait string, late bool) (string, RedeemedApp, error) {
+	in := map[string]any{"ticket": c.Ticket, "thread": conversation}
+	if late {
+		in["late"] = true
+	}
 	if call != "" {
 		in["call"] = call
 	}

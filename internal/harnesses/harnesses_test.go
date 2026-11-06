@@ -51,7 +51,9 @@ func TestAgentID(t *testing.T) {
 		"copilot-cli": "copilot", "Copilot CLI": "copilot", "antigravity-client": "antigravity", "Antigravity Client": "antigravity",
 		"gemini-cli-mcp-client": "gemini", "codex-mcp-client": "codex", "Codex": "codex", "claude-code": "claude-code",
 		"Claude Code": "claude-code", "Claude Code (wakeshift)": "claude-code", "claude-code-vscode": "claude-code",
-		"Cursor": "cursor", "Cursor IDE": "cursor", "opencode": "opencode", "goose-desktop": "goose",
+		"Cursor": "cursor", "Cursor IDE": "cursor", "opencode": "opencode", "goose-desktop": "goose", "capy": "capy", "Capy": "capy",
+		// Muse is Exact: its client name is Muse, but nothing else is.
+		"muse-custom-connector": "muse", "MUSE-CUSTOM-CONNECTOR": "muse", "muse-mcp": "muse-mcp", "Muse Score": "muse-score",
 		"My Client": "my-client", "!!": "agent", "x": "agent", "claudette": "claudette",
 		strings.Repeat("a", 50): strings.Repeat("a", 40),
 	} {
@@ -79,23 +81,26 @@ func TestAgentID(t *testing.T) {
 // parentheses, or the harness's own name, it's still that harness exactly.
 func TestExactClient(t *testing.T) {
 	for name, id := range map[string]string{
-		"opencode":                "opencode",
-		"OpenCode":                "opencode", // what opencode registers as
-		"opencode (wakebench)":    "opencode",
-		"Claude Code (wakeshift)": "claude-code",
-		"Codex":                   "codex",
-		"Cursor (wakebench)":      "cursor",
-		"codex-mcp-client":        "codex",
-		"hermes-agent":            "hermes",
-		"hermes-agent (x)":        "hermes", // its own name, tagged: still exact
-		"mcp":                     "hermes", // as sent, though Unsure
+		"opencode":                  "opencode",
+		"OpenCode":                  "opencode", // what opencode registers as
+		"opencode (wakebench)":      "opencode",
+		"Claude Code (wakeshift)":   "claude-code",
+		"Codex":                     "codex",
+		"Cursor (wakebench)":        "cursor",
+		"codex-mcp-client":          "codex",
+		"hermes-agent":              "hermes",
+		"hermes-agent (x)":          "hermes", // its own name, tagged: still exact
+		"mcp":                       "hermes", // as sent, though Unsure
+		"muse-custom-connector":     "muse",
+		"Muse-Custom-Connector (x)": "muse",
 	} {
 		h, ok := ExactClient(name)
 		if !ok || h.ID != id {
 			t.Fatalf("%q: %q %v", name, h.ID, ok)
 		}
 	}
-	for _, name := range []string{"cursor-nightly", "cursor-nightly (beta)", "My Client", "(opencode)", "", "mcp (x)"} {
+	// Muse is Exact: only its client name, not its name, ID or a variant.
+	for _, name := range []string{"cursor-nightly", "cursor-nightly (beta)", "My Client", "(opencode)", "", "mcp (x)", "Muse", "muse", "muse (x)", "muse-mcp", "muse-custom-connector-2"} {
 		if h, ok := ExactClient(name); ok {
 			t.Fatalf("%q isn't exact, got %q", name, h.ID)
 		}
@@ -118,6 +123,8 @@ func TestForClient(t *testing.T) {
 		"goose-cli":             "goose",
 		"Visual Studio Code":    "vscode",
 		"openai-mcp":            "chatgpt", // from OpenAI's developer forum, not captured
+		"capy":                  "capy",    // captured from Capy's backend, November 5, 2026
+		"muse-custom-connector": "muse",    // captured from Meta's servers, November 5, 2026
 	} {
 		h, ok := ForClient(name)
 		if !ok || h.ID != id {
@@ -144,7 +151,10 @@ func TestForClient(t *testing.T) {
 		if h.Wake == Events && (h.Installable || h.When == "" || h.Ack == "" || h.Blocker != "") {
 			t.Fatalf("%s: woken by MCP Events but incomplete: %+v", h.ID, h)
 		}
-		if !h.Installable && h.Wake != Events && h.Blocker == "" {
+		if !h.Installable && h.ZeroInstall == Background && (h.Wake != Background && h.Wake != OneShot && (h.Wake != Webhook || h.Fallback != OneShot) || h.When == "" || h.Ack == "" || h.Blocker != "") {
+			t.Fatalf("%s: woken by a background command alone but incomplete: %+v", h.ID, h)
+		}
+		if !h.Installable && h.Wake != Events && h.Wake != Background && h.Wake != OneShot && h.Wake != Webhook && h.Blocker == "" {
 			t.Fatalf("%s: not installable and no blocker", h.ID)
 		}
 	}
@@ -160,7 +170,7 @@ func TestInstallNote(t *testing.T) {
 		`"Notify me while this session is open" (description: starts a background listener (the Monitor) for this session only; nothing is installed)`,
 		`Only if they pick "Notify me in every session", run`, "if running it is refused (auto mode's classifier or a permission denial)",
 		"type themselves, as it is: `! claude plugin install wakeshift --marketplace wakeshift/agent-plugins --config issuer=https://app.wakeshift.ai`",
-		"don't start the Monitor", "type /reload-plugins here", "send any message here", "Once they say they've loaded it, call this tool again"} {
+		"don't start the Monitor", "type /reload-plugins here", "send any message here", "connects this conversation by itself once it's loaded"} {
 		if !strings.Contains(n, want) {
 			t.Fatalf("missing %q in %s", want, n)
 		}
@@ -193,8 +203,8 @@ func TestInstallNote(t *testing.T) {
 			t.Fatalf("%s: asks in chat too: %s", name, note)
 		}
 	}
-	// "No" keeps the Monitor where there is one, and holds messages where not.
-	if n := InstallNote(noMonitor, base); !strings.Contains(n, "(description: messages wait until you call this tool again)") || strings.Contains(n, "through the Monitor") {
+	// "No" keeps the Monitor where there is one, and says nothing notifies where not.
+	if n := InstallNote(noMonitor, base); !strings.Contains(n, "(description: nothing notifies this conversation; I check only when you ask)") || strings.Contains(n, "through the Monitor") {
 		t.Fatalf("unwoken: %s", n)
 	}
 	// Only Claude Code's note asks with a tool and offers the ! fallback.
@@ -252,26 +262,30 @@ func TestInstallNote(t *testing.T) {
 	}
 }
 
-// After the install, the user is told to send a message only where the agent
-// needs a turn to connect the conversation (everywhere but Claude Code,
-// whose agent calls the tool again in the same turn), and told what to do
-// after a later restart only where nothing installed reconnects it by
-// itself: Cursor, Copilot CLI and Antigravity (the background command needs
-// the agent), Codex (its SessionStart hook runs when the resumed thread's
-// first turn starts) and Hermes's chat (its plugin can't tell which chat it
-// is until a turn). Claude Code's SessionStart hook, and opencode's and
-// OpenClaw's plugins at load, reconnect it.
+// After the install, the user is told to send a message only where that
+// message does something by itself, never so the agent can call the app's
+// tool again (it may have side effects): Claude Code's plugin (the turn's
+// end runs the waiter that connects the conversation), and the background
+// harnesses (the agent starts its command again after the restart that
+// loads the hooks). And told what to do after a later restart only where
+// nothing installed reconnects it by itself: Cursor, Copilot CLI and
+// Antigravity (the background command needs the agent), Codex (its
+// SessionStart hook runs when the resumed thread's first turn starts) and
+// Hermes's chat (its plugin can't tell which chat it is until a turn).
+// Claude Code's SessionStart hook, and opencode's and OpenClaw's plugins at
+// load, reconnect it.
 func TestTrustNoteAsksOnlyWhereNeeded(t *testing.T) {
 	restart := map[string]bool{"codex": true, "cursor": true, "copilot": true, "antigravity": true, "hermes": true}
+	message := map[string]bool{"cursor": true, "copilot": true, "antigravity": true}
 	for _, h := range All() {
 		if !h.Installable {
 			continue
 		}
-		if (h.Resume == "") != (h.ID == "claude-code") {
+		if strings.Contains(h.Resume, "send any") != message[h.ID] {
 			t.Errorf("%s: Resume %q", h.ID, h.Resume)
 		}
-		if h.Resume != "" && !strings.Contains(h.Resume, "send any") {
-			t.Errorf("%s: Resume doesn't ask for a message: %q", h.ID, h.Resume)
+		if strings.Contains(h.Resume, "connect") && h.ZeroInstall == Background {
+			t.Errorf("%s: Resume says the message connects it: %q", h.ID, h.Resume)
 		}
 		if (h.Restart != "") != restart[h.ID] {
 			t.Errorf("%s: Restart %q", h.ID, h.Restart)
@@ -285,6 +299,9 @@ func TestTrustNoteAsksOnlyWhereNeeded(t *testing.T) {
 	}
 	if c, _ := Get("claude-code"); TrustNote(c) != c.Trust {
 		t.Errorf("claude-code: %q", TrustNote(c))
+	}
+	if c, _ := Get("claude-code"); !strings.Contains(c.Marketplace.Resume, "send any message") || !strings.Contains(c.Marketplace.Resume, "the plugin connects this conversation") {
+		t.Errorf("claude-code's plugin: %q", c.Marketplace.Resume)
 	}
 }
 
@@ -316,7 +333,7 @@ func TestConnectedMarker(t *testing.T) {
 func TestCodexNote(t *testing.T) {
 	h, _ := Get("codex")
 	n := SubscribeNote(h, "https://x.test")
-	for _, want := range []string{"~/.codex/hooks.json", h.When, "/hooks", "only the step in Codex is needed", "Only if they say yes", "call this tool again"} {
+	for _, want := range []string{"~/.codex/hooks.json", h.When, "/hooks", "only the step in Codex is needed", "Only if they say yes", "You don't need to call this app's tools again for the install", "from this result when the user sends their next message after the restart"} {
 		if !strings.Contains(n, want) {
 			t.Errorf("missing %q: %s", want, n)
 		}
@@ -330,9 +347,10 @@ func TestCodexNote(t *testing.T) {
 }
 
 // What the install loop with real models found: Codex's sandbox blocks
-// the installer unless it's escalated; Claude Code moves from its Monitor to
-// the hooks by calling the tool again; stop hooks wake a conversation only
-// for a minute after a turn, and the notes don't promise more.
+// the installer unless it's escalated; Claude Code's plugin connects by
+// itself, without a call (the tool may have side effects); stop hooks wake
+// a conversation only for a minute after a turn, and the notes don't
+// promise more.
 func TestNotesFromTheInstallLoop(t *testing.T) {
 	codex, _ := Get("codex")
 	for _, n := range []string{SubscribeNote(codex, "https://x.test"), RepeatNote(codex, "https://x.test")} {
@@ -343,7 +361,7 @@ func TestNotesFromTheInstallLoop(t *testing.T) {
 		}
 	}
 	claude, _ := Get("claude-code")
-	if n := PluginFirstNote(claude, "https://x.test", "App", false, "FALLBACK."); !strings.Contains(n, "all this tool again") || !strings.Contains(n, `that result starts with "Wakeshift: connected"`) {
+	if n := PluginFirstNote(claude, "https://x.test", "App", false, "FALLBACK."); strings.Contains(n, "this tool again") || !strings.Contains(n, `first wake starts with "Wakeshift: connected"`) {
 		t.Errorf("claude code: %s", n)
 	}
 	for _, id := range []string{"cursor", "antigravity"} {
@@ -369,12 +387,12 @@ func TestRepeatNote(t *testing.T) {
 }
 
 // A harness Wakeshift can't wake is told it's Wakeshift that can't, not the
-// app, and when messages arrive instead.
+// app, in one neutral line that asks for nothing.
 func TestCantWake(t *testing.T) {
-	if n := CantWake(""); !strings.HasPrefix(n, "Wakeshift can't wake this agent yet") || !strings.Contains(n, "call this tool again to check for them") {
+	if n := CantWake(""); n != "Wakeshift can't wake this agent, so nothing will notify you here when something arrives." {
 		t.Fatal(n)
 	}
-	if g, _ := Get("goose"); !strings.Contains(InstallNote(g, "https://x.test"), "Wakeshift can't wake Goose conversations yet") {
+	if g, _ := Get("goose"); !strings.Contains(InstallNote(g, "https://x.test"), "Wakeshift can't wake Goose conversations,") {
 		t.Fatal(InstallNote(g, "https://x.test"))
 	}
 }
@@ -654,6 +672,12 @@ func TestRecognize(t *testing.T) {
 		// User-Agents as the binaries send them.
 		{"", nil, "claude-code/2.1.280 (sdk-cli)", "claude-code", ByUserAgent},
 		{"", nil, "codex-mcp-client/0.163.0", "codex", ByUserAgent},
+		// ChatGPT's Work chats call tools and events/* through Codex
+		// (the voucher probe, November 5, 2026): the product is still
+		// openai-mcp, and the comment names Codex. It's ChatGPT, not Codex.
+		{"", nil, "openai-mcp/1.0.0 (Codex)", "chatgpt", ByUserAgent},
+		{"", nil, "openai-mcp/1.0.0", "chatgpt", ByUserAgent},
+		{"", map[string]any{"openai/session": "v1/abc"}, "openai-mcp/1.0.0 (Codex)", "chatgpt", ByMeta},
 		{"", nil, "opencode/1.18.7", "opencode", ByUserAgent},
 		{"", nil, "Cursor/1.0.0", "cursor", ByUserAgent},
 		{"", nil, "Cursor/3.25.9 (darwin arm64)", "cursor", ByUserAgent}, // the Cursor IDE
@@ -663,6 +687,18 @@ func TestRecognize(t *testing.T) {
 		{"openai-mcp", nil, "openai-mcp/1.0.0", "chatgpt", ByClient},
 		{"", map[string]any{"openai/session": "v1/abc"}, "", "chatgpt", ByMeta},
 		{"", nil, "openai-mcp/1.0.0", "chatgpt", ByUserAgent},
+		// Capy's backend, as a probe server captured it (November 5, 2026).
+		{"capy", nil, "capy", "capy", ByClient},
+		{"", nil, "capy", "capy", ByUserAgent},
+		{"", map[string]any{}, "capybara/1", "", ""},
+		// Muse's connector (November 5, 2026): its client name alone. Its
+		// User-Agent is Python's default, and other "muse-…" clients aren't
+		// it.
+		{"muse-custom-connector", nil, "Python-urllib/3.12", "muse", ByClient},
+		{"", nil, "Python-urllib/3.12", "", ""},
+		{"muse-mcp", nil, "", "", ""},
+		{"muse", nil, "", "", ""},
+		{"Muse", nil, "", "", ""},
 		// Nothing.
 		{"", nil, "", "", ""},
 		{"", nil, "Go-http-client/1.1", "", ""}, // Antigravity's, and every Go program's
@@ -692,5 +728,37 @@ func TestRecognize(t *testing.T) {
 			}
 			seen[strings.ToLower(k)] = h.ID
 		}
+	}
+}
+
+// Asked once per conversation (vendor bench, November 6, 2026): what a
+// later subscribing call gets while nothing wakes the conversation is one
+// short note that points back to the earlier ask: no install command, no
+// question, and it says not to ask again after a no.
+func TestAskedNotes(t *testing.T) {
+	const base = "https://app.wakeshift.ai"
+	for _, h := range All() {
+		if !h.Installable {
+			continue
+		}
+		first, n := SubscribeNote(h, base), AskedNote(h, base)
+		if len(n) > 700 || len(n) >= len(first) || strings.Contains(n, OfferCommand(h, base)) || strings.Contains(n, "Ask the user now") ||
+			!strings.Contains(n, "an earlier result of this app's tools") || !strings.Contains(n, "don't ask again in this conversation") || !strings.Contains(n, Connected) {
+			t.Errorf("%s: %d vs %d: %s", h.ID, len(n), len(first), n)
+		}
+		if h.Unsure == "" && !strings.HasPrefix(n, "Subscribed, but nothing wakes this conversation until ") {
+			t.Errorf("%s: not one sentence first: %s", h.ID, n)
+		}
+	}
+	cc, _ := Get("claude-code")
+	n := PluginAskedNote(cc, base, "Shipyard")
+	for _, want := range []string{"Subscribed. Shipyard's notifications", `"` + AskSession + `"`, `"` + AskEvery + `"`, `"` + AskNone + `"`, "don't ask again in this conversation",
+		"If Wakeshift's plugin for Claude Code was installed, start nothing: Wakeshift's plugin for Claude Code connects this conversation by itself once it's loaded"} {
+		if !strings.Contains(n, want) {
+			t.Errorf("PluginAskedNote lacks %q: %s", want, n)
+		}
+	}
+	if strings.Contains(n, "claude plugin install") || strings.Contains(n, "AskUserQuestion") || len(n) > 900 {
+		t.Errorf("PluginAskedNote repeats the ask: %s", n)
 	}
 }

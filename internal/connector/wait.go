@@ -197,7 +197,7 @@ var waitLoops = map[string]bool{cursorName: true}
 
 // NotConnected is the hub.closed line `wakeshift wait` prints when it finds
 // no conversation of this harness that Wakeshift's hooks connected.
-const NotConnected = "Wakeshift's hooks haven't connected this conversation (or this command can't tell which conversation it runs in), so there's nothing for it to wait on. Call the app's tool that subscribed you again: its result says what to run."
+const NotConnected = "Wakeshift's hooks haven't connected this conversation (or this command can't tell which conversation it runs in), so there's nothing for it to wait on."
 
 // Waiter waits on a conversation's stream link and prints its messages.
 type Waiter struct {

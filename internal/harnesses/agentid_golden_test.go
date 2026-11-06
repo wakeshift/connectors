@@ -20,7 +20,7 @@ var updateAgentIDs = flag.Bool("update", false, "rewrite the TypeScript SDK's ag
 func agentIDNames() []string {
 	names := []string{"", "  ", "x", "My Client", "Claude Code", "claude-code", "CLAUDE-CODE", "Claude Code (wakeshift)", "claude-code-vscode",
 		"Copilot CLI", "GitHub Copilot CLI", "mcp", "MCP", "hermes", "Hermes Agent", "Codex", "codex-mcp-client", "Visual Studio Code - Insiders",
-		"cursor-agent", "Cursor", " ~~weird--name!! ", "é client", "a(b)", "(paren first)", strings.Repeat("abc-", 15), "goose-desktop", "openai-mcp", "Grok Bot"}
+		"cursor-agent", "Cursor", " ~~weird--name!! ", "é client", "a(b)", "(paren first)", strings.Repeat("abc-", 15), "goose-desktop", "openai-mcp", "Grok Bot", "muse-mcp", "Muse Score"}
 	for _, h := range all {
 		names = append(names, h.ID, h.Name)
 		names = append(names, h.Clients...)

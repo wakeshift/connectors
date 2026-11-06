@@ -55,13 +55,13 @@ func TestClaudeCodePluginNotes(t *testing.T) {
 		}
 		for _, want := range []string{"Subscribed, but that alone won't tell you when something arrives", "nothing runs until they answer", "held for this conversation until then", "don't start " + waker,
 			"Ask them one question with your AskUserQuestion tool", `"` + AskSession + `" (description: `, `"` + AskEvery + "\" (description: runs `claude plugin install wakeshift", `"` + AskNone + `" (description: nothing runs`,
-			"/reload-plugins", "send any message", "Once they say they've loaded it, call this tool again", "call this tool once more, on its own (not alongside another call), to confirm", "claude plugin install wakeshift",
+			"/reload-plugins", "send any message", "don't call this app's tools again for it", "connects this conversation by itself once it's loaded and the user has sent a message", "first wake starts with \"Wakeshift: connected\"", "claude plugin install wakeshift",
 			"none marked as recommended", "use " + waker + ": ", "start nothing", "one permission rule to ~/.claude/settings.json so Claude Code runs Wakeshift's wait command (~/.wakeshift/bin/wakeshift wait) without asking each time"} {
 			if !strings.Contains(n, want) {
 				t.Errorf("%s: missing %q: %s", name, want, n)
 			}
 		}
-		for _, bad := range []string{"keep " + waker + " running", "Start the Monitor first", "work in this session already", "right away, in the same turn", "curl", "WAKESHIFT_ALLOW_TOOLS", "Agent Chat's post"} {
+		for _, bad := range []string{"keep " + waker + " running", "Start the Monitor first", "work in this session already", "right away, in the same turn", "curl", "WAKESHIFT_ALLOW_TOOLS", "Agent Chat's post", "this tool again", "once more", "to confirm"} {
 			if strings.Contains(n, bad) {
 				t.Errorf("%s: says %q: %s", name, bad, n)
 			}
@@ -74,14 +74,17 @@ func TestClaudeCodePluginNotes(t *testing.T) {
 	if n := PluginFirstNote(h, base, "App", false, "FALLBACK."); !strings.HasSuffix(n, "use the Monitor: FALLBACK.") || !strings.HasPrefix(n, "Subscribed, but that alone won't tell you when something arrives: App delivers its notifications through Wakeshift, the service App uses to notify agents") {
 		t.Errorf("fallback last: %s", n)
 	}
-	// A later result: this one connects an installed plugin, else the
-	// fallback's instructions as before.
+	// A later subscribe: an installed plugin connects by itself, else the
+	// fallback's instructions as before; never a call to confirm.
 	p := PluginPendingNote(h, base, false, "AGAIN.")
-	for _, want := range []string{"If you installed Wakeshift's plugin for Claude Code in this conversation and the user has loaded it", "don't start the Monitor", "connects this conversation from this result",
-		"call this tool once more, on its own (not alongside another call), to confirm", `If the user chose not to be notified ("` + AskNone + `"), start nothing.`, "Otherwise (they chose this session only, or it isn't installed): AGAIN."} {
+	for _, want := range []string{"If you installed Wakeshift's plugin for Claude Code in this conversation and the user has loaded it", "don't start the Monitor", "connects this conversation by itself",
+		`If the user chose not to be notified ("` + AskNone + `"), start nothing.`, "Otherwise (they chose this session only, or it isn't installed): AGAIN."} {
 		if !strings.Contains(p, want) {
 			t.Errorf("pending: missing %q: %s", want, p)
 		}
+	}
+	if strings.Contains(p, "again") && !strings.Contains(p, "ask them again") || strings.Contains(p, "once more") {
+		t.Errorf("pending asks for another call: %s", p)
 	}
 	if n := UpdateNote(h, base); !strings.Contains(n, "/reload-plugins") {
 		t.Errorf("update: %s", n)
@@ -90,8 +93,8 @@ func TestClaudeCodePluginNotes(t *testing.T) {
 		t.Errorf("uninstall: %s", n)
 	}
 	// Wakeshift's own installer, from a core without a marketplace: its
-	// hooks work in the running session, so the agent calls again at once.
-	if n := PluginFirstNote(h, "http://localhost:8370", "App", false, "FALLBACK."); !strings.Contains(n, "work in this session already") || strings.Contains(n, "/reload-plugins") || !strings.Contains(n, "Wakeshift's hooks for Claude Code") {
+	// hooks work in the running session, and connect it when the turn ends.
+	if n := PluginFirstNote(h, "http://localhost:8370", "App", false, "FALLBACK."); !strings.Contains(n, "connect this conversation by themselves when this turn ends") || strings.Contains(n, "/reload-plugins") || !strings.Contains(n, "Wakeshift's hooks for Claude Code") {
 		t.Errorf("installer: %s", n)
 	}
 	// A harness with no picker gets the fallback alone.

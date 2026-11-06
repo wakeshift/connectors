@@ -16,6 +16,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/wakeshift/connectors/internal/pluginmark"
+	"github.com/wakeshift/connectors/internal/version"
 )
 
 // Event is what a hook call is about.
@@ -43,6 +46,9 @@ const (
 	// tool-result hook (Cursor's afterMCPExecution): recorded so the
 	// result's hook knows its server (CallServerFormat).
 	CallDone
+	// SessionContext: a session starts, and the hook adds context for the
+	// model: the plugin's mark to pass (SessionContextFormat).
+	SessionContext
 	// Approve: the harness is about to ask the user to approve a tool
 	// call (Copilot's permissionRequest); the hook approves Wakeshift's
 	// own wait command, exactly, and nothing else (ApproveFormat).
@@ -70,6 +76,13 @@ type CallServerFormat interface {
 // PreCallFormat is a Format that answers PreCall.
 type PreCallFormat interface {
 	PreCall(in Input) (Output, bool)
+}
+
+// SessionContextFormat is a Format that adds context when a session
+// starts (SessionContext): the plugin's mark (internal/pluginmark) for the
+// model to pass as the harness argument of an app's tools.
+type SessionContextFormat interface {
+	SessionContext(mark string) (Output, bool)
 }
 
 // StripFormat is a Format that can take a beacon out of the result the
@@ -152,7 +165,7 @@ type Format interface {
 // Wakeshift says starts with it.
 const (
 	NoteConnected = "Wakeshift: connected. New messages for this conversation will reach it %s."
-	NoteFailed    = "Wakeshift: couldn't connect this conversation (%s), so new messages won't reach it yet. To retry, call the app's tool that started watching again."
+	NoteFailed    = "Wakeshift: couldn't connect this conversation (%s), so new messages won't reach it yet. It tries again from the next result of the app's tools."
 	// NoteOtherApp: a beacon for another app than the one whose beacon
 	// connected the conversation, where the hook can't tell which server
 	// a result came from (it's never replaced without the user).
@@ -318,6 +331,10 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout, stderr io.Write
 	case PreCall:
 		if pf, is := h.Format.(PreCallFormat); is {
 			out, ok = pf.PreCall(in)
+		}
+	case SessionContext:
+		if sf, is := h.Format.(SessionContextFormat); is {
+			out, ok = sf.SessionContext(pluginmark.Value(h.Harness, version.Version, h.Verifier.Settings.Issuers))
 		}
 	case Resolve:
 		h.resolveSoon(ctx, in)
@@ -508,10 +525,7 @@ func (h *Hook) listen(ctx context.Context, in Input, wait time.Duration) (Output
 		if !h.Rewake && in.Event != Rewake {
 			return Output{}, false
 		}
-		if out, ok := h.installedSince(ctx, in); ok {
-			return out, true
-		}
-		if !h.waitForLink(ctx, in.Conversation) {
+		if !h.installedSince(ctx, in) && !h.waitForLink(ctx, in.Conversation) {
 			return Output{}, false
 		}
 	}

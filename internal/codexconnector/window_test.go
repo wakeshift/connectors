@@ -269,3 +269,37 @@ func TestWindowAfterDaemonRestart(t *testing.T) {
 		t.Fatal("the reused connection ID still showed the thread")
 	}
 }
+
+// After a restart (quit, codex resume), the user's first prompt starts the
+// connector before the log shows the new TUI's resume: the window found
+// first is the old one, which already closed the thread. The connector
+// keeps looking and binds to the new window instead of stopping (wakebench
+// S6, November 5, 2026: a connector the late redeem started stopped 5s in,
+// "the window closed the thread").
+func TestWindowAfterARestart(t *testing.T) {
+	l := newCodexLog(t)
+	l.at(0, threadA, span("thread/start", 4, `startup-thread-start-1`))
+	l.at(time.Second, "", request("account/rateLimits/read", 4, `String("x")`))
+	l.at(30*time.Second, "", request("thread/unsubscribe", 4, `Integer(9)`)) // /quit
+	w := l.window(threadA)
+	w.Poll, w.Now = 20*time.Millisecond, nil
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	closed := w.Watch(ctx)
+	time.Sleep(100 * time.Millisecond)
+	l.at(5*time.Second, threadA, span("thread/resume", 5, `1`)) // the new TUI, a moment late
+	select {
+	case why := <-closed:
+		t.Fatalf("stopped on the old window: %q", why)
+	case <-time.After(300 * time.Millisecond):
+	}
+	l.at(20*time.Second, "", request("thread/unsubscribe", 5, `Integer(3)`))
+	select {
+	case why := <-closed:
+		if why != "the window closed the thread" {
+			t.Fatalf("closed: %q", why)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the new window's /quit wasn't noticed")
+	}
+}

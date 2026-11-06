@@ -25,6 +25,8 @@ import (
 // without a tool call: Codex runs it at SessionStart (the thread opened or
 // resumed in a window) and UserPromptSubmit (the user's next prompt), and if
 // the thread has a link and no connector holds it (Running), it starts one.
+// A thread with no link there is connected from the beacon in the result
+// that offered the install, read from the rollout (late.go).
 // Codex has no hook that fires while a thread sits idle, so a connector
 // that stops then stays stopped until one of those, or a tool call, comes.
 
@@ -35,7 +37,7 @@ const (
 	NoteConnected = "Wakeshift: connected. New messages will wake this thread as soon as they arrive, or once its turn ends if it's busy, while it's open in Codex: so end your turn when you're done rather than waiting for them."
 	NoteInProcess = "Wakeshift: not connected. This Codex session runs without Codex's background server (it was started with --no-daemon or -c options), " +
 		"so new messages can't wake it; you'll see them when you next use the app's tools. To be woken, the user can start codex without those options."
-	NoteFailed = "Wakeshift: couldn't connect this thread (%s), so new messages won't wake it yet. To retry, call the app's tool that started watching again."
+	NoteFailed = "Wakeshift: couldn't connect this thread (%s), so new messages won't wake it yet. It tries again from the next result of the app's tools."
 	// NoteOutdated: Wakeshift refused this version (426 update_required); its message follows.
 	NoteOutdated = "Wakeshift: couldn't connect this thread. %s"
 )
@@ -46,6 +48,9 @@ type HookInput struct {
 	HookEventName string          `json:"hook_event_name"`
 	ToolName      string          `json:"tool_name"`
 	ToolResponse  json.RawMessage `json:"tool_response"`
+	// TranscriptPath is the thread's rollout (every event), for the late
+	// redeem at SessionStart and UserPromptSubmit (lateRedeem).
+	TranscriptPath string `json:"transcript_path"`
 }
 
 // harness is Codex's ID (internal/harnesses), for ClientHeader.
@@ -88,6 +93,14 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 		return
 	}
 	if in.HookEventName == EventSessionStart || in.HookEventName == EventUserPromptSubmit {
+		// A thread with no link yet may have had the install offered in a
+		// result no hook saw: connected from that result's beacon (late),
+		// without a call of the app's tool, which may have side effects.
+		if note := h.lateRedeem(ctx, in); note != "" {
+			json.NewEncoder(stdout).Encode(map[string]any{"hookSpecificOutput": map[string]any{
+				"hookEventName": in.HookEventName, "additionalContext": note}})
+			return
+		}
 		h.rearm(in.SessionID, in.HookEventName)
 		return
 	}
