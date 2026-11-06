@@ -159,3 +159,87 @@ export function canonical(v: unknown): string {
       .join(",")}}`;
   return JSON.stringify(v);
 }
+
+/**
+ * The values a trigger can name from the subscribing tool's reply:
+ * {structured.<path>} is its structuredContent, {result.<path>} the JSON in
+ * its text (the app's own text, before Wakeshift's block). A path is
+ * dot-separated keys and array indexes; no path is the whole value.
+ */
+export interface ResultValues {
+  structured?: unknown;
+  result?: unknown;
+}
+
+const PLACEHOLDER = /\{(result|structured)((?:\.[A-Za-z0-9_$-]+)*)\}/g;
+
+/** The JSON in a tool reply's text: the first text block that is JSON, or a string result's text before Wakeshift's block. */
+export function resultJson(texts: string[]): unknown {
+  for (const t of texts) {
+    const parts = t.split(/\n\n/);
+    for (let n = parts.length; n >= 1; n--) {
+      try {
+        return JSON.parse(parts.slice(0, n).join("\n\n"));
+      } catch {
+        // not JSON this far
+      }
+    }
+  }
+  return undefined;
+}
+
+/** The value a placeholder names, or an error saying what's missing. */
+function lookup(values: ResultValues, root: "result" | "structured", path: string): { value: unknown } | { error: string } {
+  let cur: unknown = values[root];
+  const name = `{${root}${path}}`;
+  if (cur === undefined) return { error: root === "structured" ? `${name}: the tool's reply has no structuredContent` : `${name}: the tool's reply has no JSON in its text` };
+  for (const k of path.split(".").slice(1)) {
+    if (!cur || typeof cur !== "object" || !(k in (cur as object))) return { error: `${name}: the tool's reply has no ${path.slice(1)}` };
+    cur = (cur as Record<string, unknown>)[k];
+  }
+  if (cur === undefined || cur === null) return { error: `${name}: the tool's reply has no ${path.slice(1) || root}` };
+  return { value: cur };
+}
+
+const asText = (v: unknown) => (typeof v === "string" ? v : JSON.stringify(v));
+
+/** A shell word that is exactly s. */
+export const shellQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+
+/**
+ * s with each placeholder replaced: in a JSON value (a tool trigger's
+ * arguments) a string that is only a placeholder becomes the value itself
+ * (a number stays a number); elsewhere the value is written as text, quoted
+ * for the shell when quote is set (a command trigger). used collects what
+ * was substituted; secretShaped refuses a value (a key, a session key, a
+ * stream link) that the trigger mustn't be handed.
+ */
+export function substitute(
+  v: unknown,
+  values: ResultValues,
+  used: Map<string, unknown>,
+  secretShaped: (s: string) => boolean,
+  quote = false,
+): unknown {
+  if (typeof v === "string") {
+    const fail = (e: string): never => {
+      throw new Error(e);
+    };
+    const get = (root: string, path: string) => {
+      const r = lookup(values, root as "result" | "structured", path);
+      if ("error" in r) return fail(r.error);
+      if (secretShaped(asText(r.value))) fail(`{${root}${path}}: the value looks like a key, a session key or a link, and verify doesn't pass those to a trigger`);
+      used.set(`{${root}${path}}`, r.value);
+      return r.value;
+    };
+    const whole = new RegExp(`^${PLACEHOLDER.source}$`).exec(v);
+    if (whole && !quote) return get(whole[1], whole[2]);
+    return v.replace(new RegExp(PLACEHOLDER.source, "g"), (_m, root: string, path: string) => {
+      const t = asText(get(root, path));
+      return quote ? shellQuote(t) : t;
+    });
+  }
+  if (Array.isArray(v)) return v.map((x) => substitute(x, values, used, secretShaped, quote));
+  if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, substitute(x, values, used, secretShaped, quote)]));
+  return v;
+}

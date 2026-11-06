@@ -3,17 +3,19 @@
 // tool says it notifies and that its reply carries Wakeshift's block,
 // makes sure nobody but itself is subscribed with those arguments before
 // anything is emitted (the status guard: verify never wakes real users),
-// triggers an occurrence, waits for the wake on its own stream, cleans up,
-// and reports each check with the fix for each failure.
+// triggers an occurrence, waits for the wake on its own stream (ignoring
+// anything that arrived before the trigger, such as a replay of an earlier
+// occurrence), cleans up, and reports each check with the fix for each
+// failure.
 
 import { randomBytes } from "node:crypto";
 import { parseFlags } from "./args.js";
 import { type Ctx, Out } from "./context.js";
 import { type AppInfo, type Core, CoreError, type EventDef } from "./core.js";
 import { EXIT, usage } from "./errors.js";
-import { argsForEvent, canonical, eventsNamed, listedSubscriptions, type NotifiesSentence, notifiesSentence, parseTrigger, sample, type Trigger } from "./inspect.js";
+import { argsForEvent, canonical, eventsNamed, type Listed, listedSubscriptions, type NotifiesSentence, notifiesSentence, parseTrigger, type ResultValues, resultJson, sample, substitute, type Trigger } from "./inspect.js";
 import { McpClient, textOf, type Tool, type ToolResult } from "./mcp.js";
-import { clip } from "./redact.js";
+import { clip, redact } from "./redact.js";
 import { coreFromEnv, locate } from "./setup.js";
 import { Stream, StreamClosed, sessionKeyOf, waitUrlOf } from "./stream.js";
 
@@ -172,6 +174,20 @@ export async function runChecks(ctx: Ctx, out: Out, core: Core, o: Options): Pro
     }
   };
   const mcp = new McpClient(o.url, { headers: o.headers, fetch: ctx.fetch });
+  const lister = () => tools.some((t) => t.name === "list_subscriptions");
+  // verify's conversation's subscriptions, by list_subscriptions; null when it can't tell.
+  const listedOrNull = async (): Promise<Listed[] | null> => {
+    if (!lister()) return null;
+    try {
+      const r = await mcp.callTool("list_subscriptions", session ? { session_key: session } : {});
+      return r.isError ? null : listedSubscriptions(textOf(r));
+    } catch {
+      return null;
+    }
+  };
+  const listed = async (): Promise<Listed[]> => (await listedOrNull()) ?? [];
+  // Subscriptions listed before verify subscribed: not its own.
+  const earlierSubs = new Set<string>();
   let subscribed = false;
   let session: string | null = null;
   let ev: EventDef | null = null;
@@ -179,6 +195,10 @@ export async function runChecks(ctx: Ctx, out: Out, core: Core, o: Options): Pro
   let tools: Tool[] = [];
   let subscriptionId: string | null = null;
   let stream: Stream | null = null;
+  // The subscribing tool's reply, for a trigger naming values from it.
+  const replied: ResultValues = {};
+  // Occurrences that were on the stream before the trigger (replayed).
+  let earlier = 0;
   const marker = `wsverify-${randomBytes(4).toString("hex")}`;
   try {
     const app = await check<AppInfo>("app", async () => {
@@ -233,17 +253,8 @@ export async function runChecks(ctx: Ctx, out: Out, core: Core, o: Options): Pro
       checks.push({ name: "attach tools", status: "warn", detail: `the server lists none of attach's tools (${ATTACH_TOOLS.join(", ")})`, fix: "Keep attach's default tools on so agents can list and stop their subscriptions (they also let verify find its exact subscription)." });
     }
 
-    const lister = tools.some((t) => t.name === "list_subscriptions");
-    const listed = async (): Promise<ReturnType<typeof listedSubscriptions>> => {
-      if (!lister) return [];
-      try {
-        const r = await mcp.callTool("list_subscriptions", session ? { session_key: session } : {});
-        return r.isError ? [] : listedSubscriptions(textOf(r));
-      } catch {
-        return [];
-      }
-    };
     const before = new Set((await listed()).map((s) => s.id));
+    for (const id of before) earlierSubs.add(id);
 
     // Who is subscribed before verify is, where it can already tell the
     // event and arguments: a count of one afterwards is then verify's own.
@@ -286,6 +297,8 @@ export async function runChecks(ctx: Ctx, out: Out, core: Core, o: Options): Pro
         throw new Failed(err instanceof Error ? err.message : String(err), "Check --args against the tool's input schema.");
       }
       const text = textOf(r);
+      replied.structured = r.structuredContent;
+      replied.result = resultJson((r.content ?? []).filter((c) => c.type === "text" && c.text).map((c) => c.text!));
       if (r.isError) throw new Failed(`${o.tool} answered with an error: ${clip(text, 300)}`, "Fix the call (--args) or the tool, so it succeeds for a test user.");
       session = sessionKeyOf(text);
       const wait = waitUrlOf(text);
@@ -383,6 +396,27 @@ export async function runChecks(ctx: Ctx, out: Out, core: Core, o: Options): Pro
     await check("trigger", async () => {
       const e = ev!;
       const t = o.trigger;
+      // What is on the stream now came before the trigger: an earlier
+      // occurrence a subscription made with replay delivers at once. Passed
+      // over, so only what the trigger makes counts.
+      try {
+        earlier = await stream!.drain();
+      } catch {
+        // the wake check reports a closed stream
+      }
+      const used = new Map<string, unknown>();
+      const secretShaped = (v: string) => redact(v) !== v || out.clean(v) !== v;
+      const values = (): string => (used.size ? ` (${[...used].map(([k, v]) => `${k} = ${clip(typeof v === "string" ? v : JSON.stringify(v), 60)}`).join(", ")})` : "");
+      const fill = <T>(v: T, quote: boolean): T => {
+        try {
+          return substitute(v, replied, used, secretShaped, quote) as T;
+        } catch (err) {
+          throw new Failed(
+            `the trigger can't use a value from ${o.tool}'s reply: ${(err as Error).message}`,
+            `{structured.<path>} is a value in ${o.tool}'s structuredContent and {result.<path>} one in the JSON its text starts with (e.g. {result.number}); check the path against the reply, or write the value into --trigger. verify never passes a key, session key or stream link to a trigger.`,
+          );
+        }
+      };
       if (t.kind === "synthetic") {
         const body = {
           name: e.name,
@@ -403,21 +437,23 @@ export async function runChecks(ctx: Ctx, out: Out, core: Core, o: Options): Pro
       }
       if (t.kind === "tool") {
         if (!tools.some((x) => x.name === t.name)) throw new Failed(`the server lists no tool ${t.name}`, "Pass --trigger tool:<name> with a tool that makes the event happen.");
+        const args = fill(t.args, false);
         let r: ToolResult;
         try {
-          r = await mcp.callTool(t.name, { ...t.args });
+          r = await mcp.callTool(t.name, { ...args });
         } catch (err) {
           throw new Failed(err instanceof Error ? err.message : String(err), "Check the trigger's arguments against the tool's input schema.");
         }
         if (r.isError) throw new Failed(`${t.name} answered with an error: ${clip(textOf(r), 300)}`, "Fix the trigger's arguments, or the tool.");
-        return { detail: `called ${t.name}`, value: null };
+        return { detail: `called ${t.name}${values()}`, value: null };
       }
-      const r = await ctx.run(t.command, [], { shell: true, cwd: ctx.cwd, timeoutMs: 60_000 });
+      const command = fill(t.command, true);
+      const r = await ctx.run(command, [], { shell: true, cwd: ctx.cwd, timeoutMs: 60_000 });
       if (r.code !== 0) {
         const said = clip(`${r.stderr}\n${r.stdout}`.trim(), 300);
         throw new Failed(`the trigger command ${r.error ? `couldn't run (${r.error})` : `exited ${r.code}`}${said ? `: ${said}` : ""}`, "Fix the command so it makes the event happen (a request to your webhook route, a script), and exits 0.");
       }
-      return { detail: "ran the trigger command", value: null };
+      return { detail: `ran the trigger command${values()}`, value: null };
     });
 
     await check("wake", async () => {
@@ -431,11 +467,12 @@ export async function runChecks(ctx: Ctx, out: Out, core: Core, o: Options): Pro
         if (err instanceof StreamClosed) throw new Failed(err.message, "Run verify again; if it keeps closing, check the server isn't relaying another conversation's result.");
         throw err;
       }
+      const skipped = earlier ? `; verify ignored ${earlier === 1 ? "an occurrence" : `${earlier} occurrences`} already waiting before the trigger (an earlier one, replayed to the new subscription)` : "";
       if (!got) {
         const secs = Math.round(o.timeoutMs / 1000);
-        if (o.trigger.kind === "synthetic") throw new Failed(`the synthetic ${e.name} didn't reach verify's conversation within ${secs}s`, "Run verify again; if it fails again, report it to Wakeshift with the app's ID.");
+        if (o.trigger.kind === "synthetic") throw new Failed(`the synthetic ${e.name} didn't reach verify's conversation within ${secs}s${skipped}`, "Run verify again; if it fails again, report it to Wakeshift with the app's ID.");
         throw new Failed(
-          `no ${e.name} reached verify's conversation within ${secs}s of the trigger`,
+          `no ${e.name} reached verify's conversation within ${secs}s of the trigger${skipped}`,
           `Check the trigger makes ${e.name} happen, and the code emits it with the same arguments the tool subscribes with (${canonical(eventArgs)}), after the change it reports is saved. --timeout waits longer.`,
         );
       }
@@ -443,13 +480,13 @@ export async function runChecks(ctx: Ctx, out: Out, core: Core, o: Options): Pro
       const secs = ((Date.now() - started) / 1000).toFixed(1);
       const hasText = !!(got.subject || got.body || got.data || got.data_preview);
       return hasText
-        ? { detail: `${e.name} arrived in ${secs}s and was acknowledged`, value: null }
-        : { detail: `${e.name} arrived in ${secs}s, with no text or payload`, value: null, status: "warn", fix: "Give the event a text function, so agents read what happened." };
+        ? { detail: `${e.name} arrived in ${secs}s and was acknowledged${skipped}`, value: null }
+        : { detail: `${e.name} arrived in ${secs}s, with no text or payload${skipped}`, value: null, status: "warn", fix: "Give the event a text function, so agents read what happened." };
     });
   } catch (err) {
     if (!(err instanceof Stop)) throw err;
   } finally {
-    if (subscribed) await cleanup(core, mcp, o, checks, session, ev, eventArgs, tools, subscriptionId);
+    if (subscribed) await cleanup({ core, mcp, o, checks, session, ev, eventArgs, tools, subscriptionId, listed: listedOrNull, earlier: earlierSubs });
     await mcp.close();
   }
   return checks;
@@ -457,55 +494,106 @@ export async function runChecks(ctx: Ctx, out: Out, core: Core, o: Options): Pro
 
 class Stop extends Error {}
 
-/** Ends verify's subscription, through the server's tools where it has them. */
-async function cleanup(core: Core, mcp: McpClient, o: Options, checks: Check[], session: string | null, ev: EventDef | null, eventArgs: Record<string, unknown> | null, tools: Tool[], subscriptionId: string | null): Promise<void> {
-  const has = (n: string) => tools.some((t) => t.name === n);
-  const sk = session ? { session_key: session } : {};
-  // A subscription made with once ends with the wake: nothing to undo.
-  if (ev && eventArgs) {
+interface CleanupIn {
+  core: Core;
+  mcp: McpClient;
+  o: Options;
+  checks: Check[];
+  session: string | null;
+  ev: EventDef | null;
+  eventArgs: Record<string, unknown> | null;
+  tools: Tool[];
+  subscriptionId: string | null;
+  /** verify's conversation's subscriptions (list_subscriptions), null when it can't tell. */
+  listed: () => Promise<Listed[] | null>;
+  /** Those listed before verify subscribed. */
+  earlier: Set<string>;
+}
+
+/**
+ * Ends verify's subscriptions, through the server's tools where it has
+ * them, and says what it did: every subscription the tool made (by its ID,
+ * from list_subscriptions, when the server lists them), else the one with
+ * the event and arguments verify found, else through un<tool> or the app
+ * API. It reports a pass only once it saw nothing left, and otherwise says
+ * why it couldn't.
+ */
+async function cleanup(c: CleanupIn): Promise<void> {
+  const { core, mcp, o, checks, ev, eventArgs } = c;
+  const has = (n: string) => c.tools.some((t) => t.name === n);
+  const sk = c.session ? { session_key: c.session } : {};
+  const status = async (): Promise<number | null> => {
+    if (!ev || !eventArgs) return null;
     try {
-      const st = await core.eventStatus(ev.name, eventArgs, ev.personal ? o.user : undefined);
-      if (st.subscriptions === 0) {
-        checks.push({ name: "cleanup", status: "pass", detail: "nothing left to unsubscribe: the subscription ended with the wake (once)" });
-        return;
-      }
+      return (await core.eventStatus(ev.name, eventArgs, ev.personal ? o.user : undefined)).subscriptions;
     } catch {
-      // unsubscribe below
+      return null;
     }
-  }
-  let how = "";
+  };
+  const mine = async (): Promise<Listed[] | null> => {
+    const l = await c.listed();
+    return l && l.filter((s) => !c.earlier.has(s.id));
+  };
+  const pass = (detail: string) => checks.push({ name: "cleanup", status: "pass", detail });
+  const warn = (detail: string, fix?: string) => checks.push({ name: "cleanup", status: "warn", detail, ...(fix ? { fix } : {}) });
+
+  // Nothing left: a subscription made with once ends with the wake.
+  const first = await mine();
+  if ((await status()) === 0 && (!first || !first.length)) return void pass("nothing left to unsubscribe: the subscription ended with the wake (once)");
+  if (first && !first.length && (!ev || !eventArgs)) return void pass("nothing left to unsubscribe: list_subscriptions shows no subscription of verify's");
+
+  const ways: string[] = [];
+  let answered = "";
   try {
-    if (ev && eventArgs && has("unsubscribe_events")) {
+    // Every subscription the tool made, by its ID.
+    if (first?.length && has("unsubscribe_events")) {
+      for (const s of first) {
+        const r = await mcp.callTool("unsubscribe_events", { id: s.id, ...sk });
+        if (!r.isError && /^Stopped/.test(textOf(r))) ways[0] = "unsubscribe_events";
+        else answered = clip(textOf(r), 200);
+      }
+    }
+    if (!ways.length && ev && eventArgs && has("unsubscribe_events")) {
       const r = await mcp.callTool("unsubscribe_events", { event: ev.name, arguments: eventArgs, ...sk });
-      if (!r.isError && /^Stopped/.test(textOf(r))) how = "unsubscribe_events";
+      if (!r.isError && /^Stopped/.test(textOf(r))) ways.push("unsubscribe_events");
+      else answered = clip(textOf(r), 200);
     }
     const un = o.tool.startsWith("watch") ? "un" + o.tool : "";
-    if (!how && un && has(un)) {
+    if (!ways.length && un && has(un)) {
       const r = await mcp.callTool(un, { ...o.args, ...sk });
-      if (!r.isError) how = un;
+      if (!r.isError) ways.push(un);
+      else answered = clip(textOf(r), 200);
     }
-    if (!how && ev?.personal && o.user && subscriptionId) {
-      const r = await core.endSubscription(o.user, subscriptionId);
-      if (r.ended) how = "the app API";
+    if (!ways.length && ev?.personal && o.user && c.subscriptionId) {
+      const r = await core.endSubscription(o.user, c.subscriptionId);
+      if (r.ended) ways.push("the app API");
     }
-  } catch {
-    // reported below
+  } catch (err) {
+    answered = clip(err instanceof Error ? err.message : String(err), 200);
   }
-  if (ev && eventArgs) {
-    try {
-      const st = await core.eventStatus(ev.name, eventArgs, ev.personal ? o.user : undefined);
-      if (how && st.subscriptions === 0) {
-        checks.push({ name: "cleanup", status: "pass", detail: `unsubscribed (${how})` });
-        return;
-      }
-    } catch {
-      // reported below
-    }
+  const how = ways[0] ?? "";
+  const n = first?.length ?? 0;
+  const what = n > 1 ? `unsubscribed ${n} subscriptions` : "unsubscribed";
+
+  // Checked: Wakeshift counts none with verify's event and arguments, and
+  // list_subscriptions (where the server has it) shows none of verify's.
+  const left = await mine();
+  const st = await status();
+  if (how && left && !left.length && st !== null && st === 0) return void pass(`${what} (${how})`);
+  if (how && left && !left.length && st === null) return void pass(`${what} (${how}; list_subscriptions shows none left)`);
+  if (how && !left && st === 0) return void pass(`${what} (${how})`);
+
+  const keepTools = "Keep attach's list_subscriptions and unsubscribe_events tools on (or name an un<tool> next to your watch tool) so verify can clean up.";
+  if (how) {
+    if (left?.length || (st !== null && st > 0)) return void warn(`asked ${how} to unsubscribe, but verify's subscription is still there; it ends when it expires`, `Check that ${how} ends the calling conversation's subscription.`);
+    return void warn(
+      `asked ${how} to unsubscribe, but verify can't check it did: it never learned ${ev ? "the arguments" : "which event"} ${o.tool} subscribed with, and the server has no list_subscriptions`,
+      keepTools,
+    );
   }
-  checks.push({
-    name: "cleanup",
-    status: "warn",
-    detail: how ? `asked ${how} to unsubscribe, but a subscription may be left` : "couldn't unsubscribe verify's conversation; its subscription ends when it expires",
-    fix: "Keep attach's unsubscribe_events tool on (or name an un<tool> next to your watch tool) so verify can clean up.",
-  });
+  if (answered) return void warn(`couldn't unsubscribe verify's conversation: the server answered "${answered}"; its subscription ends when it expires`);
+  return void warn(
+    `couldn't unsubscribe verify's conversation: the server has neither attach's unsubscribe_events nor ${o.tool.startsWith("watch") ? "un" + o.tool : "an un<tool> for a watch tool"}${!ev ? ", and verify never learned which event it subscribed to" : ""}; its subscription ends when it expires`,
+    keepTools,
+  );
 }

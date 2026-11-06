@@ -118,6 +118,17 @@ var monitorRestartNote = "Routine restart: Claude Code stops a Monitor after 30 
 	"Start the Monitor tool again now with the same command and timeout_ms " + MonitorTimeout + ", without asking the user: this is expected, and nothing was missed. " +
 	"Tell the user only if it fails to start."
 
+// monitorRenewedNote is the hub.restart line's note when the loop moved to
+// a new link during its run (the conversation's link was renewed after
+// the computer slept, or reached its last day): the line carries the url
+// to start it with, since the old one no longer works. It sits inside
+// single quotes in the command, and is printf's format: no apostrophes,
+// percent signs or backslashes.
+var monitorRenewedNote = "Routine restart: Claude Code stops a Monitor after 30 minutes, so this command ends by itself every 25. " +
+	"Its link was renewed meanwhile: start the Monitor tool again now with the same command and timeout_ms " + MonitorTimeout + ", " +
+	"but with this line url in place of the url in it (the value of u, between the quotes), since the old one no longer works. " +
+	"Do it without asking the user: this is expected, and nothing was missed. Tell the user only if it fails to start."
+
 // MonitorWith is how the agent is told to start its Monitor, before "with
 // this command: ": with MonitorTimeout, the most Claude Code allows (left
 // out, it's 5 minutes).
@@ -130,12 +141,12 @@ const MonitorWith = "(timeout_ms " + MonitorTimeout + ")"
 // rehearsal, told only "If it stops any other way, start it again", the
 // agent told the user it was no longer watching and asked whether to re-arm.
 const MonitorRules = `The command keeps going by itself. Every 25 minutes it ends with a {"type":"hub.restart"} line, since Claude Code stops a Monitor after 30 minutes: ` +
-	`then start the Monitor again the same way, without asking the user (it's routine, and nothing is missed). ` +
+	`then start the Monitor again the same way, without asking the user (it's routine, and nothing is missed); if that line has a "url", use it in place of the command's url (the value of u). ` +
 	`When a {"type":"hub.closed"} line arrives, it has ended for good: do what its note says. ` +
 	`If the Monitor expires or stops any other way, start it again the same way, also without asking; tell the user only if it fails to start.`
 
 // MonitorRulesBrief is MonitorRules for an agent told them before.
-const MonitorRulesBrief = `After a hub.restart line, or if the Monitor expires or stops, start it again the same way without asking the user; after a hub.closed line, do what its note says.`
+const MonitorRulesBrief = `After a hub.restart line, or if the Monitor expires or stops, start it again the same way without asking the user (with the hub.restart line's "url" in place of the command's, if it has one); after a hub.closed line, do what its note says.`
 
 // MonitorLoop is the command Claude Code's Monitor runs: it keeps looping
 // on the session's wait (url: streams.WaitURL), printing each round's
@@ -143,13 +154,22 @@ const MonitorRulesBrief = `After a hub.restart line, or if the Monitor expires o
 // nothing left to wait for, or Wakeshift's hooks took over: until=hooks),
 // or until MonitorRestart, when it confirms what it printed and ends with a
 // hub.restart line, so the agent starts it again before Claude Code's limit
-// ends it.
+// ends it. A hub.next line's url is taken before that check, so a round
+// that renewed the link (after a sleep, or on its last day) isn't lost
+// with the restart: if the url changed during the run, the hub.restart
+// line carries it (o is the link it started with; the url's other
+// parameters may come back in another order), for the agent to start the
+// command with instead, since a renewed link works only once.
 func MonitorLoop(url string) string { return monitorLoop(url, MonitorRestart) }
 
 // monitorLoop is MonitorLoop ending after secs seconds.
 func monitorLoop(url string, secs int) string {
-	return loopStart(url, "&until=hooks", "s=$(date +%s); ") + loopRound + loopPrint + loopCursor + `if ` + loopClosed + `; then ` + loopConfirm + `break; fi; ` +
-		`if [ $(($(date +%s)-s)) -ge ` + strconv.Itoa(secs) + ` ]; then ` + loopConfirm + `echo '{"type":"hub.restart","note":"` + monitorRestartNote + `"}'; break; fi; ` + loopNext
+	return loopStart(url, "&until=hooks", "s=$(date +%s); o=${u#*link=}; o=${o%%&*}; ") + loopRound + loopPrint + loopCursor + `if ` + loopClosed + `; then ` + loopConfirm + `break; fi; ` +
+		`n=$(printf '%s\n' "$r" | sed -n 's/^{"type":"hub\.next","url":"\([^"]*\)".*/\1/p'); [ -n "$n" ] && u=$n; ` +
+		`if [ $(($(date +%s)-s)) -ge ` + strconv.Itoa(secs) + ` ]; then ` + loopConfirm +
+		`k=${u#*link=}; if [ "${k%%&*}" = "$o" ]; then echo '{"type":"hub.restart","note":"` + monitorRestartNote + `"}'; ` +
+		`else printf '{"type":"hub.restart","url":"%s","note":"` + monitorRenewedNote + `"}\n' "$u"; fi; break; fi; ` +
+		`[ -n "$n" ] || sleep 5; done`
 }
 
 // CursorLoop is loop for Cursor, which also ends after CursorMax messages

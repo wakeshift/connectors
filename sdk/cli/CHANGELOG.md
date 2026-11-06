@@ -2,6 +2,12 @@
 
 What changed in each release of `@wakeshift/cli`.
 
+## 0.1.2 (2026-11-06)
+
+- **`verify`'s cleanup report is accurate when it fails early.** It ends every subscription the tool made, by its ID from `list_subscriptions` (a tool that subscribes to several events, too), including after it fails at the event check, and passes once it sees none left. When it can't end them or check that it did, it says why, rather than warning that `unsubscribe_events` was missing when it was there.
+- **`--trigger` can use values from the subscribing tool's reply**: `{result.<path>}` in the JSON its text starts with, `{structured.<path>}` in its `structuredContent`, such as `--trigger 'tool:cancel_build:{"number":"{result.number}"}'` for the build the tool started. In a `cmd:` trigger the value is quoted for the shell. A value that looks like a key, a session key or a stream link is refused.
+- **`verify` ignores an occurrence that was waiting before its trigger**, such as an earlier run's that a subscription made with `replay` delivers at once, and says it did: only what arrives after the trigger passes the wake check.
+
 ## 0.1.1 (2026-11-06)
 
 - **`verify`** subscribes as Claude Code (the tool's `harness` argument) and holds the stream as Claude Code's Monitor does: Wakeshift no longer gives a program it doesn't recognize a command to wait with, so the subscribe check failed against it. A tool whose reply has Wakeshift's block but no command still fails that check, and verify now unsubscribes after it.

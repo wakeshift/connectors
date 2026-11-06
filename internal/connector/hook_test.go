@@ -184,6 +184,51 @@ func TestHookLinkChanges(t *testing.T) {
 	}
 }
 
+// expiringPoller answers its first expired polls link_expired
+// (ErrLinkExpired), then as fakePoller does.
+type expiringPoller struct {
+	*fakePoller
+	expired int
+	calls   int
+}
+
+func (p *expiringPoller) Poll(ctx context.Context, link string, wait time.Duration, patient bool) (Batch, error) {
+	p.mu.Lock()
+	p.calls++
+	n := p.calls
+	p.mu.Unlock()
+	if n <= p.expired {
+		return Batch{}, ErrLinkExpired
+	}
+	return p.fakePoller.Poll(ctx, link, wait, patient)
+}
+
+// An expired link (401 link_expired) is kept and polled again after a
+// pause: Wakeshift renews a link that expired while the computer slept,
+// answering with its successor, which replaces it. One that keeps coming
+// back expired is dropped after a few tries.
+func TestHookKeepsAnExpiredLinkForItsRenewal(t *testing.T) {
+	ws := newFakeWakeshift(t)
+	p := &expiringPoller{fakePoller: newFakePoller(), expired: 1}
+	h := testHook(t, ws, p.fakePoller)
+	h.Poller = p
+	h.StopWait = 3 * time.Second
+	h.Links.Save("c", "wss://wakeshift.test/v1/stream?link=a")
+	p.rotate = "wss://wakeshift.test/v1/stream?link=b"
+	call(h, map[string]any{"event": "stop", "conversation": "c"})
+	if h.Links.Load("c") != "wss://wakeshift.test/v1/stream?link=b" || p.calls < 2 {
+		t.Fatalf("after an expired poll: %q (%d polls)", h.Links.Load("c"), p.calls)
+	}
+
+	p = &expiringPoller{fakePoller: newFakePoller(), expired: 1000}
+	h.Poller = p
+	h.StopWait = 15 * time.Second
+	call(h, map[string]any{"event": "stop", "conversation": "c"})
+	if h.Links.Load("c") != "" || p.calls != expiredRetries+1 {
+		t.Fatalf("never renewed: %q after %d polls", h.Links.Load("c"), p.calls)
+	}
+}
+
 // deadlinePoller records how long each poll asked the server to wait, and
 // how long its context had left.
 type deadlinePoller struct {

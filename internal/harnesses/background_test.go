@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -202,6 +203,51 @@ func TestMonitorLoopRestarts(t *testing.T) {
 	}
 	if MonitorTimeout != "1800000" || !strings.Contains(MonitorWith, "timeout_ms "+MonitorTimeout) {
 		t.Fatalf("timeout %s, %s", MonitorTimeout, MonitorWith)
+	}
+}
+
+// A round that renewed the conversation's link (the computer slept past
+// its expiry, or it reached its last day) answers hub.next with a new
+// link, which works once: the loop moves to it, and when it ends for its
+// restart, its hub.restart line carries that url for the agent to start
+// the command with instead of the old one. Even when the renewal comes in
+// the round that ends the run (a sleep is longer than the run).
+func TestMonitorLoopRestartCarriesARenewedLink(t *testing.T) {
+	for _, slept := range []bool{false, true} {
+		var mu sync.Mutex
+		var links []string
+		var renewed string
+		srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			links = append(links, r.URL.Query().Get("link"))
+			first, renewed := len(links) == 1, renewed
+			mu.Unlock()
+			if first && slept {
+				time.Sleep(2200 * time.Millisecond) // the run's time is up when it answers
+			}
+			if !first {
+				time.Sleep(50 * time.Millisecond)
+			}
+			rw.Write([]byte(`{"type":"hub.next","url":"` + renewed + `","note":"Run the command again now, as before."}` + "\n"))
+		}))
+		mu.Lock()
+		renewed = srv.URL + "/v1/stream/wait?link=new.b&timeout=50s&until=hooks"
+		mu.Unlock()
+		out := runShell(t, monitorLoop(srv.URL+"/v1/stream/wait?link=old.a", 2))
+		var last struct{ Type, URL, Note string }
+		if len(out) != 1 || json.Unmarshal([]byte(out[0]), &last) != nil || last.Type != "hub.restart" || last.URL != renewed {
+			t.Fatalf("slept %v: printed %q", slept, out)
+		}
+		for _, want := range []string{"renewed", "this line url in place of the url in it", "timeout_ms " + MonitorTimeout, "without asking the user"} {
+			if !strings.Contains(last.Note, want) {
+				t.Errorf("slept %v: note missing %q: %s", slept, want, last.Note)
+			}
+		}
+		mu.Lock()
+		if links[0] != "old.a" || slices.Contains(links[1:], "old.a") {
+			t.Fatalf("slept %v: links %q", slept, links)
+		}
+		mu.Unlock()
 	}
 }
 

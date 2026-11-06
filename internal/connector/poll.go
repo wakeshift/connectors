@@ -30,8 +30,10 @@ import (
 //	     next poll gets back what isn't (at least once).
 //	POST <origin>/v1/stream/ack {"delivery_ids": ["…"]}  Authorization: Bearer <token>
 //	     200 {"acked": ["…"]}
-//	401: the link was revoked or expired. 409: a newer poll or connection
-//	took the stream. 503: try again.
+//	401: the link was revoked ("link_revoked") or expired ("link_expired":
+//	a session's link that expired while nothing polled it, within a day, is
+//	renewed instead, a 200 with no deliveries and its successor in rotate).
+//	409: a newer poll or connection took the stream. 503: try again.
 //
 // <origin> and <token> come from the stream link itself
 // (wss://host/v1/stream?link=<token>): same host, https for wss. The token
@@ -58,8 +60,14 @@ type Batch struct {
 }
 
 var (
-	// ErrLinkGone: the link was revoked or expired; forget it.
+	// ErrLinkGone: the link was revoked (or is otherwise no good); forget it.
 	ErrLinkGone = errors.New("the stream link was revoked or expired")
+	// ErrLinkExpired: the link expired (401 link_expired). Wakeshift renews
+	// a session's link that expired while nothing polled it (a laptop
+	// asleep) by answering a poll with its successor in rotate, so this
+	// means it didn't: keep the link and try again a few times (an instance
+	// from before the renewal may have answered), then forget it.
+	ErrLinkExpired = errors.New("the stream link expired")
 	// ErrReplaced: a newer poll or connection holds the stream; stop
 	// listening (it will deliver).
 	ErrReplaced = errors.New("a newer poll took the stream")
@@ -177,7 +185,17 @@ func (p *HTTPPoller) do(ctx context.Context, method, link, path string, body any
 			return errors.New("Wakeshift's answer wasn't JSON")
 		}
 		return nil
-	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusGone:
+	case http.StatusUnauthorized:
+		var e struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&e) == nil && e.Error.Code == "link_expired" {
+			return ErrLinkExpired
+		}
+		return ErrLinkGone
+	case http.StatusForbidden, http.StatusNotFound, http.StatusGone:
 		return ErrLinkGone
 	case http.StatusConflict:
 		return ErrReplaced

@@ -34,7 +34,9 @@ Commands:
                 --tool <name>           the tool that subscribes the conversation
                 --args <json>           its arguments
                 --trigger <how>         tool:<name>[:<json>] or cmd:<command> to make the
-                                        event happen (default: verify emits a test event)
+                                        event happen (default: verify emits a test event);
+                                        {result.<path>} or {structured.<path>} in it is a
+                                        value from the tool's reply ({result.number})
                 --header-env <NAME>     send Authorization: Bearer $NAME, for a server
                                         with its own sign-in
                 --event <name>          which event, if the tool declares several

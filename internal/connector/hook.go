@@ -644,6 +644,7 @@ func (h *Hook) takeOne(ctx context.Context, conversation, link string, wait time
 	if repoll <= 0 {
 		repoll = 25 * time.Second
 	}
+	expired := 0 // polls answered link_expired (ErrLinkExpired)
 	for backoff, first := time.Second, true; ; first = false {
 		w := repoll
 		if !deadline.IsZero() {
@@ -669,8 +670,19 @@ func (h *Hook) takeOne(ctx context.Context, conversation, link string, wait time
 		switch err {
 		case ErrLinkGone:
 			h.Links.ForgetLink(conversation, link)
-			why = "the link was revoked or expired"
+			why = "the link was revoked"
 			return nil, nil, why
+		case ErrLinkExpired:
+			// Wakeshift renews a link that expired while nothing polled it
+			// (the computer slept), answering with its successor: kept, and
+			// tried again after the pause below, a few times, in case an
+			// instance from before the renewal answered. Then it's dropped.
+			if expired++; expired > expiredRetries {
+				h.Links.ForgetLink(conversation, link)
+				why = "the link expired and Wakeshift didn't renew it"
+				return nil, nil, why
+			}
+			why = "the link expired; trying again for its renewal"
 		case ErrReplaced:
 			switch {
 			case h.stale != nil && h.stale():
@@ -751,6 +763,10 @@ func (h *Hook) takeOne(ctx context.Context, conversation, link string, wait time
 		}
 	}
 }
+
+// expiredRetries is how many more times a listener polls a link answered
+// link_expired (ErrLinkExpired), pausing between, before it drops it.
+const expiredRetries = 3
 
 // minPoll is the shortest wait worth polling for once the deadline nears.
 const minPoll = 100 * time.Millisecond

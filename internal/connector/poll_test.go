@@ -15,11 +15,12 @@ import (
 // the URL), wait in seconds, rotation, acks, and the refusals.
 func TestHTTPPoller(t *testing.T) {
 	var gotAuth, gotQuery, ackBody string
-	status := 200
+	status, body := 200, ""
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		if status != 200 {
 			w.WriteHeader(status)
+			w.Write([]byte(body))
 			return
 		}
 		switch r.Method + " " + r.URL.Path {
@@ -61,7 +62,15 @@ func TestHTTPPoller(t *testing.T) {
 			t.Fatalf("%d: %v", code, err)
 		}
 	}
-	status = 503
+	// 401 says which: expired (kept, tried again: Wakeshift may renew it)
+	// or revoked (forgotten).
+	for code, want := range map[string]error{"link_expired": ErrLinkExpired, "link_revoked": ErrLinkGone, "invalid_link": ErrLinkGone} {
+		status, body = 401, `{"error":{"code":"`+code+`","message":"…"}}`
+		if _, err := p.Poll(context.Background(), link, 0, false); err != want {
+			t.Fatalf("401 %s: %v", code, err)
+		}
+	}
+	status, body = 503, ""
 	if _, err := p.Poll(context.Background(), link, 0, false); err == nil || errors.Is(err, ErrLinkGone) {
 		t.Fatalf("503: %v", err)
 	}

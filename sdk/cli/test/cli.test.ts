@@ -12,7 +12,7 @@ import { main } from "../src/cli.js";
 import { getVar, readEnvFile } from "../src/envfile.js";
 import { generateKey, parseKey } from "../src/key.js";
 import { VERSION } from "../src/version.js";
-import { assertNoKey, BUILD_FINISHED, FakeCore, FakeMcp, TestCtx } from "./fakes.js";
+import { assertNoKey, BUILD_FINISHED, BUILD_STARTED, FakeCore, FakeMcp, TestCtx } from "./fakes.js";
 
 let core: FakeCore;
 before(async () => {
@@ -441,6 +441,112 @@ test("verify: a live app needs --live-app; a lost wake fails", async () => {
     assert.match(c.out, /FAIL +wake +the synthetic build\.finished didn't reach/);
   } finally {
     core.dropEmits = false;
+    await mcp.stop();
+    c.cleanup();
+  }
+});
+
+test("verify: failing at the event check, it still ends every subscription the tool made, and says so", async () => {
+  const c = ctx();
+  const k = generateKey();
+  core.addApp("two-dev", "Shipyard", { description: "", events: [BUILD_FINISHED, BUILD_STARTED] }).keys.set(k.kid, k.publicKey);
+  writeFileSync(join(c.cwd, ".env"), `WAKESHIFT_KEY=${k.envValue()}\n`);
+  const mcp = await new FakeMcp(core, { twoEvents: true }, "pipe-two").start();
+  try {
+    assert.equal(await run(c, ["verify", "--url", mcp.url, "--tool", "watch_build", "--args", '{"number":5}', "--json"]), 1);
+    const checks = checksOf(c.out);
+    const bad = checks.find((x) => x.status === "fail")!;
+    assert.equal(bad.name, "event");
+    assert.match(bad.detail, /declares build\.finished, build\.started/);
+    const clean = checks.find((x) => x.name === "cleanup")!;
+    assert.equal(clean.status, "pass", JSON.stringify(clean));
+    assert.match(clean.detail, /unsubscribed 2 subscriptions \(unsubscribe_events/);
+    assert.equal(core.subs.filter((s) => !s.ended && s.args.pipeline === "pipe-two").length, 0, "a subscription was left");
+    assert.equal(mcp.calls.filter((x) => x.name === "unsubscribe_events" && typeof x.args.id === "string").length, 2);
+  } finally {
+    await mcp.stop();
+    c.cleanup();
+  }
+});
+
+test("verify: when it can't check its cleanup, it says why", async () => {
+  const c = ctx();
+  const k = generateKey();
+  core.addApp("two2-dev", "Shipyard", { description: "", events: [BUILD_FINISHED, BUILD_STARTED] }).keys.set(k.kid, k.publicKey);
+  writeFileSync(join(c.cwd, ".env"), `WAKESHIFT_KEY=${k.envValue()}\n`);
+  const mcp = await new FakeMcp(core, { twoEvents: true, noAttachTools: true }, "pipe-two2").start();
+  try {
+    assert.equal(await run(c, ["verify", "--url", mcp.url, "--tool", "watch_build", "--args", '{"number":5}', "--json"]), 1);
+    const clean = checksOf(c.out).find((x) => x.name === "cleanup")!;
+    assert.equal(clean.status, "warn");
+    assert.match(clean.detail, /asked unwatch_build to unsubscribe, but verify can't check it did: it never learned which event watch_build subscribed with, and the server has no list_subscriptions/);
+    assert.match(clean.fix!, /list_subscriptions and unsubscribe_events/);
+  } finally {
+    for (const s of core.subs) if (s.args.pipeline === "pipe-two2") s.ended = true;
+    await mcp.stop();
+    c.cleanup();
+  }
+});
+
+test("verify: a trigger names values from the subscribing tool's reply", async () => {
+  const { c } = await verifyApp("result-dev");
+  const mcp = await new FakeMcp(core, { json: true }, "pipe-result").start();
+  try {
+    // {result.<path>}: a whole-string placeholder keeps the value's type.
+    assert.equal(await run(c, ["verify", "--url", mcp.url, "--tool", "watch_build", "--args", '{"number":412}', "--trigger", 'tool:cancel_build:{"number":"{result.number}"}', "--json"]), 0, c.out);
+    assert.deepEqual(mcp.calls.find((x) => x.name === "cancel_build")!.args, { number: 412 });
+    assert.match(checksOf(c.out).find((x) => x.name === "trigger")!.detail, /called cancel_build \(\{result\.number\} = 412\)/);
+
+    // {structured.<path>} in a command, quoted for the shell.
+    c.out = "";
+    c.ran = [];
+    assert.equal(await run(c, ["verify", "--url", mcp.url, "--tool", "watch_build", "--args", '{"number":413}', "--trigger", "cmd:test {structured.run}-x = run-413-x", "--timeout", "1", "--json"]), 1);
+    const checks = checksOf(c.out);
+    assert.equal(checks.find((x) => x.name === "trigger")!.status, "pass", JSON.stringify(checks));
+    assert.equal(c.ran[0].cmd, "test 'run-413'-x = run-413-x");
+
+    // A path the reply doesn't have fails the trigger, running nothing.
+    c.out = "";
+    const cancels = mcp.calls.filter((x) => x.name === "cancel_build").length;
+    assert.equal(await run(c, ["verify", "--url", mcp.url, "--tool", "watch_build", "--args", '{"number":414}', "--trigger", 'tool:cancel_build:{"number":"{result.build.id}"}', "--json"]), 1);
+    const bad = checksOf(c.out).find((x) => x.status === "fail")!;
+    assert.equal(bad.name, "trigger");
+    assert.match(bad.detail, /\{result\.build\.id\}: the tool's reply has no build\.id/);
+    assert.match(bad.fix!, /\{structured\.<path>\}/);
+    assert.equal(mcp.calls.filter((x) => x.name === "cancel_build").length, cancels);
+
+    // Wakeshift's block (a session key, a stream link) is never handed to a trigger.
+    c.out = "";
+    c.ran = [];
+    assert.equal(await run(c, ["verify", "--url", mcp.url, "--tool", "watch_build", "--args", '{"number":415}', "--trigger", "cmd:echo {structured.wakeshift}", "--json"]), 1);
+    assert.match(checksOf(c.out).find((x) => x.name === "trigger")!.detail, /looks like a key, a session key or a link/);
+    assert.equal(c.ran.length, 0);
+    assert.ok(!c.out.includes("wsc_secret") && !/link\d+x/.test(c.out));
+    assert.equal(core.subs.filter((s) => !s.ended).length, 0);
+  } finally {
+    await mcp.stop();
+    c.cleanup();
+  }
+});
+
+test("verify: an occurrence replayed to its subscription, from before the trigger, doesn't count", async () => {
+  const { c } = await verifyApp("replay-dev");
+  const mcp = await new FakeMcp(core, { replay: true }, "pipe-replay").start();
+  try {
+    // A first run: build #9 finishes (verify's cancel_build).
+    assert.equal(await run(c, ["verify", "--url", mcp.url, "--tool", "watch_build", "--args", '{"number":9}', "--trigger", 'tool:cancel_build:{"number":9}']), 0, c.out);
+    assert.doesNotMatch(c.out, /ignored/);
+    // Again, with a trigger that makes nothing happen: the replayed one doesn't pass it.
+    c.out = "";
+    assert.equal(await run(c, ["verify", "--url", mcp.url, "--tool", "watch_build", "--args", '{"number":9}', "--trigger", "cmd:true", "--timeout", "1", "--json"]), 1);
+    const wake = checksOf(c.out).find((x) => x.name === "wake")!;
+    assert.equal(wake.status, "fail");
+    assert.match(wake.detail, /no build\.finished reached .*; verify ignored an occurrence already waiting before the trigger \(an earlier one, replayed/);
+    // And with a trigger that does: it passes on the new one, and says it skipped the replay.
+    c.out = "";
+    assert.equal(await run(c, ["verify", "--url", mcp.url, "--tool", "watch_build", "--args", '{"number":9}', "--trigger", 'tool:cancel_build:{"number":9}']), 0, c.out);
+    assert.match(c.out, /PASS +wake +build\.finished arrived in [\d.]+s and was acknowledged; verify ignored an occurrence already waiting before the trigger/);
+  } finally {
     await mcp.stop();
     c.cleanup();
   }

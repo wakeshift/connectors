@@ -3,8 +3,8 @@
 `wakeshift-cli` sets up a [Wakeshift](https://wakeshift.ai) app for your MCP server and checks that the server wakes agents. Your coding agent can run it for you, and it never shows the app's key to anyone: not on the screen, not in a link, not in the agent's transcript.
 
 ```sh
-npx -y @wakeshift/cli@0.1.1 init
-npx -y @wakeshift/cli@0.1.1 verify --url http://localhost:3000/mcp --tool watch_build --args '{"number":412}'
+npx -y @wakeshift/cli@0.1.2 init
+npx -y @wakeshift/cli@0.1.2 verify --url http://localhost:3000/mcp --tool watch_build --args '{"number":412}'
 ```
 
 It needs Node 22 or later, and has no dependencies beyond Node itself.
@@ -59,12 +59,21 @@ With your server running (and `.env` loaded), `verify` acts as an agent (Claude 
 | arguments | verify can tell the arguments the tool subscribed with (from `list_subscriptions`, `--event-args` or `--args`) |
 | guard | nobody but verify is subscribed with those arguments |
 | trigger | the event is made to happen: `--trigger tool:<name>[:<json>]` calls one of your tools, `--trigger cmd:<command>` runs a command (a request to your webhook route), and without `--trigger` verify emits a test event itself |
-| wake | the event reaches verify's conversation within 30 seconds (`--timeout`) |
-| cleanup | verify's subscription is gone: it ended with the wake (a tool that subscribes with `once`), or verify ended it through `unsubscribe_events` or an `un<tool>` next to the tool |
+| wake | the event reaches verify's conversation within 30 seconds (`--timeout`) of the trigger. Anything already waiting before the trigger, such as an earlier occurrence a subscription made with `replay` delivers at once, doesn't count, and verify says it ignored it |
+| cleanup | verify's subscriptions are gone: they ended with the wake (a tool that subscribes with `once`), or verify ended them through `unsubscribe_events` (every one the tool made, by its ID from `list_subscriptions`) or an `un<tool>` next to the tool. When it can't end or check them, it says why |
 
 Each failure comes with what to fix. `verify` exits 0 only when nothing failed.
 
 **It never wakes your users.** Before anything is emitted, it asks Wakeshift who is subscribed with those arguments; if anyone besides verify is, it stops without emitting or running the trigger. Use routing values only verify uses: put `wsverify-` and a random suffix in a free-text argument, such as `--args '{"pipeline":"wsverify-3f9a"}'`. It runs against a development app unless you pass `--live-app`, and it unsubscribes when it's done.
+
+**Values from the tool's reply in the trigger.** When the event needs something the subscribing tool returns, such as the number of the build it started, name it in `--trigger`: `{result.<path>}` is a value in the JSON the tool's text reply starts with, and `{structured.<path>}` one in its `structuredContent`. A path is keys and array indexes separated by dots (`{result.build.number}`, `{structured.items.0.id}`).
+
+```sh
+npx -y @wakeshift/cli verify --url http://localhost:3000/mcp --tool start_build --args '{"branch":"wsverify-3f9a"}' \
+  --trigger 'tool:cancel_build:{"number":"{result.number}"}'
+```
+
+In a tool trigger's JSON, a string that is only a placeholder becomes the value itself (a number stays a number); anywhere else the value is written as text, and in a `cmd:` trigger it's quoted for the shell (`cmd:curl -X POST http://localhost:3000/builds/{result.number}/cancel`). verify refuses a value that looks like a key, a session key or a stream link, and redacts the trigger's output as before.
 
 **A server with its own sign-in.** Pass `--header-env NAME`, the name of an environment variable that holds a test user's token: verify sends it as `Authorization: Bearer <token>`. The token never goes on the command line, and verify never prints it.
 

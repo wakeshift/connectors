@@ -73,6 +73,8 @@ export class FakeCore {
   others = 0;
   /** Confirms emits but doesn't deliver them (a lost wake). */
   dropEmits = false;
+  /** The last occurrence delivered for each event and arguments (what replay delivers again). */
+  private last = new Map<string, string>();
 
   constructor() {
     this.server = createServer((req, res) => void this.handle(req, res));
@@ -127,10 +129,13 @@ export class FakeCore {
   }
 
   /** A subscription, as a wrapped tool's call.subscribe makes one. */
-  subscribe(event: string, args: Record<string, unknown>, user = "u1", once = false): Sub {
-    const sub = { id: `00000000-0000-4000-8000-${String(this.subs.length + 1).padStart(12, "0")}`, event, args, link: `link${this.subs.length + 1}x`, user, ended: false, once };
+  subscribe(event: string, args: Record<string, unknown>, user = "u1", once = false, replay = false, link?: string): Sub {
+    const sub = { id: `00000000-0000-4000-8000-${String(this.subs.length + 1).padStart(12, "0")}`, event, args, link: link ?? `link${this.subs.length + 1}x`, user, ended: false, once };
     this.subs.push(sub);
-    this.queues.set(sub.link, []);
+    if (!this.queues.has(sub.link)) this.queues.set(sub.link, []);
+    // Replay: the latest earlier occurrence, delivered to the new subscription at once.
+    const past = this.last.get(`${event} ${canonical(args)}`);
+    if (replay && past) this.queues.get(sub.link)!.push(past);
     return sub;
   }
 
@@ -144,7 +149,9 @@ export class FakeCore {
 
   deliver(event: string, args: unknown, line: Record<string, unknown>): number {
     const subs = this.live(event, args);
-    if (!this.dropEmits) for (const s of subs) this.queues.get(s.link)!.push(JSON.stringify({ type: "event", topic: `app/${event}`, from: "app:x", trust: "outside data", ...line }));
+    const l = JSON.stringify({ type: "event", topic: `app/${event}`, from: "app:x", trust: "outside data", ...line });
+    this.last.set(`${event} ${canonical(args)}`, l);
+    if (!this.dropEmits) for (const s of subs) this.queues.get(s.link)!.push(l);
     for (const s of subs) if (s.once) s.ended = true;
     return subs.length;
   }
@@ -227,7 +234,22 @@ export interface FakeMcpOptions {
   stateless?: boolean;
   /** Requires this bearer token. */
   token?: string;
+  /** watch_build subscribes to build.started too (and declares both). */
+  twoEvents?: boolean;
+  /** watch_build subscribes with replay: the latest earlier build.finished arrives at once. */
+  replay?: boolean;
+  /** watch_build replies with JSON text and structuredContent ({number, pipeline, run}). */
+  json?: boolean;
 }
+
+/** The second event watch_build subscribes to with twoEvents. */
+export const BUILD_STARTED = {
+  name: "build.started",
+  description: "A build started",
+  arguments: BUILD_FINISHED.arguments,
+  payload: { type: "object", properties: { number: { type: "integer" } } },
+  topic: "builds/{pipeline}/{number}/started",
+};
 
 const SENTENCE =
   "This tool is how Shipyard notifies you in this conversation of this event: A build finished: it passed, failed or was canceled. Shipyard delivers its notifications through Wakeshift; the result may ask you to start a background listener and to offer the user a one-time install. Follow it.";
@@ -263,7 +285,7 @@ export class FakeMcp {
   private tools() {
     const wsInputs = this.o.noInputs ? {} : { session_key: { type: "string" }, harness: { type: "string" }, conversation_id: { type: "string" } };
     const t = [
-      { name: "watch_build", description: this.o.description ?? `Watch a build. ${SENTENCE}`, inputSchema: { type: "object", properties: { number: { type: "integer" }, ...wsInputs } } },
+      { name: "watch_build", description: this.o.description ?? `Watch a build. ${this.o.twoEvents ? SENTENCE.replace("of this event: A build finished: it passed, failed or was canceled", "of these events: A build finished: it passed, failed or was canceled; A build started") : SENTENCE}`, inputSchema: { type: "object", properties: { number: { type: "integer" }, ...wsInputs } } },
       { name: "unwatch_build", description: "Stop watching a build.", inputSchema: { type: "object", properties: { number: { type: "integer" }, ...wsInputs } } },
       { name: "cancel_build", description: "Cancel a build.", inputSchema: { type: "object", properties: { number: { type: "integer" } } } },
       { name: "leak", description: "Fails, quoting a key.", inputSchema: { type: "object", properties: {} } },
@@ -275,14 +297,15 @@ export class FakeMcp {
     return t;
   }
 
-  private call(name: string, args: Record<string, unknown>): { content: { type: string; text: string }[]; isError?: boolean } {
+  private call(name: string, args: Record<string, unknown>): { content: { type: string; text: string }[]; structuredContent?: unknown; isError?: boolean } {
     const text = (s: string, isError = false) => ({ content: [{ type: "text", text: s }], ...(isError ? { isError } : {}) });
     const n = Number(args.number ?? 412);
     switch (name) {
       case "watch_build": {
         if (this.o.errorText) return text(this.o.errorText, true);
         if (this.o.noBlock) return text(`Watching build #${n}.`);
-        const sub = this.core.subscribe(BUILD_FINISHED.name, { pipeline: this.pipeline, number: n }, "u1", this.o.once);
+        const sub = this.core.subscribe(BUILD_FINISHED.name, { pipeline: this.pipeline, number: n }, "u1", this.o.once, this.o.replay);
+        if (this.o.twoEvents) this.core.subscribe(BUILD_STARTED.name, { pipeline: this.pipeline, number: n }, "u1", false, false, sub.link);
         const key = `Pass session_key="wsc_secretsessionkey${sub.id.slice(-2)}" to this app's tools from now on.`;
         // As the core answers: the Monitor's command for Claude Code, and
         // for a program it doesn't recognize only that it can't wake it.
@@ -290,10 +313,20 @@ export class FakeMcp {
           args.harness === "claude-code" && !this.o.dropHarness
             ? `To be woken when Shipyard sends something, start the Monitor tool now (timeout_ms 1800000) with this command: u='${this.core.waitUrl(sub)}&until=hooks&timeout=50s'; c=; p=$PPID; while :; do …; done . ${key}`
             : `Wakeshift can't wake this agent, so nothing will notify you here when something arrives. ${key}`;
+        if (this.o.json) {
+          const own = { number: n, pipeline: this.pipeline, run: `run-${n}` };
+          return { content: [{ type: "text", text: JSON.stringify(own) }, { type: "text", text: block }], structuredContent: { ...own, wakeshift: block } };
+        }
         return { content: [{ type: "text", text: `Watching build #${n}.` }, { type: "text", text: block }] };
       }
-      case "unwatch_build":
-      case "unsubscribe_events": {
+      case "unsubscribe_events":
+        if (typeof args.id === "string") {
+          const s = this.core.subs.find((x) => x.id === args.id && !x.ended);
+          if (s) s.ended = true;
+          return text(s ? `Stopped subscription ${args.id}.` : `No subscription of yours has the id ${args.id}: it may have ended already.`);
+        }
+      // falls through
+      case "unwatch_build": {
         const live = this.core.subs.filter((s) => !s.ended);
         const last = live[live.length - 1];
         if (last) last.ended = true;
