@@ -103,6 +103,19 @@ func Picker() []PickerAgent {
 			},
 		},
 		{
+			ID: "hermes", Name: "Hermes Agent", Group: "main",
+			Steps: []PickerStep{
+				run("hermes mcp add {name} --url {url}{hermesauth}"),
+				{Kind: "note", Text: "Run it where Hermes runs (in Docker, inside its container); if it asks whether the server requires authentication, answer no. In a running chat, /reload-mcp picks it up, or start a new chat."},
+				{Kind: "file", Label: "Or add it to $HERMES_HOME/config.yaml (~/.hermes/config.yaml unless it's set)", Text: "mcp_servers:\n  {name}:\n    url: {url}{hermesauthyaml}"},
+			},
+			Wakes: []string{
+				"The agent offers a one-time install of Wakeshift's plugin for Hermes. Say yes (Hermes may ask you to approve the command once). If the install says the running gateway loaded the plugin, just send any message. Otherwise Hermes loads it when a chat starts or is resumed, so resume the chat (exit and run hermes chat --continue, or restart the gateway) or start a new one, and send any message.",
+				"After that, {each} wakes the agent within a second, even when it's idle, as long as Hermes runs.",
+				"Chat in Hermes's TUI (hermes --tui) to see each woken turn: the classic hermes chat runs it without showing it.",
+			},
+		},
+		{
 			ID: "antigravity", Name: "Antigravity", Group: "more",
 			Steps: []PickerStep{run("agy mcp add {name} {url}")},
 			Wakes: []string{
@@ -120,18 +133,6 @@ func Picker() []PickerAgent {
 				"Open a Work chat (ChatGPT Business or Enterprise; on desktop, choose Cloud), turn on the connector, and ask ChatGPT to subscribe.",
 				"{Each} then starts a new ChatGPT run. A run takes longer to start than other agents' wakes.",
 				"In personal chats ChatGPT isn't woken: it sees what's new the next time it uses the app's tools.",
-			},
-		},
-		{
-			ID: "hermes", Name: "Hermes Agent", Group: "more",
-			Steps: []PickerStep{
-				run("hermes mcp add {name} --url {url}{hermesauth}"),
-				{Kind: "note", Text: "Run it where Hermes runs (in Docker, inside its container); if it asks whether the server requires authentication, answer no. In a running chat, /reload-mcp picks it up, or start a new chat."},
-				{Kind: "file", Label: "Or add it to $HERMES_HOME/config.yaml (~/.hermes/config.yaml unless it's set)", Text: "mcp_servers:\n  {name}:\n    url: {url}{hermesauthyaml}"},
-			},
-			Wakes: []string{
-				"The agent offers a one-time install of Wakeshift's plugin for Hermes. Say yes (Hermes may ask you to approve the command once). If the install says the running gateway loaded the plugin, just send any message. Otherwise Hermes loads it when a chat starts or is resumed, so resume the chat (exit and run hermes chat --continue, or restart the gateway) or start a new one, and send any message.",
-				"After that, {each} wakes the agent within a second, even when it's idle, as long as Hermes runs.",
 			},
 		},
 		{

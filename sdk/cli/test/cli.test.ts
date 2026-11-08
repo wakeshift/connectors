@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { main } from "../src/cli.js";
 import { getVar, readEnvFile } from "../src/envfile.js";
 import { generateKey, parseKey } from "../src/key.js";
+import { WAITLISTED } from "../src/setup.js";
 import { VERSION } from "../src/version.js";
 import { assertNoKey, BUILD_FINISHED, BUILD_STARTED, FakeCore, FakeMcp, TestCtx } from "./fakes.js";
 
@@ -115,12 +116,35 @@ test("init: --replace makes a new key; without it an unusable key is refused", a
   c.cleanup();
 });
 
-test("init: a waitlisted account exits 3", async () => {
+test("init: a waitlisted person exits 3 at once, with a plain message, and keeps the key", async () => {
   const c = ctx();
-  core.appAnswer = (req) => (String(req.headers.authorization).length > 10 ? { status: 403, body: { error: { code: "waitlisted", message: "the account is on the waitlist" } } } : null);
+  // Wakeshift's answer once the waitlist page holds the link's key.
+  let polls = 0;
+  core.appAnswer = (req) => {
+    if (String(req.headers.authorization).length <= 10) return null;
+    polls++;
+    return { status: 403, body: { error: { code: "waitlisted", message: "server text, not shown" } } };
+  };
   try {
     assert.equal(await run(c, ["init", "--name", "w-dev"]), 3);
-    assert.match(c.errOut, /waitlist/);
+    assert.equal(polls, 1, "it stopped at the first answer");
+    assert.ok(c.errOut.includes(WAITLISTED), c.errOut);
+    assert.doesNotMatch(c.errOut, /server text/);
+    assert.doesNotMatch(c.out + c.errOut, /Waited|timed out/);
+    const key = keyIn(c);
+    assert.ok(key, "the key stays in .env");
+    assertNoKey(c.out + c.errOut, [key]);
+
+    // Run again while still waitlisted: the same key, the same answer, and
+    // no second link.
+    assert.match(c.out, /\/new-app#pk=/);
+    c.out = c.errOut = "";
+    c.opened.length = 0;
+    assert.equal(await run(c, ["init", "--name", "w-dev"]), 3);
+    assert.ok(c.errOut.includes(WAITLISTED), c.errOut);
+    assert.equal(keyIn(c), key);
+    assert.doesNotMatch(c.out, /\/new-app#pk=/, "printed the link again");
+    assert.equal(c.opened.length, 0, "opened the link again");
   } finally {
     core.appAnswer = null;
   }

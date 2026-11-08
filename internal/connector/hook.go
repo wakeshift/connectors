@@ -82,7 +82,7 @@ type PreCallFormat interface {
 // starts (SessionContext): the plugin's mark (internal/pluginmark) for the
 // model to pass as the harness argument of an app's tools.
 type SessionContextFormat interface {
-	SessionContext(mark string) (Output, bool)
+	SessionContext(mark string, hooks bool) (Output, bool)
 }
 
 // StripFormat is a Format that can take a beacon out of the result the
@@ -334,7 +334,15 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout, stderr io.Write
 		}
 	case SessionContext:
 		if sf, is := h.Format.(SessionContextFormat); is {
-			out, ok = sf.SessionContext(pluginmark.Value(h.Harness, version.Version, h.Verifier.Settings.Issuers))
+			// The plugin's install leaves its issuer's file; the
+			// installer's hooks (in user settings) don't have one.
+			set := h.Verifier.Settings
+			hooks := set.Dir != "" && !exists(filepath.Join(set.Dir, PluginIssuerFile))
+			mark := pluginmark.Value(h.Harness, version.Version, set.Issuers)
+			if hooks {
+				mark = pluginmark.HooksValue(h.Harness, version.Version, set.Issuers)
+			}
+			out, ok = sf.SessionContext(mark, hooks)
 		}
 	case Resolve:
 		h.resolveSoon(ctx, in)

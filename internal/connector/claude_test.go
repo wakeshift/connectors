@@ -97,7 +97,9 @@ func TestClaudeInstall(t *testing.T) {
 		Hooks map[string][]json.RawMessage
 	}
 	json.Unmarshal(b, &f)
-	if len(f.Hooks["PostToolUse"]) != 2 || len(f.Hooks["Stop"]) != 1 || len(f.Hooks["SessionStart"]) != 1 {
+	// SessionStart: the waiter and the hook that adds the mark's context.
+	if len(f.Hooks["PostToolUse"]) != 2 || len(f.Hooks["Stop"]) != 1 || len(f.Hooks["SessionStart"]) != 2 ||
+		!has(s, `"command": "`+bin+` hook --harness claude-code --event session-context"`, `"timeout": 60`) {
 		t.Fatalf("hooks %v", f.Hooks)
 	}
 	if LoadSettings("claude-code").Issuers[0] != "https://app.wakeshift.ai" {
@@ -116,7 +118,7 @@ func TestClaudeInstall(t *testing.T) {
 	b, _ = os.ReadFile(path)
 	f.Hooks = nil
 	json.Unmarshal(b, &f)
-	if strings.Contains(string(b), "wakeshift") || len(f.Hooks["PostToolUse"]) != 1 || f.Hooks["Stop"] != nil || !has(string(b), `"lint.sh"`, `"say hi"`, `"model"`) {
+	if strings.Contains(string(b), "wakeshift") || len(f.Hooks["PostToolUse"]) != 1 || f.Hooks["Stop"] != nil || f.Hooks["SessionStart"] != nil || !has(string(b), `"lint.sh"`, `"say hi"`, `"model"`) {
 		t.Fatalf("after uninstall: %s", b)
 	}
 }
@@ -165,22 +167,169 @@ func TestClaudeSessionContext(t *testing.T) {
 		t.Fatalf("no event: %+v", in)
 	}
 	const mark = "claude-code; wakeshift-plugin=1.0; trusts=0123456789abcdef"
-	out, ok := claudeFormat{}.SessionContext(mark)
-	var o struct {
-		HookSpecificOutput struct {
-			HookEventName     string `json:"hookEventName"`
-			AdditionalContext string `json:"additionalContext"`
-		} `json:"hookSpecificOutput"`
+	for _, hooks := range []bool{false, true} {
+		out, ok := claudeFormat{}.SessionContext(mark, hooks)
+		var o struct {
+			HookSpecificOutput struct {
+				HookEventName     string `json:"hookEventName"`
+				AdditionalContext string `json:"additionalContext"`
+			} `json:"hookSpecificOutput"`
+		}
+		what := "Wakeshift's plugin is installed"
+		if hooks {
+			what = "Wakeshift's hooks are installed"
+		}
+		if !ok || json.Unmarshal(out.Stdout, &o) != nil || o.HookSpecificOutput.HookEventName != "SessionStart" ||
+			!strings.Contains(o.HookSpecificOutput.AdditionalContext, `pass harness="`+mark+`"`) || !strings.HasPrefix(o.HookSpecificOutput.AdditionalContext, what) {
+			t.Fatalf("context (hooks %v): %s %v", hooks, out.Stdout, ok)
+		}
 	}
-	if !ok || json.Unmarshal(out.Stdout, &o) != nil || o.HookSpecificOutput.HookEventName != "SessionStart" ||
-		!strings.Contains(o.HookSpecificOutput.AdditionalContext, `pass harness="`+mark+`"`) {
-		t.Fatalf("context: %s %v", out.Stdout, ok)
-	}
-	if _, ok := (claudeFormat{}).SessionContext(""); ok {
+	if _, ok := (claudeFormat{}).SessionContext("", true); ok {
 		t.Error("context with no mark")
 	}
 	t.Setenv("CLAUDE_CODE_SESSION_ATTENDED", "0")
-	if _, ok := (claudeFormat{}).SessionContext(mark); ok {
+	if _, ok := (claudeFormat{}).SessionContext(mark, false); ok {
 		t.Error("context under claude -p")
+	}
+}
+
+// oldClaudeSettings is ~/.claude/settings.json as Wakeshift's installer
+// wrote it before the session-context hook: three hooks.
+func oldClaudeSettings(bin string) string {
+	return `{
+  "model": "opus",
+  "hooks": {
+    "PostToolUse": [{"matcher": "mcp__.*", "hooks": [{"type": "command", "command": "` + bin + ` hook --harness claude-code", "async": true, "timeout": 30}]}],
+    "SessionStart": [{"hooks": [{"type": "command", "command": "` + bin + ` hook --harness claude-code --rewake", "asyncRewake": true, "timeout": 86400, "rewakeSummary": "Woken by Wakeshift", "rewakeMessage": "Wakeshift woke this session (not the user)."}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "` + bin + ` hook --harness claude-code --rewake", "asyncRewake": true, "timeout": 86400, "rewakeSummary": "Woken by Wakeshift", "rewakeMessage": "Wakeshift woke this session (not the user)."}]}]
+  }
+}`
+}
+
+// An install of the hooks from before the session-context hook, whose
+// waiter a newer connector runs (another harness's install or the plugin
+// replaced the binary they run), gets that hook added, once, so the
+// sessions that start from then on pass the mark; installing again does
+// the same. Never a plugin install, nor hooks that run another binary.
+func TestUpgradeClaudeHooks(t *testing.T) {
+	const bin = "/Users/ada/.wakeshift/bin/wakeshift"
+	setup := func(t *testing.T) (settings string, set Settings) {
+		home := setHome(t)
+		settings = filepath.Join(home, ".claude", "settings.json")
+		os.MkdirAll(filepath.Dir(settings), 0o700)
+		os.WriteFile(settings, []byte(oldClaudeSettings(bin)), 0o600)
+		set = LoadSettings("claude-code")
+		os.MkdirAll(set.Dir, 0o700)
+		set.Trust("https://app.wakeshift.ai")
+		set.Save()
+		return settings, set
+	}
+	starts := func(t *testing.T, path string) []json.RawMessage {
+		t.Helper()
+		b, _ := os.ReadFile(path)
+		var f struct{ Hooks map[string][]json.RawMessage }
+		if err := json.Unmarshal(b, &f); err != nil {
+			t.Fatal(err)
+		}
+		return f.Hooks["SessionStart"]
+	}
+
+	t.Run("old install", func(t *testing.T) {
+		settings, _ := setup(t)
+		UpgradeClaudeHooks(bin)
+		l := starts(t, settings)
+		if len(l) != 2 || !claudeContextHook(l[1]) || !strings.Contains(string(l[1]), bin+" hook --harness claude-code --event session-context") {
+			t.Fatalf("SessionStart: %s", l)
+		}
+		b, _ := os.ReadFile(settings)
+		if !has(string(b), `"model": "opus"`, "--rewake") || len(backupsOf(settings)) != 1 {
+			t.Fatalf("settings: %s", b)
+		}
+		// Once: taken out again, it stays out.
+		spec, _ := Lookup("claude-code")
+		os.WriteFile(settings, []byte(oldClaudeSettings(bin)), 0o600)
+		UpgradeClaudeHooks(bin)
+		if l := starts(t, settings); len(l) != 1 {
+			t.Fatalf("added twice: %s", l)
+		}
+		// Installing again writes it, and twice makes no second one.
+		spec.Install(bin, "https://app.wakeshift.ai", &bytes.Buffer{})
+		spec.Install(bin, "https://app.wakeshift.ai", &bytes.Buffer{})
+		if l := starts(t, settings); len(l) != 2 {
+			t.Fatalf("install: %s", l)
+		}
+	})
+	t.Run("already there", func(t *testing.T) {
+		settings, _ := setup(t)
+		spec, _ := Lookup("claude-code")
+		spec.Install(bin, "https://app.wakeshift.ai", &bytes.Buffer{})
+		before, _ := os.ReadFile(settings)
+		UpgradeClaudeHooks(bin)
+		if after, _ := os.ReadFile(settings); !bytes.Equal(before, after) {
+			t.Fatalf("changed: %s", after)
+		}
+	})
+	t.Run("plugin", func(t *testing.T) {
+		settings, set := setup(t)
+		os.WriteFile(filepath.Join(set.Dir, PluginIssuerFile), []byte("https://app.wakeshift.ai\n"), 0o600)
+		UpgradeClaudeHooks(bin)
+		if l := starts(t, settings); len(l) != 1 {
+			t.Fatalf("a plugin install's settings changed: %s", l)
+		}
+	})
+	t.Run("another binary", func(t *testing.T) {
+		settings, _ := setup(t)
+		UpgradeClaudeHooks("/opt/other/wakeshift")
+		if l := starts(t, settings); len(l) != 1 {
+			t.Fatalf("hooks of another binary changed: %s", l)
+		}
+	})
+	t.Run("not installed", func(t *testing.T) {
+		settings, set := setup(t)
+		os.RemoveAll(set.Dir)
+		UpgradeClaudeHooks(bin)
+		if l := starts(t, settings); len(l) != 1 {
+			t.Fatalf("uninstalled, but changed: %s", l)
+		}
+	})
+	t.Run("uninstall", func(t *testing.T) {
+		settings, _ := setup(t)
+		UpgradeClaudeHooks(bin)
+		spec, _ := Lookup("claude-code")
+		if err := spec.Uninstall(bin, &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := os.ReadFile(settings); strings.Contains(string(b), "wakeshift") {
+			t.Fatalf("after uninstall: %s", b)
+		}
+	})
+}
+
+// The session-context hook's mark says which install it's from: the
+// installer's hooks (no plugin issuer file) mark install=hooks, with the
+// hooks' wording; the plugin's doesn't.
+func TestClaudeSessionContextHook(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_SESSION_ATTENDED", "")
+	setHome(t)
+	spec, _ := Lookup("claude-code")
+	if err := spec.Install("/bin/wakeshift", "https://app.wakeshift.ai", &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	run := func() string {
+		h := spec.NewHook(nil, nil)
+		h.EventName = ClaudeSessionContextEvent
+		var out, errOut bytes.Buffer
+		h.Run(t.Context(), strings.NewReader(`{"session_id":"s1","transcript_path":"/x.jsonl","hook_event_name":"SessionStart","source":"startup"}`), &out, &errOut)
+		return out.String()
+	}
+	out := run()
+	if !has(out, "Wakeshift's hooks are installed", "; install=hooks") {
+		t.Fatalf("hooks: %s", out)
+	}
+	set := LoadSettings("claude-code")
+	os.WriteFile(filepath.Join(set.Dir, PluginIssuerFile), []byte("https://app.wakeshift.ai\n"), 0o600)
+	out = run()
+	if !has(out, "Wakeshift's plugin is installed", "wakeshift-plugin=") || strings.Contains(out, "install=hooks") {
+		t.Fatalf("plugin: %s", out)
 	}
 }

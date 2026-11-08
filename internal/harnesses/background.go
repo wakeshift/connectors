@@ -631,8 +631,12 @@ func UpdateNote(h Harness, base string) string {
 	}
 	n := Outdated(h) + " " + held + " Ask the user now whether to update them (" + updateChanges(h, pluginRoute) + "). Only if they agree, run `" + install + "`." + sep(h.Run)
 	if h.AskTool != "" {
+		what := "which replaces Wakeshift's files and keeps their settings and connected conversations"
+		if pluginRoute && h.Marketplace.UpdateChanges != "" {
+			what = "which " + strings.TrimPrefix(h.Marketplace.UpdateChanges, "it ")
+		}
 		n = Outdated(h) + " " + held + " Ask the user now with your " + h.AskTool + " tool, with two options: \"" + UpdateYes(h) + "\" (description: runs `" + install +
-			"`, which replaces Wakeshift's files and keeps their settings and connected conversations) and \"" + UpdateNo + "\" (description: nothing notifies this conversation until they're updated). " +
+			"`, " + what + ") and \"" + UpdateNo + "\" (description: nothing notifies this conversation until they're updated). " +
 			"Only if they agree (they pick yes), run `" + install + "`"
 		if h.UserShell != "" {
 			n += "; if running it is refused (auto mode or a permission denial), ask them to run it themselves by typing `" + h.UserShell + " " + install + "`"
@@ -648,6 +652,9 @@ func UpdateNote(h Harness, base string) string {
 // updateChanges says what the update command (UpdateCommand) does, for
 // the user.
 func updateChanges(h Harness, pluginRoute bool) string {
+	if pluginRoute && h.Marketplace.UpdateChanges != "" {
+		return h.Marketplace.UpdateChanges
+	}
 	if pluginRoute {
 		return "it updates Wakeshift's plugin for " + h.Name + " from " + marketplaceRepo(h) + " with " + h.Name + "'s own plugin command, which replaces the plugin's files and keeps their settings and connected conversations"
 	}

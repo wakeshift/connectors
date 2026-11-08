@@ -9,10 +9,15 @@
 #                                          set up or wait for another hook doing so (a hook
 #                                          the harness waits on before it shows the user
 #                                          something, like Copilot's permissionRequest)
-#   bin/wakeshift --issuer <origin> ...    the same, for the Wakeshift the user chose in
-#                                          the harness's own plugin settings (Claude Code's
-#                                          userConfig, which its hooks pass as an argument)
-#                                          rather than wakeshift.env's
+#
+# The connector always trusts wakeshift.env's issuer, the Wakeshift the
+# plugin's marketplace was rendered for (production's on the repository's
+# main, staging's on staging): never one from an argument, the environment
+# (a project's settings can set a hook's environment) or a plugin that
+# depends on this one. Claude Code's plugin once had an issuer option its
+# hooks passed as `--issuer <origin>`; the launcher still accepts that
+# argument, so hooks a running session loaded before an update keep
+# working, and ignores its value.
 #
 # Making sure, which is all a warm run does (no network):
 #
@@ -31,8 +36,28 @@
 # Both happen under a lock (~/.wakeshift/bin/.lock), so hooks that start
 # together fetch once. A hook never fails the harness's call: on any problem
 # the launcher says why on stderr (never stdout, which the harness reads)
-# and exits 0, so the hook does nothing until it can.
+# and exits 0, so the hook does nothing until it can. Only a first run, or
+# one whose connector is missing or older than the pin, uses the network
+# (one HTTPS download, 10s to connect, 120s in all); a warm run prints
+# nothing and only runs `wakeshift version`. A failed download is retried
+# (a 5xx, a timeout) only within 30s: a rate limit's Retry-After longer than
+# that isn't waited out (curl would sleep it, an hour or more, holding the
+# lock); the next hook tries again.
+#
+# The connector is built for macOS and Linux (WSL included), on arm64 and
+# x86_64. Anywhere else (Windows' Git Bash, MSYS or Cygwin; the BSDs) the
+# launcher says so and does nothing.
+#
+# WAKESHIFT_DISABLED=1 (or true, in any case) in the harness's environment
+# turns every hook off: the launcher exits 0 before anything else, so no
+# download, no lock, no connector run, nothing on stdout or stderr, and a
+# conversation's link and a listener already running are left as they are.
+# The connector's own hook command checks it too (internal/connectcli).
 set -u
+
+case "${WAKESHIFT_DISABLED:-}" in
+1 | [Tt][Rr][Uu][Ee]) exit 0 ;;
+esac
 
 say() { printf 'wakeshift: %s\n' "$*" >&2; }
 
@@ -65,21 +90,14 @@ case "$connector_version" in
 '' | none) say "this plugin pins no connector yet; update it"; exit 0 ;;
 esac
 
-# The Wakeshift the user chose, as the hook passes it. Only an argument the
-# plugin's own hooks write, never the environment (a project's settings can
-# set a hook's environment variables).
+# --issuer <origin>: from an earlier version's hooks (above). Ignored.
 if [ "${1:-}" = --issuer ]; then
 	v=${2:-}
-	v=${v%/}
-	case "$v" in
-	https://* | http://localhost | http://localhost:* | http://127.0.0.1 | http://127.0.0.1:*) ;;
-	*) say "the plugin's issuer setting isn't a Wakeshift's https address: ${v:-(empty)}"; exit 0 ;;
-	esac
-	case "${v#*://}" in
-	'' | *[!A-Za-z0-9.:-]*) say "the plugin's issuer setting isn't a Wakeshift's address (an origin, with no path): $v"; exit 0 ;;
-	esac
-	issuer=$v
-	shift 2
+	shift
+	[ $# -gt 0 ] && shift
+	if [ -n "$v" ] && [ "${v%/}" != "$issuer" ]; then
+		say "the plugin no longer takes an issuer setting; it trusts $issuer"
+	fi
 fi
 
 ifready=
@@ -90,6 +108,15 @@ fi
 
 prepare=
 if [ "${1:-}" = prepare ]; then prepare=1; fi
+
+system=$(uname -s 2>/dev/null) || system=
+case "$system" in
+Darwin | Linux) ;;
+*)
+	say "Wakeshift's connector runs on macOS and Linux (and WSL), not ${system:-this system}; the plugin does nothing here"
+	exit 0
+	;;
+esac
 
 if [ -z "${WAKESHIFT_HOME:-}" ] && [ -z "${HOME:-}" ]; then
 	say "HOME isn't set, so there's nowhere to keep the connector"
@@ -197,7 +224,7 @@ fetch() {
 	(umask 077 && mkdir -p "$home/bin") || { say "couldn't make $home/bin"; return 1; }
 	tmp=$(mktemp "$home/bin/.wakeshift.XXXXXX") || { say "couldn't write to $home/bin"; return 1; }
 	url=$connector_url/$name
-	if ! curl -fsSL --proto "$proto" --proto-redir "$proto" --retry 2 --connect-timeout 10 --max-time 120 -o "$tmp" "$url" </dev/null; then
+	if ! curl -fsSL --proto "$proto" --proto-redir "$proto" --retry 2 --retry-max-time 30 --connect-timeout 10 --max-time 120 -o "$tmp" "$url" </dev/null; then
 		say "couldn't download $url; the hook does nothing until it can"
 		return 1
 	fi

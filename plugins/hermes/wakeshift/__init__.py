@@ -1,5 +1,5 @@
 """Wakeshift's plugin for Hermes Agent: lets Wakeshift messages wake your Hermes
-conversations (API server and CLI ones), only once the user allows it
+conversations (API server, CLI and TUI ones), only once the user allows it
 (plugins.entries.wakeshift.allow_gateway_injection: true). Installed by
 ``hermes plugins install wakeshift``, by Wakeshift's installer
 (``/install/hermes.sh``) or by ``wakeshift install --harness hermes``; remove
@@ -205,10 +205,15 @@ def register(ctx) -> None:
 
     # By the session's platform: a gateway's API server sessions get a run on
     # its API server; CLI sessions, a turn through inject_message (cli_waker).
+    # Where one gateway runs every local chat (0.22.3 and later), Ink TUI chats
+    # (`hermes --tui`, platform "tui") are local sessions of it too, woken the
+    # same way: the TUI shows a plugin turn, which the classic CLI doesn't yet.
     wakers = {"api_server": ApiRuns(port, _api_key, allowed=allowed, why=not_allowed(_plugin_id(ctx)))}
     ws = Wakeshift(state_dir=_hermes_home() / "wakeshift", issuers=trusted_issuers(_setting(ctx), _pinned()), wakers=wakers,
                    spawn=_spawn, route=_route, cant_wake=cant_wake)
     wakers["cli"] = cli_waker(ctx, ws, one_gateway, allowed)
+    if one_gateway:
+        wakers["tui"] = wakers["cli"]
     try:
         import cryptography  # noqa: F401  (Hermes's own dependency: checks beacons' signatures)
     except ImportError:

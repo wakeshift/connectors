@@ -51,11 +51,20 @@ function pollMs(ctx: Ctx): number {
   return Number.isFinite(t) && t > 0 ? t : POLL_INTERVAL_MS;
 }
 
+/**
+ * What init says when Wakeshift answers its key with 403 waitlisted: the
+ * person who opened the link signed in past the sign-up cap, and the
+ * waitlist page told Wakeshift this key is theirs.
+ */
+export const WAITLISTED =
+  "You're on Wakeshift's waitlist, so the app wasn't created. Wakeshift will email you when your account is ready; run init again then (it keeps the key in .env).";
+
 /** A failure from Wakeshift, as the CLI reports it (the message is already redacted). */
 export function coreFailure(err: unknown): CliError {
   if (err instanceof CliError) return err;
   if (err instanceof CoreError) {
-    if (err.code === "waitlisted" || err.code === "not_signed_in") return new CliError(err.message, EXIT.WAITLISTED);
+    if (err.code === "waitlisted") return new CliError(WAITLISTED, EXIT.WAITLISTED);
+    if (err.code === "not_signed_in") return new CliError(err.message, EXIT.WAITLISTED);
     if (err.status === 403 && err.code === "suspended") return fail(`the app is suspended: ${err.message}`);
     return fail(err.message);
   }

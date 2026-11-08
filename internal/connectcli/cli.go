@@ -10,7 +10,8 @@
 //	wakeshift uninstall --harness NAME              remove them
 //	wakeshift allow --harness NAME --app ID --tools A,B | --none
 //	                                                pre-approve an app's tools the user agreed to (or not: remove them)
-//	wakeshift hook --harness NAME [--rewake]        what the harness runs (its own hook input on stdin)
+//	wakeshift hook --harness NAME [--rewake]        what the harness runs (its own hook input on stdin);
+//	                                                nothing at all with WAKESHIFT_DISABLED=1 (or true)
 //	wakeshift wait                                  wait for this conversation's next messages (the agent runs it)
 //	wakeshift bridge --harness opencode             the opencode plugin's child (JSON lines)
 //	wakeshift harnesses                             the harnesses it knows
@@ -100,8 +101,13 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	if len(args) < 2 {
 		return usage()
 	}
-	bin := self(prog)
 	cmd, rest := args[1], args[2:]
+	if cmd == "hook" && connector.Disabled() {
+		// WAKESHIFT_DISABLED: before reading stdin, flags or settings, so
+		// the hook does nothing at all (no network, no output).
+		return 0
+	}
+	bin := self(prog)
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	harness := fs.String("harness", "", "the harness: "+strings.Join(connector.Names(), ", "))
@@ -244,6 +250,10 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 				return 0 // -p: nothing to wake
 			}
 			h.WaiterKey = os.Getenv("CLAUDE_PID")
+			// Hooks the installer wrote before the session-context hook,
+			// now run by this connector: add it, so later sessions pass
+			// the mark (connector.UpgradeClaudeHooks).
+			connector.UpgradeClaudeHooks(bin)
 		}
 		return h.Run(ctx, stdin, stdout, stderr)
 	case "wait":

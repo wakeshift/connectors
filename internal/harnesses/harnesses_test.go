@@ -164,6 +164,7 @@ func TestForClient(t *testing.T) {
 // harness's trust step, and how it'll know it worked.
 func TestInstallNote(t *testing.T) {
 	h, _ := Get("claude-code")
+	h = WithClient(h, newClaudeUA, "", "")
 	n := InstallNote(h, "https://app.wakeshift.ai/")
 	for _, want := range []string{"Ask them one question with your AskUserQuestion tool",
 		`"Notify me in every session" (description: runs ` + "`claude plugin install wakeshift --marketplace wakeshift/agent-plugins --config issuer=https://app.wakeshift.ai` (Wakeshift's plugin for Claude Code), which installs Wakeshift's plugin for Claude Code from github.com/wakeshift/agent-plugins with Claude Code's own plugin installer; its hooks fetch Wakeshift's connector into ~/.wakeshift/bin, checking its SHA-256, and it adds one permission rule to ~/.claude/settings.json so Claude Code runs Wakeshift's wait command (~/.wakeshift/bin/wakeshift wait) without asking each time)",
@@ -454,8 +455,13 @@ func TestUnsure(t *testing.T) {
 	if id := AgentID("mcp"); id != "mcp" {
 		t.Fatalf("agent %q", id)
 	}
-	if _, _, ok := Recognize("", nil, "python-httpx2/2.12.0"); ok {
-		t.Fatal("recognized by the SDK's User-Agent")
+	// With no client name (a stateless server), by the SDK's User-Agent,
+	// just as unsure; a stated name that isn't Hermes's keeps it out.
+	if u, via, ok := Recognize("", nil, "python-httpx2/2.12.0"); !ok || u.ID != "hermes" || via != ByUserAgent || u.Unsure == "" {
+		t.Fatalf("by the SDK's User-Agent: %+v %v %v", u, via, ok)
+	}
+	if _, _, ok := Recognize("other-python-client", nil, "python-httpx2/2.12.0"); ok {
+		t.Fatal("a client named otherwise, recognized by the SDK's User-Agent")
 	}
 	if id := AgentID("hermes"); id != "hermes" {
 		t.Fatalf("a client named hermes: %q", id)
@@ -710,16 +716,31 @@ func TestRecognize(t *testing.T) {
 		{"", map[string]any{"claudecode/toolUseId": strings.Repeat("a", 201)}, "", "", ""},
 		{"", map[string]any{"agent-session-id": "g1", "vscode.conversationId": "v1"}, "", "", ""}, // documented, but no fingerprint
 		{"my-client", nil, "", "", ""},
+		// Hermes Agent's requests to a stateless server (no client name),
+		// before its plugin passes harness: the MCP Python SDK 2.x's
+		// User-Agent, which other Python clients send too.
+		{"", nil, "python-httpx2/2.12.0", "hermes", ByUserAgent},
+		{"my-client", nil, "python-httpx2/2.12.0", "", ""}, // a stated client name isn't Hermes's
+		{"", nil, "python-httpx/0.28.1", "", ""},           // the MCP Python SDK 1.x's, and every httpx program's
 	} {
 		h, via, ok := Recognize(c.client, c.meta, c.ua)
 		if h.ID != c.want || via != c.via || ok != (c.want != "") {
 			t.Errorf("Recognize(%q, %v, %q) = %q, %q, %v; want %q, %q", c.client, c.meta, c.ua, h.ID, via, ok, c.want, c.via)
 		}
 	}
-	// Fingerprints and User-Agent tokens each name one harness.
+	// Recognized by a shared User-Agent, Hermes Agent's notes hedge, as for
+	// its shared client name "mcp".
+	if h, _, _ := Recognize("", nil, "python-httpx2/2.12.0"); Surely(h, "").Unsure == "" {
+		t.Errorf("hermes by python-httpx2: not Unsure")
+	}
+	// Fingerprints and User-Agent tokens each name one harness, and a
+	// shared token only harnesses that hedge (Unsure).
 	seen := map[string]string{}
 	for _, h := range All() {
-		for _, k := range append([]string{h.Fingerprint}, h.UserAgents...) {
+		if len(h.SharedUserAgents) > 0 && h.Unsure == "" {
+			t.Errorf("%s: SharedUserAgents without Unsure", h.ID)
+		}
+		for _, k := range append(append([]string{h.Fingerprint}, h.UserAgents...), h.SharedUserAgents...) {
 			if k == "" {
 				continue
 			}

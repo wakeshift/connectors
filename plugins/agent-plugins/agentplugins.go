@@ -15,7 +15,9 @@
 //     Git ref of the repository: production on main, staging on staging)
 //     and the connector it pins (its version and release URL);
 //   - SHA256SUMS: the pinned connector's checksum for each platform;
-//   - the version in the plugin's manifest.
+//   - the version in the plugin's manifest: for Claude Code's, semver
+//     (Semver, below); for the others, the pinned connector's version and
+//     a hash of the plugin's files.
 //
 // Each harness reads its own marketplace file, which names its own plugin
 // directory, so every harness installs "wakeshift@wakeshift": Codex
@@ -25,14 +27,30 @@
 // command: the Cursor Marketplace lists it (it reviews each version), and
 // the user installs it from Cursor's Customize page.
 //
-// Claude Code's plugin trusts the Wakeshift the user chose in its issuer
-// option (userConfig), which its hooks pass to the launcher (--issuer), in
-// place of wakeshift.env's.
+// Every plugin, Claude Code's included, trusts wakeshift.env's issuer.
+// Claude Code's has no options: Claude Code applies no option's default (a
+// hook naming an unset option doesn't run), a plugin installed as another
+// plugin's dependency gets no options set, and the plugin directory refuses
+// hooks naming any variable but ${CLAUDE_PLUGIN_ROOT}.
 //
 // A plugin's pin changes only when a release stamps it (Render with a Pin),
 // and is otherwise kept from the tree being rendered over: Codex asks the
-// user to trust a plugin's hooks again whenever any of its files changes, so
-// its plugin is released only when its files must change.
+// user to trust a plugin's hooks again whenever any of its files changes,
+// and every new version of Claude Code's is one more for Anthropic's plugin
+// directory to review, so those plugins are released only when their files
+// must change (docs/claude-plugin-versions.md).
+//
+// Claude Code's plugin is versioned MAJOR.MINOR.PATCH (Semver), since Claude
+// Code resolves a dependent plugin's version range against the repository's
+// wakeshift--v<version> tags (the release workflow adds one for each new
+// version on main). Render works it out from the version of the plugin
+// already in dir (the published one): the same when nothing in the plugin
+// changed; PATCH+1 when only its pin did (wakeshift.env, SHA256SUMS);
+// MINOR+1 when any other file did (hooks, launcher, manifest, README).
+// MAJOR is the source manifest's, raised by hand for a change a dependent
+// plugin or its users must act on; the source's version is also the floor,
+// so it's the first version of a new MAJOR and of a plugin rendered into an
+// empty directory.
 //
 // standalone/<harness> is a plugin published as a repository of its own,
 // with the plugin at the repository's root, for a harness that installs
@@ -59,6 +77,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+
+	"github.com/wakeshift/connectors/internal/connectorversion"
 )
 
 //go:embed all:marketplace all:standalone launcher.sh
@@ -82,6 +102,10 @@ var manifests = map[string]string{
 var standalone = map[string]string{
 	"antigravity": "plugin.json",
 }
+
+// semver: the plugins whose version is MAJOR.MINOR.PATCH, worked out from
+// the version already published (Semver).
+var semver = map[string]bool{"claude-code": true}
 
 // Harnesses lists the plugins (marketplace/plugins/<harness>).
 func Harnesses() []string { return keys(manifests) }
@@ -238,6 +262,31 @@ func readPinAt(root, harness string) (p Pin, ok bool, err error) {
 	return p, true, nil
 }
 
+// Below lists the plugins in dir (a rendered marketplace; one it doesn't
+// have yet isn't listed) that pin no connector, or one older than minimums
+// (the core's
+// WAKESHIFT_CONNECTOR_MIN_VERSIONS) requires for their harness: a user of
+// such a plugin would be refused by the core and told to update to a plugin
+// version that can't help. The release pins them to its connector, and a
+// change that raises a minimum is refused until they're pinned
+// (.github/workflows/agent-plugins.yml).
+func Below(dir string, minimums connectorversion.Minimums) ([]string, error) {
+	var l []string
+	for _, h := range Harnesses() {
+		if _, err := os.Stat(filepath.Join(dir, "plugins", h)); errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		p, ok, err := ReadPin(dir, h)
+		if err != nil {
+			return nil, err
+		}
+		if !ok || minimums.Outdated(connectorversion.Client{Name: connectorversion.Binary, Version: p.Version, Harness: h}) {
+			l = append(l, h)
+		}
+	}
+	return l, nil
+}
+
 // CheckIssuer reports whether issuer can be a plugin's: an origin, https (or
 // on this machine, for development).
 func CheckIssuer(issuer string) error {
@@ -280,6 +329,14 @@ func Render(dir, issuer string, pins map[string]Pin) (changed []string, err erro
 			kept[h] = &p
 		}
 	}
+	// The plugins whose version follows the one published: what's there
+	// now, before it's replaced.
+	prev := map[string]map[string][]byte{}
+	for h := range semver {
+		if prev[h], err = readTree(filepath.Join(dir, "plugins", h)); err != nil {
+			return nil, err
+		}
+	}
 	want := map[string][]byte{} // path in dir → content
 	err = fs.WalkDir(files, "marketplace", func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -293,7 +350,7 @@ func Render(dir, issuer string, pins map[string]Pin) (changed []string, err erro
 		return nil, err
 	}
 	for _, h := range Harnesses() {
-		if err := addGenerated(want, "plugins/"+h+"/", h, manifests[h], issuer, kept[h]); err != nil {
+		if err := addGenerated(want, "plugins/"+h+"/", h, manifests[h], issuer, kept[h], prev[h]); err != nil {
 			return nil, err
 		}
 	}
@@ -372,7 +429,7 @@ func RenderStandalone(dir, harness, issuer string, pin *Pin) (changed bool, err 
 	if err != nil {
 		return false, err
 	}
-	if err := addGenerated(want, "", harness, manifest, issuer, pin); err != nil {
+	if err := addGenerated(want, "", harness, manifest, issuer, pin, nil); err != nil {
 		return false, err
 	}
 	wrote, err := writeFiles(dir, want)
@@ -381,8 +438,17 @@ func RenderStandalone(dir, harness, issuer string, pin *Pin) (changed bool, err 
 
 // addGenerated adds what Render writes to each plugin, whose files are at
 // root in want ("" or "plugins/<harness>/"): the launcher, wakeshift.env,
-// the pin's SHA256SUMS and the version in its manifest.
-func addGenerated(want map[string][]byte, root, harness, manifest, issuer string, pin *Pin) error {
+// the pin's SHA256SUMS and the version in its manifest. For a semver
+// plugin, prev is its files as published (by path in the plugin; empty if
+// none), which its version follows.
+func addGenerated(want map[string][]byte, root, harness, manifest, issuer string, pin *Pin, prev map[string][]byte) error {
+	// The description names the Wakeshift the plugin trusts: before the
+	// version is worked out, which compares it with the one published.
+	m, err := describeHost(want[root+manifest], issuer)
+	if err != nil {
+		return fmt.Errorf("%s: %w", harness, err)
+	}
+	want[root+manifest] = m
 	want[root+"bin/wakeshift"] = Launcher()
 	target := "agent-plugins"
 	if root == "" {
@@ -392,12 +458,52 @@ func addGenerated(want map[string][]byte, root, harness, manifest, issuer string
 	if pin != nil {
 		want[root+"SHA256SUMS"] = pin.sumsFile()
 	}
-	m, err := setVersion(want[root+manifest], pluginVersion(want, root, pin))
-	if err != nil {
+	v := pluginVersion(want, root, pin)
+	if semver[harness] {
+		var err error
+		if v, err = Semver(plugin(want, root), prev, manifest); err != nil {
+			return fmt.Errorf("%s: %w", harness, err)
+		}
+	}
+	if m, err = setVersion(want[root+manifest], v); err != nil {
 		return fmt.Errorf("%s: %w", harness, err)
 	}
 	want[root+manifest] = m
 	return nil
+}
+
+// sourceHost is the Wakeshift a source manifest's description names
+// (production's). A plugin rendered for another Wakeshift (staging's
+// branch, a local core) names its issuer's host there instead
+// (describeHost).
+const sourceHost = "app.wakeshift.ai"
+
+var descriptionRE = regexp.MustCompile(`(?m)^  "description": .*$`)
+
+// describeHost has the manifest's description name issuer's host where the
+// source names sourceHost. The rest of the manifest is left as it is; a
+// description still naming sourceHost after (one not on its own
+// "description" line) is an error, not a plugin that names the wrong
+// Wakeshift.
+func describeHost(manifest []byte, issuer string) ([]byte, error) {
+	u, err := url.Parse(issuer)
+	if err != nil {
+		return nil, err
+	}
+	if u.Host == sourceHost {
+		return manifest, nil
+	}
+	out := descriptionRE.ReplaceAllFunc(manifest, func(line []byte) []byte {
+		return bytes.ReplaceAll(line, []byte(sourceHost), []byte(u.Host))
+	})
+	var check struct{ Description string }
+	if err := json.Unmarshal(out, &check); err != nil {
+		return nil, err
+	}
+	if strings.Contains(check.Description, sourceHost) {
+		return nil, fmt.Errorf(`its manifest's description names %s, but not on its own "description" line`, sourceHost)
+	}
+	return out, nil
 }
 
 // writeFiles writes want (path in dir → content) into dir, the launchers
@@ -466,6 +572,146 @@ func pluginVersion(want map[string][]byte, root string, p *Pin) string {
 		v, _, _ = strings.Cut(p.Version, "+")
 	}
 	return v + "+" + sum
+}
+
+// pinFiles are a plugin's files that only its pin changes.
+var pinFiles = []string{"wakeshift.env", "SHA256SUMS"}
+
+var semverRE = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+
+// Semver is a semver plugin's version: next holds its files as rendered
+// now, with the source manifest's version, prev as published (empty if
+// none), both by path in the plugin, manifest the manifest's path there.
+// It's prev's version if nothing changed, PATCH+1 if only the pin did
+// (pinFiles), MINOR+1 (PATCH 0) if any other file did, and never lower
+// than the source's version, which also sets MAJOR: a published version
+// that isn't semver, or is of a lower MAJOR, gives the source's.
+func Semver(next, prev map[string][]byte, manifest string) (string, error) {
+	base, err := manifestVersion(next[manifest])
+	if err != nil {
+		return "", fmt.Errorf("source manifest: %w", err)
+	}
+	b, ok := parseSemver(base)
+	if !ok {
+		return "", fmt.Errorf("the source manifest's version %q isn't MAJOR.MINOR.PATCH", base)
+	}
+	old, _ := manifestVersion(prev[manifest])
+	o, ok := parseSemver(old)
+	if !ok || o[0] < b[0] {
+		return base, nil
+	}
+	if o[0] > b[0] {
+		return "", fmt.Errorf("the published version, %s, has a higher MAJOR than the source's, %s", old, base)
+	}
+	own, pin := changes(next, prev, manifest)
+	v := o
+	switch {
+	case own:
+		v = [3]int{o[0], o[1] + 1, 0}
+	case pin:
+		v = [3]int{o[0], o[1], o[2] + 1}
+	}
+	if less(v, b) {
+		v = b
+	}
+	return fmt.Sprintf("%d.%d.%d", v[0], v[1], v[2]), nil
+}
+
+// changes reports whether a plugin's own files (all but pinFiles, its
+// manifest's version aside) and its pin differ between next and prev.
+func changes(next, prev map[string][]byte, manifest string) (own, pin bool) {
+	norm := func(m map[string][]byte, p string) ([]byte, bool) {
+		b, ok := m[p]
+		if ok && p == manifest {
+			if n, err := setVersion(b, "0.0.0"); err == nil {
+				b = n
+			}
+		}
+		return b, ok
+	}
+	seen := map[string]bool{}
+	for _, m := range []map[string][]byte{next, prev} {
+		for p := range m {
+			if seen[p] {
+				continue
+			}
+			seen[p] = true
+			a, aok := norm(next, p)
+			b, bok := norm(prev, p)
+			if aok == bok && bytes.Equal(a, b) {
+				continue
+			}
+			if slices.Contains(pinFiles, p) {
+				pin = true
+			} else {
+				own = true
+			}
+		}
+	}
+	return own, pin
+}
+
+func manifestVersion(manifest []byte) (string, error) {
+	var m struct{ Version string }
+	if err := json.Unmarshal(manifest, &m); err != nil {
+		return "", err
+	}
+	return m.Version, nil
+}
+
+func parseSemver(v string) (n [3]int, ok bool) {
+	m := semverRE.FindStringSubmatch(v)
+	if m == nil {
+		return n, false
+	}
+	for i := range n {
+		if _, err := fmt.Sscan(m[i+1], &n[i]); err != nil {
+			return n, false
+		}
+	}
+	return n, true
+}
+
+func less(a, b [3]int) bool {
+	for i := range a {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return false
+}
+
+// plugin is the files under root in want, by path in the plugin.
+func plugin(want map[string][]byte, root string) map[string][]byte {
+	m := map[string][]byte{}
+	for p, b := range want {
+		if rest, ok := strings.CutPrefix(p, root); ok {
+			m[rest] = b
+		}
+	}
+	return m
+}
+
+// readTree reads the files under dir, by slash path relative to it (none
+// if it doesn't exist).
+func readTree(dir string) (map[string][]byte, error) {
+	m := map[string][]byte{}
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if errors.Is(err, fs.ErrNotExist) && p == dir {
+			return fs.SkipAll
+		}
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(dir, p)
+		m[filepath.ToSlash(rel)] = b
+		return nil
+	})
+	return m, err
 }
 
 // setVersion sets a manifest's "version", keeping its other fields' order.

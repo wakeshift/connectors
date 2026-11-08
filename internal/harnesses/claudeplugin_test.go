@@ -6,11 +6,14 @@ import (
 )
 
 // Claude Code's offers give its own plugin command, from Wakeshift's
-// marketplace (its staging branch for staging), always setting the
-// plugin's issuer; the update refreshes the marketplace first, after an
-// install that moves a user of Wakeshift's installer over.
+// marketplace (its staging branch for staging). The install still sets the
+// issuer option an older copy of the plugin had (a stale marketplace clone
+// may install it); the update, which ends on the current plugin, has none:
+// it refreshes the marketplace first, after an install that moves a user of
+// Wakeshift's installer over.
 func TestClaudeCodeMarketplace(t *testing.T) {
 	h, _ := Get("claude-code")
+	h = WithClient(h, newClaudeUA, "", "")
 	for base, want := range map[string]string{
 		"https://app.wakeshift.ai/":        "claude plugin install wakeshift --marketplace wakeshift/agent-plugins --config issuer=https://app.wakeshift.ai",
 		"https://app.staging.wakeshift.ai": "claude plugin install wakeshift --marketplace wakeshift/agent-plugins#staging --config issuer=https://app.staging.wakeshift.ai",
@@ -18,7 +21,7 @@ func TestClaudeCodeMarketplace(t *testing.T) {
 		if got := OfferCommand(h, base); got != want {
 			t.Errorf("%s: %s", base, got)
 		}
-		if got := UpdateCommand(h, base); got != want+" && claude plugin marketplace update wakeshift && claude plugin update wakeshift@wakeshift" {
+		if got := UpdateCommand(h, base); got != strings.Split(want, " --config")[0]+" && claude plugin marketplace update wakeshift && claude plugin update wakeshift@wakeshift" || strings.Contains(got, "--config") {
 			t.Errorf("%s update: %s", base, got)
 		}
 	}
@@ -46,6 +49,7 @@ func TestClaudeCodeMarketplace(t *testing.T) {
 // plugin's install can't carry the yes.
 func TestClaudeCodePluginNotes(t *testing.T) {
 	cc, _ := Get("claude-code")
+	cc = WithClient(cc, newClaudeUA, "", "")
 	h := WithTools(cc, ToolsOffer{App: "agentchat", AppName: "Agent Chat", Tools: []string{"post"}})
 	const base = "https://app.wakeshift.ai"
 	for name, n := range map[string]string{"monitor": PluginFirstNote(h, base, "App", false, "FALLBACK."), "task": PluginFirstNote(h, base, "App", true, "FALLBACK."), "install": InstallNote(h, base), "subscribe": SubscribeNote(h, base)} {

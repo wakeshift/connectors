@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -20,12 +21,14 @@ import (
 //   - PostToolUse (async, MCP tools): find the result's _meta in the
 //     transcript by tool_use_id, verify the beacon (bound to that call),
 //     redeem it with the session ID.
-//   - SessionStart (Wakeshift's plugin only, --event session-context): add
-//     context telling the model the plugin's mark (internal/pluginmark) to
-//     pass as the harness argument of an app's tools, so the core leaves the
-//     install question and the Monitor out of the subscribing result. A
-//     PreToolUse hook can't set it: Claude Code's auto mode refuses a call
-//     whose input a hook changed after its review (2.1.316).
+//   - SessionStart (--event session-context; the plugin's, and the
+//     installer's since it wrote one): add context telling the model the
+//     mark (internal/pluginmark) to pass as the harness argument of an app's
+//     tools, so the core leaves the install question and the Monitor out of
+//     the subscribing result. A PreToolUse hook can't set it: Claude Code's
+//     auto mode refuses a call whose input a hook changed after its review
+//     (2.1.316). The waiter below can't add it: an asyncRewake hook's output
+//     is read only when it exits, with a message.
 //   - SessionStart and Stop (asyncRewake): wait on the session's link; on a
 //     message, write it to stderr and exit 2, which wakes the idle session
 //     (or reaches a busy one between tool calls). One waiter per Claude
@@ -243,13 +246,23 @@ func (f claudeFormat) ParseEvent(event string, b []byte) (Input, error) {
 const ClaudeMarkNote = "Wakeshift's plugin is installed in this Claude Code session, so apps that notify through Wakeshift can wake this conversation by themselves, even while it's idle. " +
 	"When you call an app's tool that takes a `harness` argument, pass harness=%q (exactly this): it tells the app the plugin is here, so its result won't ask you to set notifications up."
 
-// SessionContext is the SessionStart output that adds the mark's note, if
+// ClaudeHooksMarkNote is ClaudeMarkNote for the hooks Wakeshift's
+// installer wrote to ~/.claude/settings.json (no plugin).
+const ClaudeHooksMarkNote = "Wakeshift's hooks are installed in this Claude Code session, so apps that notify through Wakeshift can wake this conversation by themselves, even while it's idle. " +
+	"When you call an app's tool that takes a `harness` argument, pass harness=%q (exactly this): it tells the app the hooks are here, so its result won't ask you to set notifications up."
+
+// SessionContext is the SessionStart output that adds the mark's note
+// (the hooks' wording when hooks: the installer's, not the plugin's), if
 // there's a mark (none under claude -p, where nothing wakes the session).
-func (claudeFormat) SessionContext(mark string) (Output, bool) {
+func (claudeFormat) SessionContext(mark string, hooks bool) (Output, bool) {
 	if mark == "" || ClaudeUnattended() {
 		return Output{}, false
 	}
-	b, err := json.Marshal(map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "SessionStart", "additionalContext": fmt.Sprintf(ClaudeMarkNote, mark)}})
+	note := ClaudeMarkNote
+	if hooks {
+		note = ClaudeHooksMarkNote
+	}
+	b, err := json.Marshal(map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "SessionStart", "additionalContext": fmt.Sprintf(note, mark)}})
 	if err != nil {
 		return Output{}, false
 	}
@@ -355,14 +368,113 @@ func (claudeInstaller) path() string { return filepath.Join(ClaudeConfigDir(), "
 
 func (claudeInstaller) entries(bin string) []entry {
 	isOur := func(item json.RawMessage) bool { return commandIn(item, bin, claudeName) }
+	// SessionStart holds two of ours: the waiter, and the hook that adds
+	// the mark's context (claudeContextEntry).
+	isWaiter := func(item json.RawMessage) bool { return isOur(item) && !claudeContextHook(item) }
 	waiter := map[string]any{"hooks": []any{map[string]any{"type": "command", "command": HookCommand(bin, claudeName, "--rewake"),
 		"asyncRewake": true, "timeout": 86400, "rewakeSummary": ClaudeRewakeSummary, "rewakeMessage": ClaudeRewakeMessage}}}
 	return []entry{
 		{event: "PostToolUse", isOur: isOur, json: map[string]any{"matcher": "mcp__.*", "hooks": []any{map[string]any{"type": "command",
 			"command": HookCommand(bin, claudeName), "async": true, "timeout": 30}}}},
-		{event: "SessionStart", isOur: isOur, json: waiter},
+		{event: "SessionStart", isOur: isWaiter, json: waiter},
 		{event: "Stop", isOur: isOur, json: waiter},
+		claudeContextEntry(bin),
 	}
+}
+
+// claudeContextEntry is the SessionStart hook that tells the model the
+// mark to pass (SessionContext), as the plugin's own: plain, not async, so
+// its context is there before the session's first prompt.
+func claudeContextEntry(bin string) entry {
+	return entry{event: "SessionStart", isOur: func(item json.RawMessage) bool { return commandIn(item, bin, claudeName) && claudeContextHook(item) },
+		json: map[string]any{"hooks": []any{map[string]any{"type": "command", "command": HookCommand(bin, claudeName, "--event", ClaudeSessionContextEvent), "timeout": 60}}}}
+}
+
+// claudeContextHook reports whether a hook entry (or a group of them under
+// "hooks") runs a session-context hook.
+func claudeContextHook(item json.RawMessage) bool {
+	var e struct {
+		Command string `json:"command"`
+		Hooks   []struct {
+			Command string `json:"command"`
+		} `json:"hooks"`
+	}
+	if json.Unmarshal(item, &e) != nil {
+		return false
+	}
+	is := func(c string) bool { return strings.HasSuffix(c, " --event "+ClaudeSessionContextEvent) }
+	if is(e.Command) {
+		return true
+	}
+	for _, h := range e.Hooks {
+		if is(h.Command) {
+			return true
+		}
+	}
+	return false
+}
+
+// claudeContextAdded, in Claude Code's directory under Wakeshift's home,
+// records that UpgradeClaudeHooks added the session-context hook, so it
+// does that once: a user who takes it out again keeps it out.
+const claudeContextAdded = "context-hook-added"
+
+// UpgradeClaudeHooks brings an install of Wakeshift's hooks in Claude
+// Code's user settings from before the session-context hook up to date,
+// when a newer connector runs its waiter (bin: the binary its hooks run,
+// which another harness's install or Wakeshift's plugin may have
+// replaced): it adds that hook, so the sessions that start from then on
+// pass the mark and aren't asked to set notifications up. Only for the
+// installer's hooks running bin (its waiter is in the file), never a
+// plugin install's (whose own hook adds the context), and once. It never
+// fails the hook: what it can't do, it leaves.
+func UpgradeClaudeHooks(bin string) {
+	set := LoadSettings(claudeName)
+	if !set.Installed() || exists(filepath.Join(set.Dir, PluginIssuerFile)) || exists(filepath.Join(set.Dir, claudeContextAdded)) {
+		return
+	}
+	unlock, err := lockFile(filepath.Join(set.Dir, ".upgrade.lock"))
+	if err != nil {
+		return
+	}
+	defer unlock()
+	if exists(filepath.Join(set.Dir, claudeContextAdded)) {
+		return
+	}
+	i := claudeInstaller{}
+	f, err := readHookFile(i.path(), "hooks")
+	if err != nil {
+		return
+	}
+	starts, err := f.list("SessionStart")
+	if err != nil {
+		return
+	}
+	waiter := HookCommand(bin, claudeName, "--rewake")
+	installed, context := false, claudeContextEntry(bin)
+	for _, item := range starts {
+		if context.isOur(item) { // there already (an install wrote it)
+			os.WriteFile(filepath.Join(set.Dir, claudeContextAdded), nil, 0o600)
+			return
+		}
+		var e struct {
+			Hooks []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		}
+		if json.Unmarshal(item, &e) == nil {
+			for _, h := range e.Hooks {
+				installed = installed || h.Command == waiter
+			}
+		}
+	}
+	if !installed {
+		return
+	}
+	if _, _, err := editHooks(i.path(), "hooks", []entry{context}, false); err != nil {
+		return
+	}
+	os.WriteFile(filepath.Join(set.Dir, claudeContextAdded), nil, 0o600)
 }
 
 func (i claudeInstaller) Install(bin string, out io.Writer) error {

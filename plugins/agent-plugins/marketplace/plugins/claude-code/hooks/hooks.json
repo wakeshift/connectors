@@ -7,7 +7,7 @@
           {
             "type": "command",
             "command": "/bin/sh",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/wakeshift", "--issuer", "${user_config.issuer}", "hook", "--harness", "claude-code"],
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/wakeshift", "hook", "--harness", "claude-code"],
             "async": true,
             "timeout": 30
           }
@@ -20,7 +20,7 @@
           {
             "type": "command",
             "command": "/bin/sh",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/wakeshift", "--issuer", "${user_config.issuer}", "hook", "--harness", "claude-code", "--event", "session-context"],
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/wakeshift", "hook", "--harness", "claude-code", "--event", "session-context"],
             "timeout": 60
           }
         ]
@@ -30,7 +30,7 @@
           {
             "type": "command",
             "command": "/bin/sh",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/wakeshift", "--issuer", "${user_config.issuer}", "hook", "--harness", "claude-code", "--rewake"],
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/wakeshift", "hook", "--harness", "claude-code", "--rewake"],
             "asyncRewake": true,
             "rewakeSummary": "Woken by Wakeshift",
             "rewakeMessage": "Wakeshift woke this session (not the user).",
@@ -45,7 +45,7 @@
           {
             "type": "command",
             "command": "/bin/sh",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/wakeshift", "--issuer", "${user_config.issuer}", "hook", "--harness", "claude-code", "--rewake"],
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/wakeshift", "hook", "--harness", "claude-code", "--rewake"],
             "asyncRewake": true,
             "rewakeSummary": "Woken by Wakeshift",
             "rewakeMessage": "Wakeshift woke this session (not the user).",

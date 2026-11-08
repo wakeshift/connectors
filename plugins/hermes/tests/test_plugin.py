@@ -27,7 +27,8 @@ class Plugin(unittest.TestCase):
         self.woken: list = []
         self.p = plugin.Wakeshift(state_dir=self.dir, issuers=[self.ws.url], listener_args={"poll_wait": 0.2, "backoff_max": 0.2},
                                   wakers={"api_server": plugin.ApiRuns(self.api.port, lambda: "api-key", allowed=lambda: True),
-                                          "cli": lambda s, text, batch: self.woken.append((s, text)) or True})
+                                          "cli": lambda s, text, batch: self.woken.append((s, text)) or True,
+                                          "tui": lambda s, text, batch: self.woken.append((s, text)) or True})
 
     def tearDown(self):
         self.p.stop()
@@ -87,19 +88,31 @@ class Plugin(unittest.TestCase):
         self.assertEqual(len(keys), 1)  # the same batch, the same key: it can't run twice
 
     def test_cli_sessions_are_woken_through_their_input(self):
-        self.connect("cli-1", platform="cli")
-        self.p.turn_ended(session_id="cli-1")
+        self.assert_queued_until_its_turn_starts("cli-1", "cli")
+
+    def test_tui_sessions_are_woken_like_cli_ones(self):
+        # Ink TUI chats (`hermes --tui`): local sessions of the one gateway,
+        # their hooks saying platform "tui". Done once the turn starts, as a CLI's.
+        self.assert_queued_until_its_turn_starts("tui-1", "tui")
+        self.assertIn("tui", plugin.QUEUES)
+
+    def assert_queued_until_its_turn_starts(self, sid, platform):
+        out = json.loads(self.connect(sid, platform=platform))
+        self.assertTrue(out["result"].endswith(plugin.NOTE_CONNECTED))
+        self.p.turn_ended(session_id=sid)
         self.assertTrue(until(self.ws.connected.is_set))
         self.ws.sse.put(event("d1"))
         self.assertTrue(until(lambda: self.woken))
+        self.assertEqual(self.woken[0][0], sid)
         self.assertIn("The user didn't write it", self.woken[0][1])
-        # Only in the input queue: not acknowledged (a CLI that quits now gets it again).
+        # Only queued: not acknowledged (a chat that quits now gets it again).
         self.assertFalse(until(lambda: self.ws.acked, within=0.8))
         self.assertEqual(len(self.woken), 1)  # and not queued twice
-        self.p.turn_started(session_id="cli-1", platform="cli")  # its turn starts
-        self.p.turn_ended(session_id="cli-1")
+        self.p.turn_started(session_id=sid, platform=platform)  # its turn starts
+        self.p.turn_ended(session_id=sid)
         self.assertTrue(until(lambda: self.ws.acked == ["d1"]))
         self.assertEqual(len(self.woken), 1)
+        self.assertEqual(self.api.runs, [])
 
     def test_a_superseded_listener_doesnt_save_its_rotated_link(self):
         self.connect()
@@ -138,7 +151,7 @@ class Plugin(unittest.TestCase):
         # ran before the plugin loaded.
         out = json.loads(self.p.transform(tool_name="mcp__try__watch", result=result(self.ws.beacon()), session_id="sess-1", tool_call_id="c"))
         self.assertTrue(out["result"].endswith(plugin.NOTE_JUST_LOADED))
-        self.assertNotIn("only API server and CLI", out["result"])
+        self.assertNotIn("only API server, CLI and TUI", out["result"])
         self.assertNotIn("Wakeshift: connected.", out["result"])
         self.assertEqual(self.ws.redeems, [])
         # The next turn names it, and the next beacon connects it.
@@ -408,6 +421,29 @@ class Plugin(unittest.TestCase):
             self.assertEqual(again.resume(("cli",)), 0)
         finally:
             again.stop()
+
+    def test_a_local_chat_resumed_in_the_other_interface_listens_again(self):
+        # Connected in the classic CLI, resumed in the TUI after a gateway
+        # restart (`hermes chat --tui --continue`): the same local session.
+        self.connect("local-1", platform="cli")
+        self.p.stop()
+        woken = []
+        again = plugin.Wakeshift(state_dir=self.dir, issuers=[self.ws.url], listener_args={"poll_wait": 0.2, "backoff_max": 0.2},
+                                 wakers={"cli": lambda s, text, batch: False,
+                                         "tui": lambda s, text, batch: woken.append(s) or True})
+        try:
+            again.turn_started(session_id="local-1", platform="tui")
+            self.assertTrue(until(lambda: again.sessions["local-1"].listeners))
+            again.turn_ended(session_id="local-1")
+            self.ws.sse.put(event("d1"))
+            self.assertTrue(until(lambda: woken == ["local-1"]))
+        finally:
+            again.stop()
+        # Never across to another platform's waker.
+        self.assertEqual(plugin._resumed_as("cli", "api_server"), "")
+        self.assertEqual(plugin._resumed_as("api_server", "tui"), "")
+        self.assertEqual(plugin._resumed_as("tui", "cli"), "cli")
+        self.assertEqual(plugin._resumed_as("api_server", ""), "api_server")
 
     def test_a_lost_ack_never_starts_a_second_run(self):
         # The run starts, every ack fails, the plugin restarts and the message
@@ -1099,6 +1135,31 @@ class UsersLeave(unittest.TestCase):
         self.load(one_gateway=False)
         self.assert_held_until_allowed("cli-1", "cli", lambda: self.injected)
         self.assertIsNone(self.injected[0][1])
+
+    def test_a_tui_chat_in_one_gateway(self):
+        # The same gate as a CLI chat's, and a plugin turn in the session its
+        # route key names (the TUI shows it), never key-less.
+        self.load(one_gateway=True)
+        self.assert_held_until_allowed("local-2", "tui", lambda: self.injected)
+        self.assertEqual(self.injected, [(self.injected[0][0], "agent:main:local:dm:local-2")])
+        self.assertIn("The user didn't write it", self.injected[0][0])
+        self.assertEqual(self.api.runs, [])
+        self.assertEqual(self.ws.acked, [])  # done once its turn starts
+        self.ctx.hooks["pre_llm_call"](session_id="local-2", platform="tui")
+        self.ctx.hooks["on_session_end"](session_id="local-2")
+        self.assertTrue(until(lambda: self.ws.acked == ["d1"]))
+
+    def test_a_tui_chat_where_each_chat_loads_its_own_plugins_isnt_connected(self):
+        # Before one gateway (0.22.2 and earlier) there's no session to name.
+        self.allowed = True
+        self.load(one_gateway=False)
+        self.sid = "tui-1"
+        self.ctx.hooks["pre_llm_call"](session_id="tui-1", platform="tui")
+        out = json.loads(self.ctx.hooks["transform_tool_result"](tool_name="mcp__try__watch", result=result(self.ws.beacon()),
+                                                                 session_id="tui-1", tool_call_id="call_1"))["result"]
+        self.assertIn("can't wake tui conversations", out)
+        self.assertNotIn(plugin.NOTE_CONNECTED, out)
+        self.assertEqual(self.ws.redeems, [])
 
     def test_allowed_says_connected(self):
         self.allowed = True

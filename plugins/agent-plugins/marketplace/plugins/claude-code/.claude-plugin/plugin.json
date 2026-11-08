@@ -1,22 +1,20 @@
 {
   "name": "wakeshift",
   "displayName": "Wakeshift",
-  "version": "0.0.0",
-  "description": "Lets Wakeshift messages wake your Claude Code sessions, even while they're idle, for the apps you connect. Its hooks run Wakeshift's connector, ~/.wakeshift/bin/wakeshift, which it downloads and checks against the SHA-256 it carries.",
+  "version": "1.0.0",
+  "description": "Lets Wakeshift messages wake your Claude Code sessions, even while they're idle, for the apps you connect. Its hooks run Wakeshift's connector, ~/.wakeshift/bin/wakeshift, which the plugin downloads once from Wakeshift's GitHub releases and checks against the SHA-256 it carries; the connector talks only to Wakeshift (app.wakeshift.ai), and only for conversations a Wakeshift app's tool connected. Disable or uninstall the plugin to turn it off.",
   "author": {
     "name": "Wakeshift",
+    "email": "support@wakeshift.ai",
     "url": "https://wakeshift.ai"
   },
   "homepage": "https://wakeshift.ai/docs/agents",
   "repository": "https://github.com/wakeshift/agent-plugins",
   "license": "Apache-2.0",
-  "userConfig": {
-    "issuer": {
-      "type": "string",
-      "title": "Wakeshift server",
-      "description": "The Wakeshift whose messages may wake your sessions: https://app.wakeshift.ai unless you use another",
-      "default": "https://app.wakeshift.ai",
-      "required": true
-    }
-  }
+  "keywords": ["notifications", "wake", "events", "hooks", "mcp", "agents", "background"],
+  "icon": ".claude-plugin/icon.png",
+  "documentationUrl": "https://wakeshift.ai/docs/agents",
+  "supportUrl": "https://github.com/wakeshift/agent-plugins/issues",
+  "privacyPolicyUrl": "https://wakeshift.ai/privacy",
+  "termsOfServiceUrl": "https://wakeshift.ai/terms"
 }

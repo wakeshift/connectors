@@ -29,7 +29,7 @@ const shipyardMain = join(repo, "bench/dist/app/main.js");
 const skip = !harnessFile ? "set WAKESHIFT_SDK_HARNESS (scripts/e2e.sh)" : false;
 if (harnessFile && !existsSync(shipyardMain)) throw new Error("build the bench first (scripts/e2e.sh does)");
 
-let h: { core: string; key: string; new_key: string };
+let h: { core: string; key: string; new_key: string; waitlist_cookie: string };
 let work: string;
 let project: string;
 let browserLog: string;
@@ -65,10 +65,10 @@ interface Ran {
   err: string;
 }
 
-/** Starts the CLI as npx would, in the project, with a temp HOME and the recording browser. */
-function start(args: string[]): { proc: ChildProcess; done: Promise<Ran> } {
+/** Starts the CLI as npx would, in the project (or cwd), with a temp HOME and the recording browser. */
+function start(args: string[], cwd = project): { proc: ChildProcess; done: Promise<Ran> } {
   const proc = spawn(process.execPath, [bin, ...args], {
-    cwd: project,
+    cwd,
     env: { PATH: process.env.PATH ?? "", HOME: work, BROWSER: join(work, "browser.sh"), WAKESHIFT_CLI_POLL_INTERVAL_MS: "200" },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -234,4 +234,34 @@ test("verify against Shipyard: synthetic, a tool trigger, and the guard", { skip
   const b = textOf(await other.callTool("get_build", { number: n }));
   assert.match(b, /"status": "running"/, "the guard let the trigger run");
   await other.close();
+});
+
+test("init: a person past the sign-up cap is told they're waitlisted, and init exits 3", { skip }, async () => {
+  // Another project: its own .env.
+  const dir = join(work, "waitlisted");
+  execFileSync("mkdir", ["-p", dir]);
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  writeFileSync(join(dir, "package.json"), '{"name":"e2e-queue"}');
+  const seen = readFileSync(browserLog, "utf8").split("\n").filter(Boolean).length;
+  const t0 = Date.now();
+  const run = start(["init", "--origin", h.core], dir);
+  const link = await nextLink(seen);
+  assert.equal(link.pathname, "/new-app");
+  const pk = new URLSearchParams(link.hash.slice(1)).get("pk");
+  // The waitlist page (the person signed in past the cap: the harness's
+  // fake Google) holds the link's public key with their waitlist cookie.
+  const held = await fetch(h.core + "/api/v1/waitlist/key", {
+    method: "POST",
+    headers: { origin: h.core, "content-type": "application/json", cookie: `ws_waitlist=${h.waitlist_cookie}` },
+    body: JSON.stringify({ public_key: pk }),
+  });
+  assert.equal(held.status, 200, await held.text());
+  const r = await run.done;
+  const key = getVar(readEnvFile(join(dir, ".env")), "WAKESHIFT_KEY");
+  assertNoKey(r.out + r.err, [key, h.new_key, h.key]);
+  assert.ok(!(r.out + r.err).includes(h.waitlist_cookie), "printed the waitlist cookie");
+  assert.equal(r.code, 3, r.out + r.err);
+  assert.match(r.err, /You're on Wakeshift's waitlist, so the app wasn't created\. Wakeshift will email you when your account is ready; run init again then/);
+  assert.ok(Date.now() - t0 < 60_000, "init waited instead of stopping");
+  assert.ok(key, "the key stays in .env for the rerun");
 });

@@ -227,3 +227,92 @@ func TestInstallPluginReplacesItsOwnIssuer(t *testing.T) {
 }
 
 var regexpInstalledAt = regexp.MustCompile(`"installed_at": "[^"]*"`)
+
+// Removing Claude Code's plugin (docs/harnesses.md, the plugin's README):
+// after `claude plugin uninstall`, `wakeshift uninstall --harness
+// claude-code` takes out what the plugin's first hook set up through
+// InstallPlugin: the wait command's rule and ~/.wakeshift/claude-code (its
+// trust, the plugin's issuer, links and state), so nothing listens for
+// Claude Code any more. It leaves the user's own rules and settings,
+// Claude Code's own plugin bookkeeping, other harnesses' directories and
+// the binary in ~/.wakeshift/bin (deleting ~/.wakeshift is the user's
+// last step).
+func TestUninstallAfterPluginInstall(t *testing.T) {
+	home := setHome(t)
+	bin := filepath.Join(home, ".wakeshift", "bin", "wakeshift")
+	os.MkdirAll(filepath.Dir(bin), 0o755)
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The rule is written only for a binary outside a shared directory
+	// (WaitCommand): a test home under /tmp gets none, and that part is
+	// checked only where it's written (macOS's per-user temp).
+	ruled := WaitCommand(bin) != ""
+
+	// Claude Code's settings as `claude plugin install` leaves them, with a
+	// rule of the user's own.
+	settings := filepath.Join(home, ".claude", "settings.json")
+	os.MkdirAll(filepath.Dir(settings), 0o700)
+	user := `{
+  "permissions": {"allow": ["Bash(npm test)"]},
+  "enabledPlugins": {"wakeshift@wakeshift": true},
+  "extraKnownMarketplaces": {"wakeshift": {"source": {"source": "github", "repo": "wakeshift/agent-plugins"}}}
+}
+`
+	if err := os.WriteFile(settings, []byte(user), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Another harness's directory, which must stay.
+	codexDir := filepath.Join(home, ".wakeshift", "codex")
+	os.MkdirAll(codexDir, 0o700)
+	os.WriteFile(filepath.Join(codexDir, "config.json"), []byte(`{"issuers":["https://app.wakeshift.ai"]}`), 0o600)
+
+	spec, _ := Lookup("claude-code")
+	installPlugin(t, spec, bin, "https://app.wakeshift.ai")
+	dir := LoadSettings("claude-code").Dir
+	if dir != filepath.Join(home, ".wakeshift", "claude-code") {
+		t.Fatalf("claude-code's directory is %s", dir)
+	}
+	// What hooks write there while the plugin runs: a conversation's link.
+	os.MkdirAll(filepath.Join(dir, "links"), 0o700)
+	os.WriteFile(filepath.Join(dir, "links", "s1.json"), []byte(`{}`), 0o600)
+	if b, _ := os.ReadFile(settings); ruled && !strings.Contains(string(b), "Bash("+bin+" wait)") {
+		t.Fatalf("the plugin install wrote no rule: %s", b)
+	}
+
+	out := uninstall(t, spec, bin)
+
+	if _, err := os.Stat(dir); err == nil {
+		t.Fatalf("%s left: %s", dir, out)
+	}
+	b, err := os.ReadFile(settings)
+	if err != nil {
+		t.Fatalf("settings.json: %v", err)
+	}
+	if strings.Contains(string(b), "wakeshift wait") || strings.Contains(string(b), bin) {
+		t.Fatalf("the wait command's rule is left: %s\n%s", b, out)
+	}
+	if !jsonEqual(b, []byte(user)) {
+		t.Fatalf("settings.json changed beyond Wakeshift's rule:\n%s\nwas:\n%s", b, user)
+	}
+	if _, err := os.Stat(bin); err != nil {
+		t.Fatalf("the binary went: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(codexDir, "config.json")); err != nil {
+		t.Fatalf("codex's directory went: %v", err)
+	}
+	// In ~/.claude, Wakeshift leaves only the backups it made of
+	// settings.json (one at the install, one at the uninstall), as
+	// documented: it never deletes a backup of a file it didn't create.
+	left, _ := os.ReadDir(filepath.Dir(settings))
+	for _, e := range left {
+		if e.Name() != "settings.json" && !strings.HasPrefix(e.Name(), "settings.json.before-wakeshift-") {
+			t.Errorf("left in ~/.claude: %s", e.Name())
+		}
+	}
+	// Uninstalling again finds nothing to do, and fails nothing.
+	uninstall(t, spec, bin)
+	if _, err := os.Stat(dir); err == nil {
+		t.Fatal("the second uninstall made the directory again")
+	}
+}

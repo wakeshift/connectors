@@ -9,7 +9,13 @@
 // argument itself: auto mode refuses a call whose input a hook changed after
 // its review.
 //
-//	claude-code; wakeshift-plugin=<connector version>; trusts=<tag>[,<tag>…]
+//	claude-code; wakeshift-plugin=<connector version>; trusts=<tag>[,<tag>…][; install=hooks]
+//
+// install=hooks: the hooks are the ones Wakeshift's installer wrote to
+// Claude Code's user settings, not the plugin's (their SessionStart hook
+// adds the same context since the connector that wrote it). They connect
+// the conversation from the result's beacon the same way; only the words
+// differ. A core that doesn't know the key ignores it.
 //
 // trusts names the Wakeshifts the plugin's connector trusts (IssuerTag of
 // each origin, not the origin, so the app's server doesn't learn which
@@ -35,11 +41,15 @@ import (
 type Mark struct {
 	Version string   // the plugin's connector version
 	Trusts  []string // IssuerTag of each Wakeshift the connector trusts
+	// Hooks: Wakeshift's installer's hooks (install=hooks), not the plugin.
+	Hooks bool
 }
 
 const (
 	versionKey = "wakeshift-plugin"
 	trustsKey  = "trusts"
+	installKey = "install"
+	hooksValue = "hooks"
 	// maxTrusts a mark names at most.
 	maxTrusts = 8
 )
@@ -77,6 +87,15 @@ func Value(harness, version string, issuers []string) string {
 	return harness + "; " + versionKey + "=" + version + "; " + trustsKey + "=" + strings.Join(tags, ",")
 }
 
+// HooksValue is Value for the hooks Wakeshift's installer wrote (Mark.Hooks).
+func HooksValue(harness, version string, issuers []string) string {
+	v := Value(harness, version, issuers)
+	if v == "" {
+		return ""
+	}
+	return v + "; " + installKey + "=" + hooksValue
+}
+
 // Split separates a harness argument into the claim and the plugin's mark
 // (ok false, and the argument unchanged, if it isn't one).
 func Split(arg string) (claim string, m Mark, ok bool) {
@@ -90,6 +109,8 @@ func Split(arg string) (claim string, m Mark, ok bool) {
 		switch k {
 		case versionKey:
 			m.Version = v
+		case installKey:
+			m.Hooks = v == hooksValue
 		case trustsKey:
 			for _, t := range strings.Split(v, ",") {
 				if tagRE.MatchString(t) && len(m.Trusts) < maxTrusts {

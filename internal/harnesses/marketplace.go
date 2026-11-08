@@ -14,7 +14,8 @@ import (
 // Wakeshift the marketplace's branch was built for (docs/native-installs.md).
 //
 // Its commands name the marketplace as {source}, and the Wakeshift whose
-// offer it is as {origin} (Claude Code's plugin takes it as an option): wakeshift/agent-plugins for
+// offer it is as {origin} (Claude Code's install passes it to an option the
+// plugin no longer has, for an older copy: harnesses.go): wakeshift/agent-plugins for
 // production, with the harness's way of naming a branch (RefSep) for staging
 // (Route). For any other Wakeshift (a local core) the offers fall back to
 // Wakeshift's installer, unless SetAgentPlugins names a marketplace for it.
@@ -22,6 +23,13 @@ type Marketplace struct {
 	// Install installs the plugin; Update brings an installed plugin (or a
 	// curl install) up to date; Remove removes the plugin.
 	Install, Update, Remove string
+	// Since, if set, is the oldest version of the harness's client that
+	// Install and Update run on (Claude Code's `--marketplace`: 2.1.292).
+	// A call from an older client, or one whose version it doesn't say
+	// (WithClient), is offered BeforeInstall and BeforeUpdate instead,
+	// which run on both.
+	Since                       string
+	BeforeInstall, BeforeUpdate string
 	// RefSep joins the repository and a branch in {source} (Codex's
 	// owner/repo@ref, Copilot's owner/repo#ref, Antigravity's
 	// <URL>/tree/<branch>).
@@ -36,6 +44,12 @@ type Marketplace struct {
 	// Changes, Run, Trust, Resume and AfterUpdate replace the harness's own
 	// for the plugin route ("" keeps the harness's).
 	Changes, Run, Trust, Resume, AfterUpdate string
+	// UpdateChanges, if set, is what the update command does, for the
+	// user, where it differs from updating the plugin in place: Claude
+	// Code's also moves a user of Wakeshift's installer (its hooks in user
+	// settings, which may be what's out of date) to the plugin, keeping
+	// their conversations' links.
+	UpdateChanges string
 	// Reload: a running session loads the plugin only when the user says
 	// (Claude Code's /reload-plugins), so after the install the user sends
 	// a message once they've loaded it, and the waiter that runs when that

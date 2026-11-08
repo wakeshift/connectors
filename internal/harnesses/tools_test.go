@@ -28,9 +28,9 @@ func TestWithTools(t *testing.T) {
 	// In the picker's yes option, next to the command it runs, on every
 	// path that offers the install, and the ! fallback runs the same.
 	for name, note := range map[string]string{"subscribe": SubscribeNote(h, base), "upgrade": PluginFirstNote(h, base, "App", false, "FALLBACK."), "repeat": RepeatNote(h, base)} {
-		yes := `"Notify me in every session" (description: runs ` + "`" + cmd + "` (Wakeshift's hooks for Claude Code), which adds three hooks"
+		yes := `"Notify me in every session" (description: runs ` + "`" + cmd + "` (Wakeshift's hooks for Claude Code), which adds four hooks"
 		if name == "repeat" {
-			yes = `"Yes, install Wakeshift's hooks for Claude Code" (description: runs ` + "`" + cmd + "`, adds three hooks"
+			yes = `"Yes, install Wakeshift's hooks for Claude Code" (description: runs ` + "`" + cmd + "`, adds four hooks"
 		}
 		for _, want := range []string{yes,
 			consent + ")", "type themselves, as it is: `! " + cmd + "`"} {

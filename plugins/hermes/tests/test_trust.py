@@ -241,10 +241,13 @@ class CliWaker(unittest.TestCase):
                 for platform in ("cli", "api_server"):
                     self.assertEqual(ws.cant_wake(platform), wakeshift.cant_wake_text("wakeshift"), (one_gateway, platform))
                 self.assertEqual(ws.cant_wake("telegram"), "")  # not woken at all: NOTE_UNSUPPORTED says so
+                # Ink TUI chats are woken (and gated) only where one gateway runs them.
+                self.assertEqual("tui" in ws.wakers, one_gateway)
+                self.assertEqual(ws.cant_wake("tui"), wakeshift.cant_wake_text("wakeshift") if one_gateway else "")
                 with self.assertLogs("wakeshift", "WARNING"):
                     self.assertFalse(ws.wakers["api_server"]("s1", "framed", "b"))
                 allowed[0] = True  # read again on each check: no restart
-                for platform in ("cli", "api_server"):
+                for platform in ("cli", "tui", "api_server"):
                     self.assertEqual(ws.cant_wake(platform), "", (one_gateway, platform))
         finally:
             if old is None:

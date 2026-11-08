@@ -3,6 +3,8 @@ package agentplugins
 import (
 	"bytes"
 	"encoding/json"
+	"image/png"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/wakeshift/connectors/internal/connector"
+	"github.com/wakeshift/connectors/internal/connectorversion"
 )
 
 func testPin(version, fill string) Pin {
@@ -60,7 +63,9 @@ func TestRender(t *testing.T) {
 		if err := json.Unmarshal([]byte(read(t, dir, root+manifests[h])), &man); err != nil {
 			t.Fatal(err)
 		}
-		if man.Name != "wakeshift" || !strings.HasPrefix(man.Version, "2026.11.02.1912+") {
+		// Claude Code's is semver (TestSemver); the others' the connector's
+		// version and a hash of their files.
+		if man.Name != "wakeshift" || h == "claude-code" && man.Version != "1.0.0" || h != "claude-code" && !strings.HasPrefix(man.Version, "2026.11.02.1912+") {
 			t.Fatalf("%s manifest: %+v", h, man)
 		}
 		if hk := strings.ReplaceAll(read(t, dir, root+hooks), `", "`, " "); !strings.Contains(hk, "/bin/wakeshift") || !strings.Contains(hk, " hook --harness "+h) {
@@ -122,6 +127,226 @@ func TestRenderKeepsOtherPins(t *testing.T) {
 	// Another issuer (another ref) changes every plugin.
 	if changed, _ := Render(dir, "https://app.staging.wakeshift.ai", nil); len(changed) != len(Harnesses()) {
 		t.Fatalf("changed %v", changed)
+	}
+}
+
+// Claude Code's plugin is versioned MAJOR.MINOR.PATCH from the version
+// already published: the same while nothing changes, PATCH+1 for a new pin
+// alone, MINOR+1 for any other change; the source's version is the first
+// and the floor, and sets MAJOR.
+func TestSemver(t *testing.T) {
+	dir := t.TempDir()
+	version := func() string {
+		t.Helper()
+		v, err := manifestVersion([]byte(read(t, dir, "plugins/claude-code/.claude-plugin/plugin.json")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	render := func(pins map[string]Pin, want string) {
+		t.Helper()
+		if _, err := Render(dir, "https://app.wakeshift.ai", pins); err != nil {
+			t.Fatal(err)
+		}
+		if v := version(); v != want {
+			t.Fatalf("version %s, want %s", v, want)
+		}
+	}
+	cc := func(p Pin) map[string]Pin { return map[string]Pin{"claude-code": p} }
+	render(cc(testPin("2026.11.02.1912+abc1234", "a")), "1.0.0")
+	render(nil, "1.0.0")                                         // nothing changed
+	render(cc(testPin("2026.11.02.1912+abc1234", "a")), "1.0.0") // the same pin
+	render(cc(testPin("2026.11.09.0800+def5678", "b")), "1.0.1") // a new pin
+	render(map[string]Pin{"codex": testPin("2026.11.10.0800", "c")}, "1.0.1")
+	// Another of its own files changed (here: the published copy differs
+	// from the source, as when the source's hooks or launcher change).
+	hooks := filepath.Join(dir, "plugins/claude-code/hooks/hooks.json")
+	os.WriteFile(hooks, []byte("{}"), 0o644)
+	render(nil, "1.1.0")
+	os.WriteFile(filepath.Join(dir, "plugins/claude-code/stray"), []byte("x"), 0o644)
+	render(nil, "1.2.0") // a file the source doesn't have, removed
+	if _, err := os.Stat(filepath.Join(dir, "plugins/claude-code/stray")); err == nil {
+		t.Fatal("stray file kept")
+	}
+	os.WriteFile(hooks, []byte("{}"), 0o644)
+	render(cc(testPin("2026.11.16.0800", "d")), "1.3.0") // both: MINOR
+
+	// Published before semver (the connector's version and a hash): the
+	// source's version.
+	man := filepath.Join(dir, "plugins/claude-code/.claude-plugin/plugin.json")
+	b, _ := setVersion([]byte(read(t, dir, "plugins/claude-code/.claude-plugin/plugin.json")), "2026.11.07.1745+962889d84040")
+	os.WriteFile(man, b, 0o644)
+	render(nil, "1.0.0")
+	// A published MAJOR above the source's is refused.
+	b, _ = setVersion(b, "2.0.0")
+	os.WriteFile(man, b, 0o644)
+	if _, err := Render(dir, "https://app.wakeshift.ai", nil); err == nil || !strings.Contains(err.Error(), "higher MAJOR") {
+		t.Fatalf("err %v", err)
+	}
+
+	src := func(v string) map[string][]byte {
+		return map[string][]byte{"m.json": []byte("{\n  \"version\": \"" + v + "\"\n}\n"), "a": []byte("a"), "wakeshift.env": []byte("e")}
+	}
+	with := func(m map[string][]byte, k, v string) map[string][]byte { m[k] = []byte(v); return m }
+	for _, c := range []struct {
+		next, prev map[string][]byte
+		want       string
+	}{
+		{src("1.0.0"), nil, "1.0.0"},
+		{src("1.0.0"), src("1.4.2"), "1.4.2"},
+		{src("1.0.0"), with(src("1.4.2"), "wakeshift.env", "old"), "1.4.3"},
+		{src("1.0.0"), with(src("1.4.2"), "a", "old"), "1.5.0"},
+		{src("1.6.0"), src("1.4.2"), "1.6.0"},           // the source's floor
+		{src("2.0.0"), src("1.4.2"), "2.0.0"},           // a new MAJOR
+		{src("2.0.0"), src("2026.11.07.1745"), "2.0.0"}, // not semver
+	} {
+		if v, err := Semver(c.next, c.prev, "m.json"); err != nil || v != c.want {
+			t.Errorf("%s over %s: %s %v, want %s", c.next["m.json"], c.prev["m.json"], v, err, c.want)
+		}
+	}
+	if _, err := Semver(src("1.0"), nil, "m.json"); err == nil {
+		t.Error("a source version that isn't semver")
+	}
+}
+
+// Claude Code's plugin as rendered meets the rules of Anthropic's plugin
+// directory that a file check can see (docs/claude-plugin-submission.md):
+// every hook runs a file in the plugin, through ${CLAUDE_PLUGIN_ROOT} and no
+// other variable, with no shell, substitution, wildcard or path out of the
+// plugin; no symlinks or .DS_Store; nothing over 5 MiB, and nothing but
+// images over 256 KiB; a README of at least 40 words; a license; a square
+// icon; and the manifest's directory fields.
+func TestClaudeCodePluginForDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := Render(dir, "https://app.wakeshift.ai", map[string]Pin{"claude-code": testPin("2026.11.02.1912+abc1234", "a")}); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(dir, "plugins", "claude-code")
+	var hooks struct {
+		Hooks map[string][]struct {
+			Matcher string
+			Hooks   []map[string]any
+		}
+	}
+	if err := json.Unmarshal([]byte(read(t, root, "hooks/hooks.json")), &hooks); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for ev, groups := range hooks.Hooks {
+		for _, g := range groups {
+			for _, h := range g.Hooks {
+				n++
+				args, _ := h["args"].([]any)
+				if h["type"] != "command" || h["command"] != "/bin/sh" || len(args) < 2 {
+					t.Fatalf("%s: not the launcher in exec form: %v", ev, h)
+				}
+				for i, a := range args {
+					a, _ := a.(string)
+					if strings.Contains(a, "${") && (i != 0 || strings.Count(a, "${") != 1) || strings.ContainsAny(a, "`*?|;&<>\n") || strings.Contains(a, "$(") || strings.Contains(a, "..") {
+						t.Fatalf("%s: argument %q", ev, a)
+					}
+				}
+				file, ok := strings.CutPrefix(args[0].(string), "${CLAUDE_PLUGIN_ROOT}/")
+				if !ok {
+					t.Fatalf("%s: runs %q, not a file in the plugin", ev, args[0])
+				}
+				if st, err := os.Stat(filepath.Join(root, file)); err != nil || st.Mode().Perm()&0o111 == 0 {
+					t.Fatalf("%s: %s isn't an executable file in the plugin: %v", ev, file, err)
+				}
+			}
+		}
+	}
+	if n != 4 {
+		t.Fatalf("%d hooks", n)
+	}
+	filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, _ := d.Info()
+		rel, _ := filepath.Rel(root, p)
+		switch {
+		case info.Mode()&fs.ModeSymlink != 0:
+			t.Errorf("%s is a symlink", rel)
+		case d.Name() == ".DS_Store":
+			t.Errorf("%s", rel)
+		case !d.IsDir() && info.Size() > 5<<20:
+			t.Errorf("%s is over 5 MiB", rel)
+		case !d.IsDir() && info.Size() > 256<<10 && !strings.HasSuffix(p, ".png"):
+			t.Errorf("%s is over 256 KiB", rel)
+		}
+		return nil
+	})
+	if words := len(strings.Fields(read(t, root, "README.md"))); words < 40 {
+		t.Errorf("README: %d words", words)
+	}
+	var man struct {
+		Name, DisplayName, Version, Description, Homepage, Repository, License, Icon string
+		DocumentationURL, SupportURL, PrivacyPolicyURL, TermsOfServiceURL            string
+		Author                                                                       struct{ Name, Email, URL string }
+		Keywords                                                                     []string
+		UserConfig                                                                   any
+	}
+	if err := json.Unmarshal([]byte(read(t, root, ".claude-plugin/plugin.json")), &man); err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range map[string]string{"displayName": man.DisplayName, "description": man.Description, "homepage": man.Homepage, "repository": man.Repository,
+		"license": man.License, "author.name": man.Author.Name, "author.email": man.Author.Email, "documentationUrl": man.DocumentationURL,
+		"supportUrl": man.SupportURL, "privacyPolicyUrl": man.PrivacyPolicyURL, "termsOfServiceUrl": man.TermsOfServiceURL} {
+		if v == "" {
+			t.Errorf("manifest: no %s", k)
+		}
+	}
+	if man.UserConfig != nil || len(man.Keywords) == 0 || man.License != "Apache-2.0" {
+		t.Errorf("manifest: %+v", man)
+	}
+	// The description says what the hooks fetch and where they talk to.
+	for _, want := range []string{"downloads", "SHA-256", "app.wakeshift.ai"} {
+		if !strings.Contains(man.Description, want) {
+			t.Errorf("description doesn't say %q", want)
+		}
+	}
+	f, err := os.Open(filepath.Join(root, man.Icon))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	img, err := png.DecodeConfig(f)
+	if err != nil || img.Width != img.Height || img.Width < 512 || img.Width > 2048 {
+		t.Errorf("icon: %+v %v", img, err)
+	}
+}
+
+// Below names the plugins whose pin is older than the core's minimum for
+// their harness, or that pin nothing.
+func TestBelow(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := Render(dir, "https://app.wakeshift.ai", map[string]Pin{
+		"claude-code": testPin("2026.11.07.0303+f1923a8", "a"), "codex": testPin("2026.11.03.1553+cc2fc62", "a"), "copilot": testPin("2026.11.07.0303+f1923a8", "a"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for minimums, want := range map[string]string{
+		"":                                  "cursor",
+		"wakeshift=2026.10.30.0132":         "cursor",
+		"wakeshift=2026.11.07.0303":         "codex cursor",
+		"wakeshift:claude-code=2026.11.08":  "claude-code cursor",
+		"wakeshift-hermes=2027.1.1":         "cursor",
+		"wakeshift=2026.11.03.1553+cc2fc62": "cursor",
+	} {
+		m, err := connectorversion.ParseMinimums(minimums)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := Below(dir, m); err != nil || strings.Join(got, " ") != want {
+			t.Errorf("%q: %v %v, want %s", minimums, got, err, want)
+		}
+	}
+	// A plugin the published marketplace doesn't have yet isn't below.
+	os.RemoveAll(filepath.Join(dir, "plugins", "cursor"))
+	if got, err := Below(dir, nil); err != nil || len(got) != 0 {
+		t.Errorf("without cursor's: %v %v", got, err)
 	}
 }
 
@@ -246,26 +471,27 @@ func TestParseSums(t *testing.T) {
 	}
 }
 
-// Claude Code's plugin: its hooks pass the issuer the user chose (the
-// plugin's userConfig, production by default) to the launcher as an
-// argument, in exec form, so neither a shell nor the environment (which a
-// project's settings can set) is involved.
+// Claude Code's plugin: its hooks run the launcher in exec form, with the
+// issuer wakeshift.env's (the Wakeshift the plugin was rendered for), so
+// neither a shell, the environment (which a project's settings can set) nor
+// a plugin that depends on it is involved.
 func TestClaudeCodePlugin(t *testing.T) {
 	dir := t.TempDir()
 	if _, err := Render(dir, "https://app.wakeshift.ai", nil); err != nil {
 		t.Fatal(err)
 	}
-	var man struct {
-		UserConfig map[string]struct {
-			Type, Default string
-			Required      bool
-		}
-	}
+	// No options: Claude Code applies no option's default and runs no hook
+	// whose arguments name an unset one, and a plugin installed as another
+	// plugin's dependency gets none set. The issuer is wakeshift.env's.
+	var man map[string]any
 	if err := json.Unmarshal([]byte(read(t, dir, "plugins/claude-code/.claude-plugin/plugin.json")), &man); err != nil {
 		t.Fatal(err)
 	}
-	if o := man.UserConfig["issuer"]; o.Type != "string" || o.Default != "https://app.wakeshift.ai" || !o.Required {
-		t.Fatalf("userConfig: %+v", man.UserConfig)
+	if _, ok := man["userConfig"]; ok {
+		t.Fatalf("userConfig: %v", man["userConfig"])
+	}
+	if strings.Contains(read(t, dir, "plugins/claude-code/hooks/hooks.json"), "user_config") {
+		t.Fatal("the hooks name a plugin option")
 	}
 	var hooks struct {
 		Hooks map[string][]struct {
@@ -290,7 +516,7 @@ func TestClaudeCodePlugin(t *testing.T) {
 	// (internal/pluginmark): a plain hook, run once per session; the waiter
 	// is the second.
 	start := hooks.Hooks["SessionStart"]
-	if len(start) != 2 || len(start[0].Hooks) != 1 || strings.Join(start[0].Hooks[0].Args, " ") != "${CLAUDE_PLUGIN_ROOT}/bin/wakeshift --issuer ${user_config.issuer} hook --harness claude-code --event "+connector.ClaudeSessionContextEvent ||
+	if len(start) != 2 || len(start[0].Hooks) != 1 || strings.Join(start[0].Hooks[0].Args, " ") != "${CLAUDE_PLUGIN_ROOT}/bin/wakeshift hook --harness claude-code --event "+connector.ClaudeSessionContextEvent ||
 		start[0].Hooks[0].Async || start[0].Hooks[0].AsyncRewake || start[0].Hooks[0].Timeout != 60 {
 		t.Fatalf("SessionStart: %+v", start)
 	}
@@ -302,7 +528,7 @@ func TestClaudeCodePlugin(t *testing.T) {
 		}
 		h := g[0].Hooks[0]
 		args := strings.Join(h.Args, " ")
-		if h.Command != "/bin/sh" || args != "${CLAUDE_PLUGIN_ROOT}/bin/wakeshift --issuer ${user_config.issuer} "+tail {
+		if h.Command != "/bin/sh" || args != "${CLAUDE_PLUGIN_ROOT}/bin/wakeshift "+tail {
 			t.Fatalf("%s: %+v", ev, h)
 		}
 		switch ev {
@@ -437,3 +663,57 @@ func TestRenderStandalone(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// Claude Code's description names the Wakeshift the plugin trusts: the
+// issuer's host, so staging's branch names staging's. Rendering it again
+// changes nothing, and production's is the source's, word for word.
+func TestDescriptionNamesTheIssuersHost(t *testing.T) {
+	description := func(dir string) string {
+		var m struct{ Description string }
+		if err := json.Unmarshal([]byte(read(t, dir, "plugins/claude-code/.claude-plugin/plugin.json")), &m); err != nil {
+			t.Fatal(err)
+		}
+		return m.Description
+	}
+	src, err := files.ReadFile("marketplace/plugins/claude-code/.claude-plugin/plugin.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var source struct{ Description string }
+	if err := json.Unmarshal(src, &source); err != nil || !strings.Contains(source.Description, "(app.wakeshift.ai)") {
+		t.Fatalf("the source's description: %q (%v)", source.Description, err)
+	}
+	for issuer, host := range map[string]string{
+		"https://app.wakeshift.ai":         "app.wakeshift.ai",
+		"https://app.staging.wakeshift.ai": "app.staging.wakeshift.ai",
+		"http://localhost:8370":            "localhost:8370",
+	} {
+		dir := t.TempDir()
+		if _, err := Render(dir, issuer, nil); err != nil {
+			t.Fatal(err)
+		}
+		got := description(dir)
+		if want := strings.ReplaceAll(source.Description, "app.wakeshift.ai", host); got != want {
+			t.Errorf("%s: %q", issuer, got)
+		}
+		v, _ := manifestVersion([]byte(read(t, dir, "plugins/claude-code/.claude-plugin/plugin.json")))
+		if changed, err := Render(dir, issuer, nil); err != nil || len(changed) != 0 {
+			t.Errorf("%s again: changed %v (%v)", issuer, changed, err)
+		}
+		if again, _ := manifestVersion([]byte(read(t, dir, "plugins/claude-code/.claude-plugin/plugin.json"))); again != v {
+			t.Errorf("%s again: version %s, was %s", issuer, again, v)
+		}
+	}
+}
+
+// A description describeHost can't rewrite (not on its own line) is an
+// error, never a staging plugin naming production.
+func TestDescribeHostRefusesWhatItCantRewrite(t *testing.T) {
+	folded := []byte("{\n  \"name\": \"wakeshift\",\n  \"description\":\n    \"Talks only to Wakeshift (app.wakeshift.ai).\"\n}\n")
+	if _, err := describeHost(folded, "https://app.staging.wakeshift.ai"); err == nil {
+		t.Fatal("a folded description was let through")
+	}
+	if out, err := describeHost(folded, "https://app.wakeshift.ai"); err != nil || !bytes.Equal(out, folded) {
+		t.Fatalf("production's: %s (%v)", out, err)
+	}
+}

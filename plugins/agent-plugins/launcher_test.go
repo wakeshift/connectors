@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -354,35 +355,42 @@ func TestLauncherUnpinned(t *testing.T) {
 	}
 }
 
-// A hook can pass the issuer the user chose (Claude Code's userConfig):
-// the connector trusts it in place of wakeshift.env's, and an address that
-// isn't a Wakeshift's origin is refused without running anything.
-func TestLauncherIssuerArgument(t *testing.T) {
-	r := newRelease(t)
-	l := newLane(t, shells(t)[0], r, "2026.11.02.1912", fakeConnector("2026.11.02.1912"))
-	out, errOut := l.run("{}", "--issuer", "https://app.staging.wakeshift.ai/", "hook", "--harness", "codex", "--rewake")
-	if out != "{\"ok\":true}\n" || errOut != "" {
-		t.Fatalf("%q %q", out, errOut)
-	}
-	want := "install install --harness codex --issuer https://app.staging.wakeshift.ai --yes --plugin\nrun hook --harness codex --rewake stdin={}\n"
-	if got := l.logged(); got != want {
-		t.Fatalf("log:\n%s\nwant:\n%s", got, want)
-	}
-	// The same issuer again: warm.
-	l.run("{}", "--issuer", "https://app.staging.wakeshift.ai", "hook", "--harness", "codex")
-	if strings.Count(l.logged(), "--plugin") != 1 {
-		t.Fatalf("trusted again: %s", l.logged())
-	}
-	before := l.logged()
-	for _, bad := range []string{"", "http://example.com", "https://example.com/x", "https://a.example$(id)", "javascript:x", "https://"} {
-		out, errOut := l.run("{}", "--issuer", bad, "hook", "--harness", "codex")
-		if out != "" || !strings.Contains(errOut, "issuer setting isn't") || l.logged() != before {
-			t.Fatalf("%q: %q %q %s", bad, out, errOut, l.logged())
+// The connector trusts wakeshift.env's issuer, whatever --issuer a hook
+// passes (Claude Code's plugin's hooks did, from an issuer option it no
+// longer has; a plugin installed as another plugin's dependency gets no
+// options set): the argument is accepted, so hooks an earlier version
+// loaded keep running, and its value is ignored. One that differs is said
+// on stderr; nothing ever reaches stdout but the connector's.
+func TestLauncherIgnoresIssuerArgument(t *testing.T) {
+	eachShell(t, func(t *testing.T, shell string) {
+		r := newRelease(t)
+		l := newLane(t, shell, r, "2026.11.02.1912", fakeConnector("2026.11.02.1912"))
+		out, errOut := l.run("{}", "--issuer", "https://app.wakeshift.ai/", "hook", "--harness", "codex", "--rewake")
+		if out != "{\"ok\":true}\n" || errOut != "" {
+			t.Fatalf("%q %q", out, errOut)
 		}
-	}
-	if _, errOut := l.run("{}", "--issuer", "http://localhost:8370", "prepare"); errOut != "" || !strings.Contains(l.logged(), "--issuer http://localhost:8370 --yes --plugin") {
-		t.Fatalf("localhost: %q %s", errOut, l.logged())
-	}
+		want := "install install --harness codex --issuer https://app.wakeshift.ai --yes --plugin\nrun hook --harness codex --rewake stdin={}\n"
+		if got := l.logged(); got != want {
+			t.Fatalf("log:\n%s\nwant:\n%s", got, want)
+		}
+		for _, other := range []string{"https://app.staging.wakeshift.ai", "http://localhost:8370", "http://example.com", "https://a.example$(id)", "javascript:x"} {
+			out, errOut := l.run("{}", "--issuer", other, "hook", "--harness", "codex")
+			if out != "{\"ok\":true}\n" || !strings.Contains(errOut, "no longer takes an issuer setting; it trusts https://app.wakeshift.ai") {
+				t.Fatalf("%q: %q %q", other, out, errOut)
+			}
+		}
+		// An empty one (an option nobody set), and a lone --issuer.
+		if out, errOut := l.run("{}", "--issuer", "", "hook", "--harness", "claude-code"); out != "{\"ok\":true}\n" || errOut != "" {
+			t.Fatalf("empty: %q %q", out, errOut)
+		}
+		if out, errOut := l.run("", "--issuer"); out != "{\"ok\":true}\n" || errOut != "" {
+			t.Fatalf("lone: %q %q", out, errOut)
+		}
+		// Trusted once, the plugin's own issuer only.
+		if got := l.logged(); strings.Count(got, "--plugin") != 1 || strings.Contains(got, "staging") || strings.Contains(got, "example") || strings.Contains(got, "localhost") {
+			t.Fatalf("log: %s", got)
+		}
+	})
 }
 
 // --if-ready runs the connector only when it's there and set up already:
@@ -404,6 +412,53 @@ func TestLauncherIfReady(t *testing.T) {
 		out, errOut = l.run(`{"ask":1}`, "--if-ready", "hook", "--harness", "copilot", "--event", "permissionRequest")
 		if out != "{\"ok\":true}\n" || errOut != "" || !strings.Contains(l.logged(), "run hook --harness copilot --event permissionRequest stdin={\"ask\":1}") {
 			t.Fatalf("ready: stdout %q stderr %q log %q", out, errOut, l.logged())
+		}
+	})
+}
+
+// Where there's no connector build (Windows' Git Bash, MSYS, Cygwin; the
+// BSDs), the launcher says so once per run on stderr, fetches nothing and
+// exits 0, whatever the hook.
+func TestLauncherUnsupportedSystem(t *testing.T) {
+	eachShell(t, func(t *testing.T, shell string) {
+		r := newRelease(t)
+		l := newLane(t, shell, r, "2026.11.02.1912", fakeConnector("2026.11.02.1912"))
+		for _, system := range []string{"MINGW64_NT-10.0-26100", "CYGWIN_NT-10.0", "FreeBSD"} {
+			fake := t.TempDir()
+			os.WriteFile(filepath.Join(fake, "uname"), []byte("#!/bin/sh\necho "+system+"\n"), 0o755)
+			env := l.env
+			l.env = append(slices.Clone(env[1:]), "PATH="+fake+string(os.PathListSeparator)+os.Getenv("PATH"))
+			for _, args := range [][]string{{"hook", "--harness", "claude-code", "--rewake"}, {"prepare"}, {"--if-ready", "hook", "--harness", "copilot"}} {
+				out, errOut := l.run("{}", args...)
+				if out != "" || strings.Count(errOut, "\n") != 1 || !strings.Contains(errOut, "runs on macOS and Linux (and WSL), not "+system) {
+					t.Fatalf("%s %v: %q %q", system, args, out, errOut)
+				}
+			}
+			l.env = env
+		}
+		if r.hits.Load() != 0 || l.logged() != "" {
+			t.Fatalf("fetched or ran: %d %q", r.hits.Load(), l.logged())
+		}
+	})
+}
+
+// A warm run (the pinned connector there, its issuer trusted) uses no
+// network and prints nothing but the connector's own output, so a hook in
+// normal operation adds no noise.
+func TestLauncherWarmIsQuiet(t *testing.T) {
+	eachShell(t, func(t *testing.T, shell string) {
+		r := newRelease(t)
+		l := newLane(t, shell, r, "2026.11.02.1912", fakeConnector("2026.11.02.1912"))
+		l.run("", "prepare")
+		hits := r.hits.Load()
+		for _, args := range [][]string{{"prepare"}, {"hook", "--harness", "codex"}, {"--if-ready", "hook", "--harness", "codex"}} {
+			out, errOut := l.run("{}", args...)
+			if errOut != "" || args[0] == "prepare" && out != "" || args[0] != "prepare" && out != "{\"ok\":true}\n" {
+				t.Fatalf("%v: %q %q", args, out, errOut)
+			}
+		}
+		if r.hits.Load() != hits {
+			t.Fatal("a warm run fetched")
 		}
 	})
 }

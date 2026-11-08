@@ -3,8 +3,8 @@
 `wakeshift-cli` sets up a [Wakeshift](https://wakeshift.ai) app for your MCP server and checks that the server wakes agents. Your coding agent can run it for you, and it never shows the app's key to anyone: not on the screen, not in a link, not in the agent's transcript.
 
 ```sh
-npx -y @wakeshift/cli@0.1.2 init
-npx -y @wakeshift/cli@0.1.2 verify --url http://localhost:3000/mcp --tool watch_build --args '{"number":412}'
+npx -y @wakeshift/cli@0.1.3 init
+npx -y @wakeshift/cli@0.1.3 verify --url http://localhost:3000/mcp --tool watch_build --args '{"number":412}'
 ```
 
 It needs Node 22 or later, and has no dependencies beyond Node itself.
@@ -95,7 +95,7 @@ Other options: `--event <name>` when the tool declares several events, `--event-
 | 0 | done; for `verify`, every check passed |
 | 1 | failed: the message says what to fix |
 | 2 | the command line was wrong |
-| 3 | the account is on the waitlist, or isn't signed in (reserved: today the console page says so, and `init` waits until it ends with 4) |
+| 3 | the person who opened `init`'s link is on Wakeshift's waitlist: Wakeshift emails them when their account is ready; run `init` again then |
 | 4 | timed out waiting for the console: run the same command again to keep waiting |
 
 ## Keeping the key secret
@@ -106,6 +106,7 @@ Other options: `--event <name>` when the tool declares several events, `--event-
 
 ## Troubleshooting
 
+- **`init` exited 3.** You're on Wakeshift's waitlist. When the email says your account is ready, run `init` again: it keeps the key and prints the link again.
 - **`init` timed out.** Open the link again (run the same command: it prints it again with the same key). If the page said your account is on the waitlist, Wakeshift emails you when it's ready.
 - **verify: "can't tell the arguments".** Keep `attach`'s default tools on (`list_subscriptions` lets verify see its exact subscription), or pass `--event-args`.
 

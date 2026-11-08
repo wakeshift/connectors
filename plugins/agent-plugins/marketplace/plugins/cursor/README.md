@@ -33,6 +33,10 @@ The connector keeps its settings and connected conversations in `~/.wakeshift/cu
 
 Read the [Connector Terms](https://wakeshift.ai/connector-terms) and the [Privacy Policy](https://wakeshift.ai/privacy). Report a security problem privately to support@wakeshift.ai.
 
+## Turn it off
+
+To turn the hooks off without uninstalling, start Cursor or `cursor-agent` with `WAKESHIFT_DISABLED=1` (or `true`) in its environment. Every hook then exits at once and does nothing: no network request, no download, no output. Conversations that were connected keep their link, so their messages reach them again once Cursor runs without the variable. Any other value, or none, leaves the hooks on.
+
 ## Uninstall
 
 Uninstall Wakeshift from **Customize**, then run:

@@ -6,7 +6,7 @@ export const EXIT = {
   FAIL: 1,
   /** The command line was wrong. */
   USAGE: 2,
-  /** The account is on the waitlist, or the person isn't signed in. */
+  /** The person is on the waitlist (Wakeshift answered 403 waitlisted), or isn't signed in. */
   WAITLISTED: 3,
   /** Waited for the console and nothing came. */
   TIMEOUT: 4,

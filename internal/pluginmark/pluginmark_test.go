@@ -48,3 +48,25 @@ func TestValueNeedsSomethingToMarkWith(t *testing.T) {
 		t.Fatalf("trusts: %+v %v", m, ok)
 	}
 }
+
+// The hooks Wakeshift's installer wrote mark install=hooks; the plugin's
+// mark doesn't, and a mark with another install value is the plugin's.
+func TestHooksValue(t *testing.T) {
+	v := HooksValue("claude-code", "2026.11.06.1200", []string{"https://app.wakeshift.ai"})
+	if !strings.HasSuffix(v, "; install=hooks") || !strings.HasPrefix(v, Value("claude-code", "2026.11.06.1200", []string{"https://app.wakeshift.ai"})) {
+		t.Fatalf("HooksValue = %q", v)
+	}
+	claim, m, ok := Split(v)
+	if !ok || claim != "claude-code" || !m.Hooks || !m.TrustsIssuer("https://app.wakeshift.ai") {
+		t.Fatalf("Split(%q) = %q %+v %v", v, claim, m, ok)
+	}
+	if _, m, ok := Split(Value("claude-code", "1.0", []string{"https://a"})); !ok || m.Hooks {
+		t.Fatalf("the plugin's mark: %+v %v", m, ok)
+	}
+	if _, m, ok := Split(Value("claude-code", "1.0", []string{"https://a"}) + "; install=plugin"); !ok || m.Hooks {
+		t.Fatalf("install=plugin: %+v %v", m, ok)
+	}
+	if HooksValue("claude-code", "", []string{"https://a"}) != "" {
+		t.Fatal("a hooks mark with no version")
+	}
+}

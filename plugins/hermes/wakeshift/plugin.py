@@ -26,6 +26,9 @@ be tested without them (``__init__.register`` wires it in).
      hooks) and is a plugin turn in that session, which Hermes itself also
      allows only with that setting. Acknowledged only once a turn starts after
      it (pre_llm_call), so a message still queued when the chat ends comes back.
+   - TUI sessions (`hermes --tui`, platform "tui"), from 0.22.3: local sessions
+     of the same gateway, woken as CLI ones are. The TUI shows the woken turn;
+     the classic CLI runs it but doesn't show it.
    Other platforms (Telegram, Discord…) aren't woken: Hermes's only way to start
    a turn there marks it internal (as if the user's own), which we never use.
 3. Approvals stay as Hermes sets them: a woken run is unattended, so what needs
@@ -92,7 +95,7 @@ MISSING_CRYPTOGRAPHY = ("Hermes's Python environment is missing the cryptography
 # The chat connected, but this Hermes won't let the plugin start its turns
 # (cant_wake says why, and the fix).
 NOTE_CANT_WAKE = "Wakeshift: connected, but new messages can't wake this conversation yet. {}"
-NOTE_UNSUPPORTED = ("Wakeshift: Hermes can't wake {} conversations yet (only API server and CLI ones), "
+NOTE_UNSUPPORTED = ("Wakeshift: Hermes can't wake {} conversations yet (only API server, CLI and TUI ones), "
                     "so new messages wait until you next use this app's tools.")
 # A beacon in a turn that started before the plugin loaded (it was installed
 # or enabled during the turn, and Hermes made its hooks live at once): Hermes
@@ -121,9 +124,24 @@ STARTING_FOR = 120
 # acknowledged if it comes back (Hermes's own Idempotency-Key replay lasts a
 # day, but only for the same batch and only on the API server).
 STARTED_FOR = 7 * 24 * 3600
-# Platforms whose waker only queues the message (the CLI's input queue): it's
-# done once the next turn in that process starts, not when it's queued.
-QUEUES = {"cli"}
+# Platforms whose waker only queues the message (the CLI's input queue, or a
+# plugin turn in a local session): it's done once the next turn in that
+# session starts, not when it's queued.
+QUEUES = {"cli", "tui"}
+
+
+# A local chat's interfaces: one gateway's classic CLI and Ink TUI chats are
+# the same local sessions, so a chat connected in one and resumed in the
+# other (`hermes chat --tui --continue`) stays connected.
+LOCAL = {"cli", "tui"}
+
+
+def _resumed_as(saved: str, platform: str) -> str:
+    """The platform a saved link listens as when its session's turn starts on
+    platform ("" if it doesn't: another platform's session)."""
+    if not platform or platform == saved or (saved in LOCAL and platform in LOCAL):
+        return platform or saved
+    return ""
 
 
 # The Wakeshift the plugin trusts when nothing says otherwise: the public one.
@@ -321,7 +339,7 @@ class Session:
 class Wakeshift:
     """The plugin's state in one Hermes process.
 
-    wakers maps a platform ("api_server", "cli") to a function
+    wakers maps a platform ("api_server", "cli", "tui") to a function
     (session, framed text, batch id) -> accepted. route() is Hermes's route
     key for the session whose hook is running ("" if it has none);
     cant_wake(platform) says why this Hermes won't let the plugin start that
@@ -568,8 +586,9 @@ class Wakeshift:
         self._set_busy(session_id, self.now() + BUSY_FOR, started=True)
         for d in self._links_of(session_id):
             key = self._key_of(d)
-            if key not in listening and d["platform"] == (platform or d["platform"]) and d["platform"] in self.wakers:
-                self._listen(session_id, d["platform"], d["link"], key)
+            now = _resumed_as(d["platform"], platform)
+            if key not in listening and now in self.wakers:
+                self._listen(session_id, now, d["link"], key)
         return None  # pre_llm_call's return is added to the prompt: nothing
 
     def turn_ended(self, session_id: str = "", **_) -> None:

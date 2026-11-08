@@ -129,6 +129,13 @@ type Harness struct {
 	// case-insensitively: recognition when there's neither a client name
 	// nor a Fingerprint.
 	UserAgents []string
+	// SharedUserAgents are product tokens its MCP requests carry that
+	// other clients' carry too (Hermes Agent's python-httpx2, the MCP
+	// Python SDK 2.x's HTTP client): a call with no client name at all (a
+	// stateless MCP server, which never sees initialize, on a protocol
+	// before 2026-07-28) and nothing else that names a harness is
+	// recognized by one as Unsure, as by a Shared client name.
+	SharedUserAgents []string
 	// Exact: recognized only by one of its Clients, exactly. Not by its
 	// Name or ID as a client name, nor by a variant of either ("muse-…"),
 	// which AgentID, Recognize and ExactClient otherwise take as it: its
@@ -205,6 +212,10 @@ type Harness struct {
 	Uninstall string
 	// routed: Route gave h its Marketplace's texts (the offer is the plugin).
 	routed bool
+	// client, set by WithClient, is the version of the harness's client
+	// the call came from ("" if it didn't say): the offers give the
+	// commands that version runs (Marketplace.Since).
+	client string
 	// Allow, if set, is a command OfferCommand (and UpdateCommand) runs after a Repo install to
 	// turn on a setting the install needs, which its Changes disclose (Hermes:
 	// allow_gateway_injection, without which the plugin starts no turn in
@@ -375,23 +386,42 @@ var all = []Harness{
 		ID: "claude-code", Name: "Claude Code", Claim: "claude-code", Aliases: []string{"claude", "claude-cli"}, Clients: []string{"claude-code"}, UserAgents: []string{"claude-code"},
 		Wake: Rewake, ZeroInstall: Monitor, Tasks: true, Ack: "at least once, acknowledged when the hook hands the message over",
 		Binding: ByCall, Carrier: Meta, CallMeta: "claudecode/toolUseId", Fingerprint: "claudecode/toolUseId", Installable: true,
-		// Wakeshift's plugin (plugins/agent-plugins). Claude Code 2.1.316
-		// applies no option's default (an unset option fails the hooks), so
-		// the install always sets the issuer, production's too; installing
-		// again is a no-op and `claude plugin update` doesn't refresh a Git
-		// marketplace, so the update refreshes it first.
+		// Wakeshift's plugin (plugins/agent-plugins). It has no options:
+		// its launcher trusts the Wakeshift its marketplace ref was
+		// rendered for, so it works installed as another plugin's
+		// dependency, which sets none. The install still passes the
+		// issuer option the plugin had until November 2026: an older
+		// Claude Code (2.1.280 by `marketplace add`, 2.1.312 by
+		// `--marketplace`) installs from a marketplace clone it already
+		// had without refreshing it, which may hold that version, whose
+		// hooks fail with the option unset; on the current plugin it's
+		// "--config not applied", a warning, exit 0. The update installs
+		// again (a no-op, or the plugin in place of the installer's hooks),
+		// then refreshes the marketplace, since `claude plugin update`
+		// doesn't, and updates: it ends on the current plugin, so it needs
+		// no option. `--marketplace` came in 2.1.292: an older client (or
+		// one that doesn't say its version) adds the marketplace first,
+		// a no-op when it's there already.
 		Marketplace: &Marketplace{
-			Install:     "claude plugin install wakeshift --marketplace {source} --config issuer={origin}",
-			Update:      "claude plugin install wakeshift --marketplace {source} --config issuer={origin} && claude plugin marketplace update wakeshift && claude plugin update wakeshift@wakeshift",
-			Remove:      "claude plugin uninstall wakeshift@wakeshift",
-			RefSep:      "#",
-			Changes:     "installs Wakeshift's plugin for Claude Code from github.com/wakeshift/agent-plugins with Claude Code's own plugin installer; its hooks fetch Wakeshift's connector into ~/.wakeshift/bin, checking its SHA-256, and it adds one permission rule to ~/.claude/settings.json so Claude Code runs Wakeshift's wait command (~/.wakeshift/bin/wakeshift wait) without asking each time",
-			Trust:       "There's nothing to approve, but Claude Code loads a newly installed plugin only when a session starts: type /reload-plugins here (or restart with claude --continue).",
-			Resume:      "Then send any message here (\"done\" is enough): the plugin connects this conversation once I've replied.",
-			AfterUpdate: "Type /reload-plugins here (or restart Claude Code), so it runs the new version.",
-			Reload:      true,
+			Install:       "claude plugin install wakeshift --marketplace {source} --config issuer={origin}",
+			Update:        "claude plugin install wakeshift --marketplace {source} && claude plugin marketplace update wakeshift && claude plugin update wakeshift@wakeshift",
+			Since:         "2.1.292",
+			BeforeInstall: "claude plugin marketplace add {source} && claude plugin install wakeshift@wakeshift --config issuer={origin}",
+			BeforeUpdate:  "claude plugin marketplace add {source} && claude plugin install wakeshift@wakeshift && claude plugin marketplace update wakeshift && claude plugin update wakeshift@wakeshift",
+			Remove:        "claude plugin uninstall wakeshift@wakeshift",
+			RefSep:        "#",
+			Changes:       "installs Wakeshift's plugin for Claude Code from github.com/wakeshift/agent-plugins with Claude Code's own plugin installer; its hooks fetch Wakeshift's connector into ~/.wakeshift/bin, checking its SHA-256, and it adds one permission rule to ~/.claude/settings.json so Claude Code runs Wakeshift's wait command (~/.wakeshift/bin/wakeshift wait) without asking each time",
+			Trust:         "There's nothing to approve, but Claude Code loads a newly installed plugin only when a session starts: type /reload-plugins here (or restart with claude --continue).",
+			Resume:        "Then send any message here (\"done\" is enough): the plugin connects this conversation once I've replied.",
+			AfterUpdate:   "Type /reload-plugins here (or restart Claude Code), so it runs the new version.",
+			// What's out of date may be the hooks Wakeshift's installer
+			// wrote, not the plugin: the plugin's first hook takes those
+			// out (InstallPlugin) and keeps the conversations' links, so
+			// the update needs no uninstall first, which would drop them.
+			UpdateChanges: "it updates Wakeshift's plugin for Claude Code with Claude Code's own plugin command, or installs it in place of the hooks Wakeshift's installer wrote to ~/.claude/settings.json, and keeps their settings and connected conversations",
+			Reload:        true,
 		},
-		Changes: "adds three hooks to ~/.claude/settings.json and pre-approves Wakeshift's own wait command there (~/.wakeshift/bin/wakeshift wait), so Claude Code runs it without asking, keeping a backup",
+		Changes: "adds four hooks to ~/.claude/settings.json and pre-approves Wakeshift's own wait command there (~/.wakeshift/bin/wakeshift wait), so Claude Code runs it without asking, keeping a backup",
 		AskTool: "AskUserQuestion", UserShell: "!", ToolRules: true,
 		Trust:       "There's nothing to approve. Claude Code picks the hooks up in running sessions; in a folder Claude Code hasn't trusted yet, choose \"Yes, I trust this folder\" when it asks, since hooks don't run until then.",
 		AfterUpdate: "There's nothing to approve again: the hooks run the new version from their next call.",
@@ -480,6 +510,17 @@ var all = []Harness{
 		Verified:       "1.18.7",
 	},
 	{
+		// pi (earendil-works/pi, the terminal coding agent): clientInfo "pi"
+		// with its version, User-Agent "undici" (Node's default: no rule),
+		// tools/call _meta of progressToken only (1.5.0, checked against a
+		// probe server). Exact: "pi-…" client names may be other products.
+		// Recognized and listed in the harness argument; Wakeshift's
+		// extension for pi, which wakes it, is a separate change (#1050).
+		ID: "pi", Name: "pi", Claim: "pi", Aliases: []string{"pi-coding-agent", "pi-agent"}, Clients: []string{"pi"}, Exact: true,
+		Wake:    Pull,
+		Blocker: "Wakeshift's extension for pi, which wakes its sessions, isn't available yet",
+	},
+	{
 		ID: "antigravity", Name: "Antigravity CLI", Claim: "antigravity", Aliases: []string{"agy", "antigravity-cli"}, Clients: []string{"antigravity-client"},
 		Wake: StopHook, ZeroInstall: Background, Ack: "at least once, acknowledged when the stop hook hands the message over",
 		Binding: ByConversation, Carrier: Text, ConversationMeta: "antigravity.google/conversation_id", Fingerprint: "antigravity.google/conversation_id", Installable: true,
@@ -553,7 +594,16 @@ var all = []Harness{
 		// 2026-07-28).
 		ID: "hermes", Name: "Hermes Agent", Claim: "hermes", Aliases: []string{"hermes-agent"},
 		Clients: []string{"hermes-agent", "mcp"}, Shared: []string{"mcp"}, Unsure: "you're Hermes Agent (Nous Research)",
-		Wake: Plugin, Ack: "at least once, acknowledged once Hermes accepts the run",
+		// A stateless server on a protocol before 2026-07-28 (the
+		// quickstart's createMcpHandler, Shipyard in wakebench's realistic
+		// tier) never sees Hermes's client name, and before its plugin is
+		// installed nothing else in the call names it unless the model
+		// passes harness itself: wakebench, November 7, 2026, 5 of 6
+		// conversations got "Wakeshift can't wake this agent" and never
+		// heard of the install. The User-Agent is the MCP Python SDK 2.x's
+		// (other Python clients send it too), so it's Unsure.
+		SharedUserAgents: []string{"python-httpx2"},
+		Wake:             Plugin, Ack: "at least once, acknowledged once Hermes accepts the run",
 		Binding: Unbound, Carrier: Meta, Installable: true,
 		Repo:    "wakeshift/hermes-plugin",
 		Changes: "installs Wakeshift's plugin from its public repository, github.com/wakeshift/hermes-plugin, with Hermes's own plugin installer, into $HERMES_HOME/plugins/wakeshift, enables it, and lets it start turns in your Hermes chats (Hermes's allow_gateway_injection setting for it, without which the plugin wakes no Hermes chat, through the API server or `hermes chat`); it starts them only in conversations connected to Wakeshift",
@@ -567,7 +617,7 @@ var all = []Harness{
 			"Hermes may hold the command for approval, and in a chat through Hermes's API server nobody can approve it. If Hermes blocks the command, running it fails, or you can't run commands, tell them so in your reply and give them the command to run there, starting with `hermes`: never end your reply without it. " +
 			"If its output warns \"custom (unreviewed) source\", tell them in one line: Wakeshift's plugin isn't in Hermes's catalog yet, so Hermes installed it from Wakeshift's public repository, github.com/wakeshift/hermes-plugin. " +
 			"If its output says \"Gateway reloaded plugins\" and that the plugin is active in the running gateway now, Hermes loaded it already: skip the restart and resume below, and just ask them to send any message.",
-		Trust:       "There's nothing to approve in Hermes after the install, but Hermes loads plugins only when a chat starts or is resumed, so Wakeshift can't wake this chat until they resume it: through Hermes's gateway or API server, restart the gateway and keep sending to this session as before; in `hermes chat`, exit and run `hermes chat --continue`. A new chat works too. If the plugin isn't enabled, first run `hermes plugins enable wakeshift` where Hermes runs.",
+		Trust:       "There's nothing to approve in Hermes after the install, but Hermes loads plugins only when a chat starts or is resumed, so Wakeshift can't wake this chat until they resume it: through Hermes's gateway or API server, restart the gateway and keep sending to this session as before; in `hermes chat`, exit and run `hermes chat --continue`, or `hermes chat --tui --continue` to resume it in Hermes's TUI, which shows each woken turn as it runs (the classic `hermes chat` runs a woken turn without showing it, until Hermes adds that). A new chat works too. If the plugin isn't enabled, first run `hermes plugins enable wakeshift` where Hermes runs.",
 		Restart:     "After a later restart of hermes chat, send any message once you've resumed it, so it reconnects (conversations through Hermes's gateway reconnect by themselves).",
 		AfterUpdate: "There's nothing to approve again, but Hermes loads plugins only when a chat starts or is resumed: ask them to resume this chat (exit and run `hermes chat --continue`, or restart Hermes's gateway) or start a new one, so it loads the new plugin.",
 		When:        "as soon as they arrive, even while it's idle, as long as Hermes is running (conversations through Hermes's API server or CLI)",
@@ -741,7 +791,9 @@ const (
 // the client name if that names a harness (a stated client always wins:
 // _meta and the User-Agent never override it, except the _meta that says
 // another harness runs that client, Harness.Embeds), else by a Fingerprint key
-// in the call's _meta, else by a product token in the User-Agent. A
+// in the call's _meta, else by a product token in the User-Agent (one only
+// it sends, else, for a call with no client name, one it shares with other
+// clients, which leaves it Unsure: SharedUserAgents). A
 // stateless MCP server (a new server per request) never sees initialize,
 // so it has no client name; the other two come with every call. Every
 // signal is self-asserted, the client name included: recognizing a harness
@@ -770,6 +822,17 @@ func Recognize(client string, meta map[string]any, userAgent string) (Harness, V
 			for _, p := range h.UserAgents {
 				if slices.Contains(products, strings.ToLower(p)) {
 					return h, ByUserAgent, true
+				}
+			}
+		}
+		// A client that stated a name isn't one of these: Hermes Agent
+		// states "hermes-agent" (or, before 0.22.5, "mcp").
+		if strings.TrimSpace(client) == "" {
+			for _, h := range all {
+				for _, p := range h.SharedUserAgents {
+					if slices.Contains(products, strings.ToLower(p)) && h.Unsure != "" {
+						return h, ByUserAgent, true
+					}
 				}
 			}
 		}
@@ -982,10 +1045,16 @@ func repoCommand(h Harness, base string, force bool) string {
 			return strings.Replace(h.PackageIssuer, "{origin}", origin, 1) + " && " + cmd
 		}
 	}
-	if h.Marketplace != nil {
-		tmpl := h.Marketplace.Install
+	if m := h.Marketplace; m != nil {
+		tmpl := m.Install
 		if force {
-			tmpl = h.Marketplace.Update
+			tmpl = m.Update
+		}
+		if m.Since != "" && !atLeast(h.client, m.Since) {
+			tmpl = m.BeforeInstall
+			if force {
+				tmpl = m.BeforeUpdate
+			}
 		}
 		if c := marketplaceCommand(h, base, tmpl); c != "" {
 			return c
@@ -1476,9 +1545,15 @@ func PluginPendingNote(h Harness, base string, tasks bool, again string) string 
 // this Wakeshift) before its hooks have connected it: they connect it from
 // this result when the turn ends, so there's nothing to ask, install or
 // start (no Monitor: in manual mode it would ask the user to approve it).
-func PluginReadyNote(h Harness, app string) string {
-	return "Subscribed. Wakeshift's plugin for " + h.Name + " is installed here, so " + app + "'s notifications reach this conversation by themselves, even while you're idle: " +
-		"it connects this conversation when this turn ends, and new messages are held for it until then. " +
+// hooks: the mark is from the hooks Wakeshift's installer wrote, not the
+// plugin (pluginmark.Mark.Hooks), which connect it the same way.
+func PluginReadyNote(h Harness, app string, hooks bool) string {
+	what, it := "Wakeshift's plugin for "+h.Name+" is", "it connects"
+	if hooks {
+		what, it = "Wakeshift's hooks for "+h.Name+" are", "they connect"
+	}
+	return "Subscribed. " + what + " installed here, so " + app + "'s notifications reach this conversation by themselves, even while you're idle: " +
+		it + " this conversation when this turn ends, and new messages are held for it until then. " +
 		"Nothing else needs to run: don't start a Monitor or a background command, don't install anything, and don't ask the user how to be notified; just tell them you'll let them know."
 }
 

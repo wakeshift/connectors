@@ -84,7 +84,7 @@ func TestRefine(t *testing.T) {
 // arguments (src/tasks.ts; tools/list's own are the compact ones).
 func TestArgDescriptions(t *testing.T) {
 	d := ArgDescription()
-	want := "The program you're running in: codex, claude-code, cursor (local CLI or IDE), cursor-cloud (Cursor cloud agent), grok-bot, copilot-cli, opencode, antigravity, openclaw (even when it runs your turns in Codex), hermes, chatgpt, or your program's name if it isn't listed"
+	want := "The program you're running in: codex, claude-code, cursor (local CLI or IDE), cursor-cloud (Cursor cloud agent), grok-bot, copilot-cli, opencode, pi, antigravity, openclaw (even when it runs your turns in Codex), hermes, chatgpt, or your program's name if it isn't listed"
 	if d != want {
 		t.Fatalf("%q", d)
 	}
@@ -128,5 +128,30 @@ func TestForegroundNote(t *testing.T) {
 	}
 	if !strings.Contains(CursorCloudNote(), "can't wake yet") || strings.Contains(CursorCloudNote(), "again") {
 		t.Errorf("cloud: %s", CursorCloudNote())
+	}
+}
+
+// pi is recognized by its client name and named by a claim (the harness
+// argument lists it), never by a "pi-…" variant of its name; until its
+// extension ships, it's told nothing will notify it.
+func TestPiRecognizedAndClaimed(t *testing.T) {
+	if h, via, ok := Recognize("pi", nil, "undici"); !ok || h.ID != "pi" || via != ByClient {
+		t.Fatalf("recognize: %v %v %v", h.ID, via, ok)
+	}
+	if h, ok := Claimed("pi"); !ok || h.ID != "pi" {
+		t.Fatalf("claim: %v", ok)
+	}
+	if h, o := Refine(Harness{}, false, "pi"); h.ID != "pi" || o != Decided {
+		t.Fatalf("refine: %s %s", h.ID, o)
+	}
+	if got := AgentID("pi-something"); got == "pi" {
+		t.Fatalf("a pi-… client is %q", got)
+	}
+	if !strings.Contains(ArgDescription(), "opencode, pi, antigravity") {
+		t.Fatal(ArgDescription())
+	}
+	h, _ := Get("pi")
+	if n := InstallNote(h, "https://app.wakeshift.ai"); n != CantWake("pi") {
+		t.Fatalf("note: %s", n)
 	}
 }
