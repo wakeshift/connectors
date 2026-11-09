@@ -19,7 +19,7 @@ import urllib.error
 import urllib.request
 from typing import Callable, Optional
 
-from .wire import CLIENT_HEADER, client_header, link_parts
+from .wire import CLIENT_HEADER, OffOrigin, check_stream_link, client_header, link_parts
 
 log = logging.getLogger("wakeshift")
 
@@ -136,10 +136,16 @@ class Listener:
     stop): those are handed over like its own but never acknowledged on this
     link, which doesn't carry them, unless they arrive on it too."""
 
-    def __init__(self, link: str, deliver: Callable[[list], list], *, on_link: Callable[[str], None] = lambda u: None,
+    def __init__(self, link: str, deliver: Callable[[list], list], *, issuers, on_link: Callable[[str], None] = lambda u: None,
                  on_gone: Callable[[], None] = lambda: None, spawn: Callable = None, poll_wait: float = 25,
                  sse_timeout: float = 90, retry_sse_after: float = 600, backoff_max: float = 30,
                  healthy_after: float = HEALTHY_AFTER):
+        # Only a link on a trusted Wakeshift's origin (issuers): every request
+        # it makes goes to that origin, so the token never goes elsewhere.
+        why = check_stream_link(link, issuers)
+        if why:
+            raise OffOrigin(why)
+        self.issuers = list(issuers)
         self.origin, self.token = link_parts(link)
         self.deliver = deliver
         self.on_link = on_link
@@ -220,7 +226,7 @@ class Listener:
             origin, token = link_parts(link)
         except ValueError:
             return
-        if origin != self.origin:
+        if origin != self.origin or check_stream_link(link, self.issuers):
             return  # only ever the same Wakeshift
         self.token = token
         try:

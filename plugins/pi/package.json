@@ -1,0 +1,42 @@
+{
+  "name": "@wakeshift/pi",
+  "version": "0.0.0",
+  "description": "Wakeshift's extension for pi: messages from the apps your agent watches through Wakeshift wake your pi sessions, even while they're idle.",
+  "license": "Apache-2.0",
+  "homepage": "https://wakeshift.ai/docs/agents",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wakeshift/connectors.git",
+    "directory": "plugins/pi"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "wakeshift",
+    "ai-agents",
+    "notifications"
+  ],
+  "type": "module",
+  "main": "./index.js",
+  "files": [
+    "index.js"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.js"
+    ]
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "optionalDependencies": {
+    "@wakeshift/connect-darwin-arm64": "0.0.0",
+    "@wakeshift/connect-darwin-x64": "0.0.0",
+    "@wakeshift/connect-linux-arm64": "0.0.0",
+    "@wakeshift/connect-linux-x64": "0.0.0"
+  },
+  "bugs": {
+    "url": "https://github.com/wakeshift/connectors/issues"
+  }
+}

@@ -74,7 +74,7 @@ func Names() []string {
 func (s Spec) NewHook(hc *http.Client, p Poller) *Hook {
 	set := LoadSettings(s.Name)
 	if p == nil {
-		p = &HTTPPoller{Harness: s.Name}
+		p = &HTTPPoller{Harness: s.Name, Issuers: set.Issuers}
 	}
 	return &Hook{Harness: s.Name, Format: s.Format, Verifier: &Verifier{Settings: set, HTTP: hc}, Poller: p, Links: LinksFor(set), HTTP: hc,
 		When: s.When, StopWait: s.StopWait, RewakeWait: s.RewakeWait, Unbound: s.Unbound, RecordProcs: s.RecordProcs, Tools: s.Tools, Headline: s.Headline}

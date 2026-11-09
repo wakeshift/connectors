@@ -33,7 +33,7 @@ import { acceptable, BeaconError, beaconIn, findBeacon, jwkKey, mcpServer, mcpTo
 import { Conversation, Ledger, type Host } from "./deliveries.js";
 import { agentOf } from "./hooks.js";
 import { linkKey, PINS_UNREADABLE, Store, type SavedLink } from "./store.js";
-import { Transport, type Stopped, type TransportOptions } from "./transport.js";
+import { checkStreamLink, Transport, type Stopped, type TransportOptions } from "./transport.js";
 import { CLIENT_HEADER, clientHeader } from "./version.js";
 import type { Route } from "./wake.js";
 
@@ -93,15 +93,7 @@ export function stripBeacon<T>(v: T): T {
  * ws for http), as the plugin trusts only links from the pinned Wakeshift.
  */
 export function linkOnIssuer(link: string, issuer: string): boolean {
-  let l: URL, i: URL;
-  try {
-    l = new URL(link);
-    i = new URL(issuer);
-  } catch {
-    return false;
-  }
-  const scheme: Record<string, string> = { "wss:": "https:", "https:": "https:", "ws:": "http:", "http:": "http:" };
-  return !!l.host && scheme[l.protocol] !== undefined && scheme[l.protocol] === i.protocol && l.host.toLowerCase() === i.host.toLowerCase();
+  return checkStreamLink(link, issuer) === undefined;
 }
 
 export type { Host };
@@ -334,7 +326,11 @@ export class Wakeshift {
       if (e instanceof TakenError) return NOTE_TAKEN; // the link it had stays
       return noteFailed((e as Error).message);
     }
-    if (!linkOnIssuer(link, this.o.issuer)) return noteFailed("Wakeshift gave a stream link on another host");
+    const refused = checkStreamLink(link, this.o.issuer);
+    if (refused) {
+      this.o.host.log.warn(`wakeshift (${sessionKey}): ${refused}`);
+      return noteFailed(refused);
+    }
     // A new stream ID: what the link it replaces brought isn't this one's to acknowledge.
     const saved = { conversation, sessionKey, agentId: call.agentId ?? "", link, issuer: this.o.issuer, app: claims.app, stream: randomBytes(8).toString("hex") };
     this.o.store.saveLink(saved);
@@ -501,6 +497,7 @@ export class Wakeshift {
     t = new Transport({
       ...this.o.stream,
       link: l.link,
+      issuer: this.o.issuer,
       fetch: this.f,
       log,
       receive: (ds) => c.receive(ds, stream),

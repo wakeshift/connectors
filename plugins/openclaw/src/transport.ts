@@ -13,6 +13,7 @@
 // reconnects with backoff. A connection that ends at once without a
 // delivery counts as a failure for the backoff.
 
+import { isIP } from "node:net";
 import { CLIENT_HEADER, clientHeader } from "./version.js";
 
 export interface Delivery {
@@ -25,14 +26,18 @@ export interface Delivery {
 }
 
 /** Why a stream stopped for good. */
+
 export type Stopped =
   | { why: "gone"; reason: string } // the link no longer works, or the session has nothing more to receive
   | { why: "replaced" } // a newer connection or poll holds the stream
   | { why: "outdated" } // Wakeshift no longer serves this version (426 update_required); the link is kept for the update
+  | { why: "refused" } // the link isn't on the pinned Wakeshift's origin (checkStreamLink): never dialed, kept
   | { why: "stopped" }; // stop() was called
 
 export interface TransportOptions {
   link: string;
+  /** The pinned Wakeshift: only a link on its origin is ever dialed (checkStreamLink). */
+  issuer: string;
   /** Records deliveries; resolves once they're recorded. Returns how many were new. */
   receive: (ds: Delivery[]) => Promise<number>;
   onLink?: (link: string) => void;
@@ -71,6 +76,51 @@ export function parseLink(link: string): { base: string; token: string } | undef
   if (!scheme || !u.host || !token) return undefined;
   return { base: `${scheme}//${u.host}`, token };
 }
+
+/** localhost, or a loopback IP address (127.0.0.0/8, ::1), as Hermes's plugin reads it (ipaddress). */
+function loopback(hostname: string): boolean {
+  const h = hostname.replace(/^\[|\]$/g, "");
+  if (h === "localhost") return true;
+  if (isIP(h) === 4) return h.startsWith("127.");
+  return isIP(h) === 6 && /^(0{0,4}:){7}0{0,3}1$|^::1$/.test(h);
+}
+
+/**
+ * Undefined if a stream link may be dialed: wss or https on the issuer's
+ * host exactly (its port included), or ws or http on it where the issuer
+ * is itself http on loopback (development and tests). Otherwise why not,
+ * naming only the link's scheme and host (never its token or a user name):
+ * another host, a lookalike or subdomain, userinfo, another port, an IP
+ * literal for a named issuer, ws or http to an https issuer.
+ */
+export function checkStreamLink(link: string, issuer: string): string | undefined {
+  let l: URL;
+  try {
+    l = new URL(link);
+  } catch {
+    return "refused a stream link: it isn't a stream link";
+  }
+  const scheme = l.protocol.replace(/:$/, "");
+  if (!l.host) return "refused a stream link: it isn't a stream link";
+  if (l.username || l.password) return `refused a stream link to ${scheme}://…@${l.host}: it carries a user name or password`;
+  const where = `${scheme}://${l.host}`;
+  const secure = ({ wss: true, https: true, ws: false, http: false } as Record<string, boolean>)[scheme];
+  if (secure === undefined) return `refused a stream link to ${where}: it isn't wss or https`;
+  let i: URL;
+  try {
+    i = new URL(issuer);
+  } catch {
+    return `refused a stream link to ${where}: no Wakeshift is trusted here`;
+  }
+  if (!i.host || i.username || i.password) return `refused a stream link to ${where}: no Wakeshift is trusted here`;
+  if (l.host.toLowerCase() === i.host.toLowerCase()) {
+    if (i.protocol === "https:" && secure) return undefined;
+    if (i.protocol === "http:" && !secure && loopback(i.hostname)) return undefined;
+  }
+  return `refused a stream link to ${where}: Wakeshift's stream links go only to ${i.protocol}//${i.host}`;
+}
+
+class Refused extends Error {}
 
 export function sameOrigin(a: string, b: string): boolean {
   const x = parseLink(a),
@@ -169,6 +219,11 @@ export class Transport {
    */
   async ack(ids: string[]): Promise<number> {
     if (ids.length === 0 || ids.length > 100) throw new Error("ack: 1 to 100 IDs");
+    const why = checkStreamLink(this.link, this.o.issuer);
+    if (why) {
+      this.log(why);
+      return 401;
+    }
     const p = parseLink(this.link);
     if (!p) return 401;
     try {
@@ -224,6 +279,13 @@ export class Transport {
         } else backoff = minBackoff;
       } catch (e) {
         if (this.stopped) break;
+        if (e instanceof Refused) {
+          // Never dialed: its token goes nowhere. The link is kept, in case
+          // its Wakeshift is pinned again.
+          this.log(e.message);
+          result = { why: "refused" };
+          break;
+        }
         if (e instanceof Gone) {
           result = { why: "gone", reason: e.reason };
           break;
@@ -258,6 +320,8 @@ export class Transport {
   }
 
   private parts() {
+    const why = checkStreamLink(this.link, this.o.issuer);
+    if (why) throw new Refused(why);
     const p = parseLink(this.link);
     if (!p) throw new Gone("not a stream link");
     return p;
@@ -278,7 +342,7 @@ export class Transport {
   private rotate(next: unknown) {
     if (typeof next !== "string" || !next) return;
     const p = parseLink(next);
-    if (!p || !sameOrigin(next, this.link)) return;
+    if (!p || !sameOrigin(next, this.link) || checkStreamLink(next, this.o.issuer)) return;
     const cur = new URL(this.link);
     const link = `${cur.protocol}//${cur.host}/v1/stream?link=${encodeURIComponent(p.token)}`;
     if (link === this.link) return;

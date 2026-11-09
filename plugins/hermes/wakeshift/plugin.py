@@ -684,7 +684,7 @@ class Wakeshift:
         prior = self._load_link(session_id, key)
         legacy = self._load_link(session_id) if prior is None else None
         held = prior or legacy
-        supersedes = held["link"] if held and _same_origin(held["link"], claims.get("iss", "")) else ""
+        supersedes = held["link"] if held and not wire.check_stream_link(held["link"], [claims.get("iss", "")]) else ""
         try:
             link, session, redeemed_key = _redeem(claims, session_id, call, supersedes, sleep=self.sleep)
         except Outdated as e:
@@ -696,9 +696,11 @@ class Wakeshift:
         except RedeemError as e:
             log.warning("wakeshift: couldn't connect a conversation: %s", e)
             return wire.add_note(stripped, NOTE_FAILED.format(e))
-        if not _same_origin(link, claims.get("iss", "")):
+        refused = wire.check_stream_link(link, [claims.get("iss", "")])
+        if refused:
             # A link on another host would get the token: refused, unused.
-            return wire.add_note(stripped, NOTE_FAILED.format("its stream link wasn't on the Wakeshift this plugin trusts"))
+            log.warning("wakeshift: %s", refused)
+            return wire.add_note(stripped, NOTE_FAILED.format(refused))
         # The session_key Wakeshift gave the conversation for this app: the
         # one the redeem just answered for this conversation; from an older
         # Wakeshift, the one this result tells it to pass back that names
@@ -755,10 +757,16 @@ class Wakeshift:
         would bring them."""
         with self.lock:
             s = self._session(sid)
+            try:
+                l = Listener(link, lambda ds: self._deliver(s, l, ds), issuers=self.issuers,
+                             on_link=lambda u: self._linked(s, key, l, platform, u),
+                             on_gone=lambda: self._gone(s, key, l), spawn=self.spawn, **self.listener_args)
+            except wire.OffOrigin as e:
+                # A saved link someone changed, or one from a Wakeshift no
+                # longer trusted: never dialed, and the listener it had stays.
+                log.warning("wakeshift: %s", e)
+                return
             olds = [s.listeners.pop(k) for k in (key,) + tuple(replaces) if k in s.listeners]
-            l = Listener(link, lambda ds: self._deliver(s, l, ds),
-                         on_link=lambda u: self._linked(s, key, l, platform, u),
-                         on_gone=lambda: self._gone(s, key, l), spawn=self.spawn, **self.listener_args)
             s.listeners[key] = l
         for old in olds:
             old.stop()
@@ -1019,18 +1027,6 @@ def _publish(d: dict) -> str:
         return ""
     pid = attrs.get("$emit") or ev.get("id")
     return src + "|" + pid if isinstance(pid, str) and pid else ""
-
-
-def _same_origin(link: str, issuer: str) -> bool:
-    """A stream link (wss://host/…) is on the issuer's own scheme and host
-    (wss for https, ws for http)."""
-    from urllib.parse import urlparse
-    try:
-        origin, _ = wire.link_parts(link)
-        a, b = urlparse(origin), urlparse(issuer)
-    except ValueError:
-        return False
-    return bool(b.scheme and b.netloc) and (a.scheme, a.netloc.lower()) == (b.scheme, b.netloc.lower())
 
 
 class KeysUnavailable(Exception):

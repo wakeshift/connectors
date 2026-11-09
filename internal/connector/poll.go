@@ -118,11 +118,19 @@ type Poller interface {
 type HTTPPoller struct {
 	HTTP    *http.Client
 	Harness string
+	// Issuers are the Wakeshifts the harness trusts: a link on any other
+	// origin is refused before a request is made (CheckStreamLink). None:
+	// every link is refused.
+	Issuers []string
 }
 
 // endpoint is the long-poll URL for a stream link's origin (path
-// /v1/stream/poll or /v1/stream/ack), and the link's token.
-func endpoint(link, path string) (string, string, error) {
+// /v1/stream/poll or /v1/stream/ack), and the link's token, for a link on
+// one of issuers' origins only (CheckStreamLink).
+func endpoint(link, path string, issuers []string) (string, string, error) {
+	if err := CheckStreamLink(link, issuers); err != nil {
+		return "", "", err
+	}
 	u, err := url.Parse(link)
 	if err != nil || u.Host == "" {
 		return "", "", errors.New("not a stream link")
@@ -143,14 +151,11 @@ func endpoint(link, path string) (string, string, error) {
 }
 
 func (p *HTTPPoller) client(wait time.Duration) *http.Client {
-	if p.HTTP != nil {
-		return p.HTTP
-	}
-	return &http.Client{Timeout: wait + 15*time.Second, CheckRedirect: noRedirects}
+	return LinkClient(p.HTTP, wait+15*time.Second)
 }
 
 func (p *HTTPPoller) do(ctx context.Context, method, link, path string, body any, wait time.Duration, patient bool, out any) error {
-	u, token, err := endpoint(link, path)
+	u, token, err := endpoint(link, path, p.Issuers)
 	if err != nil {
 		return err
 	}

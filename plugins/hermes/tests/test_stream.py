@@ -33,7 +33,7 @@ class Stream(unittest.TestCase):
         return done
 
     def listen(self, **kw):
-        self.l = Listener(self.ws.link, self.deliver, on_link=self.links.append, on_gone=self.gone.set,
+        self.l = Listener(self.ws.link, self.deliver, issuers=[self.ws.url], on_link=self.links.append, on_gone=self.gone.set,
                           poll_wait=0.2, backoff_max=0.2, **kw).start()
         return self.l
 
@@ -206,11 +206,11 @@ class Stream(unittest.TestCase):
         self.assertTrue(_gone(err(404, b'{"error": {"code": "link_revoked"}}')))
         self.assertFalse(_gone(err(404, b"<html>not found</html>")))
         self.assertFalse(_gone(err(403, b'{"error": {"code": "forbidden"}}')))
-        self.l = Listener(self.ws.link, self.deliver)  # for tearDown
+        self.l = Listener(self.ws.link, self.deliver, issuers=[self.ws.url])  # for tearDown
 
     def test_connections_that_end_at_once_back_off(self):
         self.ws.sse_end_at_once = True
-        self.l = Listener(self.ws.link, self.deliver, poll_wait=0.2, backoff_max=0.4).start()
+        self.l = Listener(self.ws.link, self.deliver, issuers=[self.ws.url], poll_wait=0.2, backoff_max=0.4).start()
         time.sleep(2)
         self.l.stop()
         n = len(self.ws.sse_times)

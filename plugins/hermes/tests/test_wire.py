@@ -102,3 +102,60 @@ class Beacons(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StreamLinks(unittest.TestCase):
+    """check_stream_link: wss or https on a trusted issuer's host exactly; ws
+    or http only to an http issuer on loopback."""
+
+    PROD, STAGING = "https://app.wakeshift.ai", "https://app.staging.wakeshift.ai"
+
+    def test_the_issuers_own_origin(self):
+        for link, issuers in (("wss://app.wakeshift.ai/v1/stream?link=SECRET", [self.PROD]),
+                              ("https://app.wakeshift.ai/v1/stream?link=SECRET", [self.PROD]),
+                              ("wss://APP.Wakeshift.AI/v1/stream?link=SECRET", [self.PROD]),
+                              ("wss://app.staging.wakeshift.ai/v1/stream?link=SECRET", [self.STAGING]),
+                              ("wss://app.staging.wakeshift.ai/v1/stream?link=SECRET", [self.PROD, self.STAGING]),
+                              ("ws://127.0.0.1:8370/v1/stream?link=SECRET", ["http://127.0.0.1:8370"]),
+                              ("http://localhost:8370/v1/stream?link=SECRET", ["http://localhost:8370"])):
+            self.assertIsNone(wire.check_stream_link(link, issuers), link)
+
+    def test_refused(self):
+        for link, issuers in (
+                ("wss://evil.example/v1/stream?link=SECRET", None),
+                ("wss://app.wakeshift.ai.evil.example/v1/stream?link=SECRET", None),
+                ("wss://evil.app.wakeshift.ai/v1/stream?link=SECRET", None),
+                ("wss://wakeshift.ai/v1/stream?link=SECRET", None),
+                ("wss://app.wakeshift.ai./v1/stream?link=SECRET", None),
+                ("wss://app.wakeshift.ai@evil.example/v1/stream?link=SECRET", None),
+                ("wss://alice:hunter2@app.wakeshift.ai/v1/stream?link=SECRET", None),
+                ("wss://evil.example#@app.wakeshift.ai", None),
+                ("wss://evil.example\\@app.wakeshift.ai/v1/stream?link=SECRET", None),
+                ("wss://app.wakeshift.ai:8443/v1/stream?link=SECRET", None),
+                ("wss://app.wakeshift.ai:443/v1/stream?link=SECRET", None),
+                ("wss://34.149.10.20/v1/stream?link=SECRET", None),
+                ("wss://[2600:1901::1]/v1/stream?link=SECRET", None),
+                ("ws://127.0.0.1:8370/v1/stream?link=SECRET", None),
+                ("ws://app.wakeshift.ai/v1/stream?link=SECRET", None),
+                ("http://app.wakeshift.ai/v1/stream?link=SECRET", None),
+                ("ftp://app.wakeshift.ai/v1/stream?link=SECRET", None),
+                ("wss:app.wakeshift.ai/v1/stream?link=SECRET", None),
+                ("", None),
+                ("wss://app.staging.wakeshift.ai/v1/stream?link=SECRET", None),
+                ("wss://app.wakeshift.ai/v1/stream?link=SECRET", [self.STAGING]),
+                ("wss://app.wakeshift.ai/v1/stream?link=SECRET", []),
+                ("ws://127.0.0.1:8371/v1/stream?link=SECRET", ["http://127.0.0.1:8370"]),
+                ("ws://localhost:8370/v1/stream?link=SECRET", ["http://127.0.0.1:8370"]),
+                ("ws://example.com/v1/stream?link=SECRET", ["http://example.com"])):
+            why = wire.check_stream_link(link, [self.PROD] if issuers is None else issuers)
+            self.assertIsNotNone(why, link)
+            self.assertTrue(why.startswith("refused a stream link"), why)
+            for secret in ("SECRET", "alice", "hunter2", "app.wakeshift.ai@"):
+                self.assertNotIn(secret, why, link)
+
+    def test_a_listener_refuses_it_before_any_request(self):
+        from wakeshift.stream import Listener
+        with self.assertRaises(wire.OffOrigin):
+            Listener("wss://evil.example/v1/stream?link=SECRET", lambda ds: [], issuers=[self.PROD])
+        with self.assertRaises(wire.OffOrigin):
+            Listener("wss://app.wakeshift.ai/v1/stream?link=SECRET", lambda ds: [], issuers=[])

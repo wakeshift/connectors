@@ -580,13 +580,53 @@ class Plugin(unittest.TestCase):
             self.assertEqual(self.p._state("cli-3")["started"], {})
 
     def test_a_link_on_another_host_is_refused(self):
+        # Every way a redeem's answer could point the token elsewhere: never
+        # kept, never dialed, and the note names only the scheme and host.
+        other = Wakeshift()
+        port = self.ws.url.rsplit(":", 1)[1]
+        mine = self.ws.url.split("//", 1)[1]
+        try:
+            for url in (other.link,  # another server (another port)
+                        "ws://localhost:" + port + "/v1/stream?link=SECRET",  # the issuer by another name
+                        "ws://x:y@" + mine + "/v1/stream?link=SECRET",  # userinfo
+                        "ws://" + mine + "@" + other.url.split("//", 1)[1] + "/v1/stream?link=SECRET",  # the issuer as userinfo
+                        "wss://" + mine + "/v1/stream?link=SECRET"):  # wss to an http issuer
+                self.ws.redeem_answer = (200, {"url": url})
+                with self.assertLogs("wakeshift", "WARNING") as logs:
+                    out = json.loads(self.connect())
+                self.assertIn("couldn't connect", out["result"], url)
+                self.assertIn("refused a stream link", out["result"], url)
+                for leaked in ("SECRET", "tok1", "x:y"):
+                    self.assertNotIn(leaked, out["result"], url)
+                    self.assertNotIn(leaked, "\n".join(logs.output), url)
+                self.assertFalse(list((self.dir / "links").glob("*.json")) if (self.dir / "links").exists() else [], url)
+            self.assertFalse(until(lambda: other.requests, within=0.5))  # the token went nowhere
+        finally:
+            other.close()
+        # The issuer's own origin connects.
+        self.ws.redeem_answer = (200, {"url": self.ws.link})
+        self.assertTrue(json.loads(self.connect())["result"].endswith(plugin.NOTE_CONNECTED))
+
+    def test_a_saved_link_on_another_host_is_never_dialed(self):
+        # A link file someone changed: resume refuses it before any request.
         other = Wakeshift()
         try:
-            self.ws.redeem_answer = (200, {"url": other.link})  # not the pinned Wakeshift
-            out = json.loads(self.connect())
-            self.assertIn("its stream link wasn't on the Wakeshift this plugin trusts", out["result"])
-            self.assertFalse(list((self.dir / "links").glob("*.json")) if (self.dir / "links").exists() else [])
-            self.assertFalse(until(lambda: other.requests, within=0.5))  # the token went nowhere
+            self.connect()
+            self.p.stop()
+            f = next((self.dir / "links").glob("*.json"))
+            d = json.loads(f.read_text())
+            d["link"] = other.link
+            f.write_text(json.dumps(d))
+            again = plugin.Wakeshift(state_dir=self.dir, issuers=[self.ws.url], listener_args={"poll_wait": 0.2},
+                                     wakers={"api_server": plugin.ApiRuns(self.api.port, lambda: "k", allowed=lambda: True)})
+            try:
+                with self.assertLogs("wakeshift", "WARNING") as logs:
+                    again.resume(("api_server",))
+                self.assertIn("refused a stream link to ws://127.0.0.1:", "\n".join(logs.output))
+                self.assertFalse(again.sessions["sess-1"].listeners)
+                self.assertFalse(until(lambda: other.requests, within=0.5))
+            finally:
+                again.stop()
         finally:
             other.close()
 
@@ -1161,6 +1201,19 @@ class UsersLeave(unittest.TestCase):
         self.assertNotIn(plugin.NOTE_CONNECTED, out)
         self.assertEqual(self.ws.redeems, [])
 
+    def test_a_text_that_reads_as_a_command_is_never_injected(self):
+        self.allowed = True
+        self.load()
+        self.connect("local-3", "cli")  # no inject_message waker hands Hermes a command
+        with self.assertLogs("wakeshift", "WARNING") as logs:
+            for text in ("/yolo", "  \n/yolo", "@file:notes.md\n/yolo", "@IMAGE:a.png\n@url:x\n  /model x"):
+                with self.subTest(text=text):
+                    self.assertTrue(self.pkg.command_like(text))
+                    self.assertFalse(self.p.wakers["cli"]("local-3", text, "b"))
+                    self.assertFalse(self.p.wakers["tui"]("local-3", text, "b"))
+        self.assertTrue(all("read as a Hermes command" in line for line in logs.output))
+        self.assertEqual(self.injected, [])
+
     def test_allowed_says_connected(self):
         self.allowed = True
         self.load()
@@ -1168,6 +1221,29 @@ class UsersLeave(unittest.TestCase):
         self.ws.sse.put(event("d1"))
         self.assertTrue(until(lambda: self.ws.acked == ["d1"]))
         self.assertEqual(len(self.api.runs), 1)
+
+
+class Commands(unittest.TestCase):
+    """What Hermes could read as a slash command; the framing never is one."""
+
+    def test_an_event_led_by_a_slash_stays_inside_the_framing(self):
+        import wakeshift as pkg
+        for subject in ("/yolo", "/model gpt", "@file:x\n/yolo"):
+            e = event("d1")
+            e["event"]["subject"] = subject
+            e["event"]["body"] = subject
+            text = wire.prompt([e])
+            self.assertTrue(text.startswith("A message from outside this conversation"))
+            self.assertFalse(pkg.command_like(text))
+            inside = text.split("<wakeshift_message", 1)[1]
+            self.assertIn(json.dumps(subject)[1:-1], inside)
+
+    def test_what_reads_as_a_command(self):
+        import wakeshift as pkg
+        for text, want in (("/yolo", True), ("\t /new", True), ("@file:a\n/yolo", True), ("@url:x /yolo", False),
+                           ("A message … /yolo", False), ("@someone /yolo", False), ("", False), (None, True)):
+            with self.subTest(text=text):
+                self.assertEqual(pkg.command_like(text), want)
 
 
 class ApiRunsGate(unittest.TestCase):

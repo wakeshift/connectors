@@ -147,3 +147,38 @@ func TestConnectOffer(t *testing.T) {
 		t.Errorf("cleared: offer %q, want the installer", c)
 	}
 }
+
+// pi's offer is pi's own package command once a version is known; until
+// then, and for the extension's removal, Wakeshift's installer.
+func TestPiPackageOffer(t *testing.T) {
+	t.Cleanup(func() { SetPackageVersion("pi", "") })
+	h, _ := Get("pi")
+	base := "https://app.wakeshift.ai"
+	if c := OfferCommand(h, base); c != "curl -fsSL "+base+"/install/pi.sh | sh" {
+		t.Fatalf("no version set: offer %q, want the installer", c)
+	}
+	SetPackageVersion("pi", "1.5.0")
+	want := "pi install npm:@wakeshift/pi@1.5.0"
+	if c := OfferCommand(h, base); c != want {
+		t.Errorf("offer %q, want %q", c, want)
+	}
+	if c := UpdateCommand(h, base); c != want {
+		t.Errorf("update %q, want %q", c, want)
+	}
+	n := InstallNote(h, base)
+	for _, s := range []string{"Install Wakeshift's extension for pi? It runs `" + want + "`.", "the npm package @wakeshift/pi", "pi's own package command", "~/.pi/agent/settings.json", "/reload"} {
+		if !strings.Contains(n, s) {
+			t.Errorf("install note doesn't say %q: %s", s, n)
+		}
+	}
+	if strings.Contains(n, "writes one extension file") || strings.Contains(n, "plugin") {
+		t.Errorf("install note: %s", n)
+	}
+	u := UpdateNote(h, base)
+	if !strings.Contains(u, "`"+want+"`") || !strings.Contains(u, "the new version of Wakeshift's extension, the npm package @wakeshift/pi, with pi's own package command") {
+		t.Errorf("update note: %s", u)
+	}
+	if r := UninstallNote(h); !strings.Contains(r, "`pi remove npm:@wakeshift/pi`") || !strings.Contains(r, "~/.wakeshift/pi") || !strings.Contains(r, "/reload") {
+		t.Errorf("uninstall note: %s", r)
+	}
+}

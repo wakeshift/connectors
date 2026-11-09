@@ -86,6 +86,7 @@ type fakeWakeshift struct {
 	redeemed []string
 	late     []bool // each redeem's "late"
 	status   int
+	answer   string // if set, the stream link redeems answer with
 }
 
 func newFakeWakeshift(t *testing.T) *fakeWakeshift {
@@ -113,11 +114,20 @@ func newFakeWakeshift(t *testing.T) *fakeWakeshift {
 			json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": "unknown_ticket"}})
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"url": "ws://link-for-" + in.Thread})
+		if f.answer != "" {
+			json.NewEncoder(w).Encode(map[string]string{"url": f.answer})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"url": f.link(in.Thread)})
 	})
 	f.Server = httptest.NewServer(mux)
 	t.Cleanup(f.Close)
 	return f
+}
+
+// link is the stream link its redeem answers for thread, on its own origin.
+func (f *fakeWakeshift) link(thread string) string {
+	return "ws" + strings.TrimPrefix(f.URL, "http") + "/v1/stream?link=for-" + thread
 }
 
 func (f *fakeWakeshift) beacon(t *testing.T, thread string, key ed25519.PrivateKey) string {
@@ -193,7 +203,7 @@ func TestHook(t *testing.T) {
 		t.Fatalf("an issuer not installed: %q %v", out.String(), ws.redeemed)
 	}
 
-	if got := run(hookInput(thread, ws.beacon(t, thread, nil))); got != NoteConnected || len(started) != 1 || started[0] != thread+" ws://link-for-"+thread {
+	if got := run(hookInput(thread, ws.beacon(t, thread, nil))); got != NoteConnected || len(started) != 1 || started[0] != thread+" "+ws.link(thread) {
 		t.Fatalf("connect: note %q, started %v", got, started)
 	}
 	if ws.redeemed[0] != "wst_t@"+thread {

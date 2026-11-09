@@ -569,6 +569,9 @@ func DeliversNote(h Harness, base, app string) string {
 // if it has none to remove): with the uninstaller, not a settings backup,
 // which would undo the user's later changes.
 func UninstallNote(h Harness) string {
+	if h.Unload != "" {
+		return unloadNote(h)
+	}
 	if h.Uninstall != "" && PackageSpec(h) != "" {
 		return "Wakeshift's plugin stays installed for every " + h.Name + " conversation; if the user wants it removed, run `" + h.Uninstall + "` (it puts back what the plugin changed; don't restore a settings backup instead: that would undo their later changes)."
 	}
@@ -584,6 +587,23 @@ func UninstallNote(h Harness) string {
 		run = "run `" + h.Marketplace.Remove + "` (if they installed Wakeshift's plugin), then `~/.wakeshift/bin/wakeshift uninstall --harness " + h.ID + "`"
 	}
 	return "Wakeshift's hooks stay installed for every " + h.Name + " conversation; if the user wants them removed, " + run + " (don't restore a settings backup instead: that would undo their later changes)."
+}
+
+// unloadNote is UninstallNote for a harness whose package and installer
+// both say how they're removed (Harness.Unload): its own command for a
+// Package offer, and Wakeshift's uninstaller for the file the installer
+// wrote (InstallerFile).
+func unloadNote(h Harness) string {
+	uninstaller := "`~/.wakeshift/bin/wakeshift uninstall --harness " + h.ID + "`"
+	n := Kit(h) + " stays installed for every " + h.Name + " session. If the user wants it removed, "
+	if h.Uninstall != "" && PackageSpec(h) != "" {
+		n += "run `" + h.Uninstall + "` and delete ~/.wakeshift/" + h.ID + " (its settings and connected sessions), then " + h.Unload
+		if h.InstallerFile != "" {
+			n += "; if instead Wakeshift's installer wrote " + h.InstallerFile + ", run " + uninstaller
+		}
+		return n + "."
+	}
+	return n + "run " + uninstaller + ", then " + h.Unload + "."
 }
 
 // Outdated is the exact text that starts what an agent is told while the
@@ -660,6 +680,9 @@ func updateChanges(h Harness, pluginRoute bool) string {
 	}
 	if PackageSpec(h) != "" && h.PackageUpdateChanges != "" {
 		return h.PackageUpdateChanges
+	}
+	if PackageSpec(h) != "" && h.KitWord != "" {
+		return "it installs the new version of Wakeshift's " + h.KitWord + ", the npm package " + h.Package + ", with " + h.Name + "'s own package command, which replaces the old version and keeps their settings and connected conversations"
 	}
 	if PackageSpec(h) != "" {
 		return "it installs the new version of Wakeshift's plugin, the npm package " + h.Package + ", with " + h.Name + "'s own plugin command, which replaces the old version and keeps their settings and connected conversations"

@@ -27,8 +27,9 @@ const Header = "X-Wakeshift-Connector"
 // Wakeshift's connectors.
 const (
 	// Binary is the wakeshift binary (cmd/wakeshift-connector): the hooks
-	// for Codex, Claude Code, Cursor, Copilot CLI, Antigravity and opencode
-	// (whose plugin runs the binary's bridge), and the connector for Codex.
+	// for Codex, Claude Code, Cursor, Copilot CLI, Antigravity, opencode and
+	// pi (whose plugin and extension run the binary's bridge), and the
+	// connector for Codex.
 	Binary = "wakeshift"
 	// Hermes is the plugin for Hermes Agent (plugins/hermes).
 	Hermes = "wakeshift-hermes"

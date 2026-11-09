@@ -272,6 +272,61 @@ def add_note(result: str, note: str) -> str:
     return json.dumps(doc, ensure_ascii=False)
 
 
+class OffOrigin(ValueError):
+    """A stream link the plugin refused to dial (check_stream_link)."""
+
+
+def _loopback(host: str) -> bool:
+    import ipaddress
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def check_stream_link(link: str, issuers) -> Optional[str]:
+    """None if a stream link may be dialed: wss or https on one of issuers'
+    hosts exactly (its port included), or ws or http on it where that
+    issuer is itself http on loopback (development and tests). Otherwise why
+    not, naming only the link's scheme and host (never its token or a user
+    name): another host, a lookalike or subdomain, userinfo, another port,
+    an IP literal for a named issuer, ws or http to an https issuer."""
+    try:
+        u = urlparse(link if isinstance(link, str) else "")
+        scheme = u.scheme.lower()
+        netloc = u.netloc
+    except ValueError:
+        return "refused a stream link: it isn't a stream link"
+    if not netloc:
+        return "refused a stream link: it isn't a stream link"
+    if "@" in netloc:
+        return f"refused a stream link to {scheme}://…@{netloc.rpartition('@')[2]}: it carries a user name or password"
+    where = f"{scheme}://{netloc}"
+    secure = {"wss": True, "https": True, "ws": False, "http": False}.get(scheme)
+    if secure is None:
+        return f"refused a stream link to {where}: it isn't wss or https"
+    trusted = []
+    for raw in issuers or ():
+        try:
+            i = urlparse(raw)
+        except (TypeError, ValueError):
+            continue
+        if not i.netloc or "@" in i.netloc:
+            continue
+        trusted.append(f"{i.scheme}://{i.netloc}")
+        if i.netloc.lower() != netloc.lower():
+            continue
+        if i.scheme == "https" and secure:
+            return None
+        if i.scheme == "http" and not secure and _loopback(i.hostname or ""):
+            return None
+    if not trusted:
+        return f"refused a stream link to {where}: no Wakeshift is trusted here"
+    return f"refused a stream link to {where}: Wakeshift's stream links go only to " + " or ".join(trusted)
+
+
 def link_parts(link: str) -> tuple[str, str]:
     """A stream link (wss://host/v1/stream?link=<token>) as its https origin and token."""
     u = urlparse(link)

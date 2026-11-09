@@ -143,7 +143,11 @@ func TestWaitOnEveryApp(t *testing.T) {
 		return ev + "\n" + `{"type":"cursor","after":"` + cursor + `"}` + "\n" + `{"type":"hub.next","url":"x"}` + "\n"
 	}
 	s := newWaitApps(t, map[string][]string{"tryTok": {round(ev2, "c-try")}})
-	links := LinksFor(LoadSettings("antigravity"))
+	set := LoadSettings("antigravity")
+	if err := set.Trust(s.URL); err != nil {
+		t.Fatal(err)
+	}
+	links := LinksFor(set)
 	links.SaveFor("conv-1", s.link("chatTok"), "chat")
 	links.SaveFor("conv-1", s.link("tryTok"), "try")
 	target, ok := waitTarget("antigravity", "conv-1")
@@ -170,7 +174,11 @@ func TestWaitOnEveryApp(t *testing.T) {
 	// Cursor's loop: both apps' messages print; after Max it ends with a
 	// restart line, each link's printed batch confirmed.
 	s = newWaitApps(t, map[string][]string{"chatTok": {round(ev1, "c-chat")}, "tryTok": {round(ev2, "c-try")}})
-	links = LinksFor(LoadSettings("cursor"))
+	set = LoadSettings("cursor")
+	if err := set.Trust(s.URL); err != nil {
+		t.Fatal(err)
+	}
+	links = LinksFor(set)
 	links.SaveFor("conv-2", s.link("chatTok"), "chat")
 	links.SaveFor("conv-2", s.link("tryTok"), "try")
 	target, _ = waitTarget("cursor", "conv-2")

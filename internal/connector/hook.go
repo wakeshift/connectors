@@ -675,6 +675,13 @@ func (h *Hook) takeOne(ctx context.Context, conversation, link string, wait time
 			why = "Wakeshift's hooks are out of date"
 			return nil, nil, why
 		}
+		var off *ErrOffOrigin
+		if errors.As(err, &off) {
+			// Never dialed (CheckStreamLink said so on stderr); kept, in
+			// case the Wakeshift it's for is trusted again.
+			why = "the link isn't on a trusted Wakeshift's origin"
+			return nil, nil, why
+		}
 		switch err {
 		case ErrLinkGone:
 			h.Links.ForgetLink(conversation, link)

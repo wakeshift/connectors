@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from pathlib import Path
 
 log = logging.getLogger("wakeshift")
@@ -153,6 +154,21 @@ def not_allowed(plugin_id: str) -> str:
     return "Hermes doesn't allow the plugin to start turns; run: " + allow_command(plugin_id)
 
 
+# Hermes reads a message as a command when, after leading whitespace and any
+# leading @image:/@file:/@url: reference lines, it starts with "/"
+# (gateway/platforms/event.py, MessageEvent._command_text; the same on 0.22.5
+# and 0.23.0). Under its session authority a plugin turn can run one, so the
+# plugin never hands Hermes such a text (its framing never starts that way).
+_ATTACHMENT_REFS = re.compile(r"^(?:@(?:image|file|url):[^\n]+\n?)+", re.IGNORECASE)
+
+
+def command_like(text: str) -> bool:
+    """Whether Hermes could read text as a slash command."""
+    if not isinstance(text, str):
+        return True
+    return _ATTACHMENT_REFS.sub("", text.lstrip()).lstrip().startswith("/")
+
+
 def cli_waker(ctx, ws, one_gateway: bool, allowed):
     """The CLI's waker: (session, framed text, batch) -> accepted, only while
     the user lets the plugin start turns (allowed(), read on each try, so
@@ -172,6 +188,8 @@ def cli_waker(ctx, ws, one_gateway: bool, allowed):
     def wake(session: str, text: str, batch: str) -> bool:
         if not allowed():
             return refuse(session, not_allowed(_plugin_id(ctx)))
+        if command_like(text):
+            return refuse(session, "its text would read as a Hermes command")
         if not one_gateway:
             told.pop(session, None)
             return bool(ctx.inject_message(text))

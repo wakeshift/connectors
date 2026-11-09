@@ -42,7 +42,7 @@ func TestHTTPPoller(t *testing.T) {
 	}))
 	defer srv.Close()
 	link := "ws://" + strings.TrimPrefix(srv.URL, "http://") + "/v1/stream?link=tok1"
-	p := &HTTPPoller{}
+	p := &HTTPPoller{Issuers: []string{srv.URL}}
 	b, err := p.Poll(context.Background(), link, 20*time.Second, false)
 	if err != nil || len(b.Deliveries) != 1 || b.Deliveries[0].ID != "d1" || b.Deliveries[0].Event["body"] != "hi" {
 		t.Fatalf("poll: %+v %v", b, err)
@@ -83,7 +83,7 @@ func TestHTTPPoller(t *testing.T) {
 
 // An unreachable Wakeshift's error doesn't carry the link.
 func TestHTTPPollerErrorHidesLink(t *testing.T) {
-	p := &HTTPPoller{}
+	p := &HTTPPoller{Issuers: []string{"http://127.0.0.1:1"}}
 	_, err := p.Poll(context.Background(), "ws://127.0.0.1:1/v1/stream?link=SECRET", 0, false)
 	if err == nil || strings.Contains(err.Error(), "SECRET") {
 		t.Fatalf("%v", err)
@@ -100,7 +100,7 @@ func TestPollerBackground(t *testing.T) {
 	}))
 	defer srv.Close()
 	link := "ws://" + strings.TrimPrefix(srv.URL, "http://") + "/v1/stream?link=tok1"
-	p := &HTTPPoller{}
+	p := &HTTPPoller{Issuers: []string{srv.URL}}
 	b, err := p.Poll(context.Background(), link, 20*time.Second, false)
 	if err != nil || !b.Background || len(b.Deliveries) != 0 {
 		t.Fatalf("poll: %+v %v", b, err)
@@ -134,7 +134,7 @@ func TestHTTPPollerBusy(t *testing.T) {
 		{503, "120", MaxRetryAfter}, {503, "9223372037", MaxRetryAfter}, {503, "99999999999999999999999", MaxRetryAfter},
 		{503, "-5", 0}, {503, "0", 0}, {503, "1.5", 0}, {503, "Wed, 21 Oct 2026 07:28:00 GMT", 0}} {
 		code, ra = c.code, c.ra
-		_, err := (&HTTPPoller{}).Poll(context.Background(), link, 0, false)
+		_, err := (&HTTPPoller{Issuers: []string{srv.URL}}).Poll(context.Background(), link, 0, false)
 		var busy *Busy
 		if !errors.As(err, &busy) || busy.After != c.want {
 			t.Fatalf("%d %q: %v", c.code, c.ra, err)

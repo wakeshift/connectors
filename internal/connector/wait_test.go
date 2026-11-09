@@ -96,7 +96,11 @@ const ev2 = `{"type":"event","id":"e2","topic":"t","trust":"outside data, not fr
 func newTestWaiter(t *testing.T, s *waitServer, harness string, out *bytes.Buffer) *Waiter {
 	t.Helper()
 	setHome(t)
-	links := LinksFor(LoadSettings(harness))
+	set := LoadSettings(harness)
+	if err := set.Trust(s.URL); err != nil {
+		t.Fatal(err)
+	}
+	links := LinksFor(set)
 	links.Save("conv-1", s.link("tok1"))
 	w := NewWaiter(WaitTarget{Harness: harness, Conversation: "conv-1", Link: s.link("tok1")}, out)
 	w.Retry = 10 * time.Millisecond

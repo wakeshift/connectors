@@ -60,11 +60,11 @@ func TestClientVersion(t *testing.T) {
 // byte as before.
 func TestClaudeCodeInstallByVersion(t *testing.T) {
 	const (
-		one        = "claude plugin install wakeshift --marketplace wakeshift/agent-plugins --config issuer=https://app.wakeshift.ai"
+		one        = "claude plugin install wakeshift --marketplace wakeshift/agent-plugins"
 		oneUpdate  = "claude plugin install wakeshift --marketplace wakeshift/agent-plugins && claude plugin marketplace update wakeshift && claude plugin update wakeshift@wakeshift"
-		two        = "claude plugin marketplace add wakeshift/agent-plugins && claude plugin install wakeshift@wakeshift --config issuer=https://app.wakeshift.ai"
+		two        = "claude plugin marketplace add wakeshift/agent-plugins && claude plugin install wakeshift@wakeshift"
 		twoUpdate  = "claude plugin marketplace add wakeshift/agent-plugins && claude plugin install wakeshift@wakeshift && claude plugin marketplace update wakeshift && claude plugin update wakeshift@wakeshift"
-		stagingTwo = "claude plugin marketplace add wakeshift/agent-plugins#staging && claude plugin install wakeshift@wakeshift --config issuer=https://app.staging.wakeshift.ai"
+		stagingTwo = "claude plugin marketplace add wakeshift/agent-plugins#staging && claude plugin install wakeshift@wakeshift"
 	)
 	cc, _ := Get("claude-code")
 	for _, c := range []struct {
@@ -115,7 +115,7 @@ func TestClaudeCodeInstallByVersion(t *testing.T) {
 	}
 	SetAgentPlugins("/tmp/wb/marketplace")
 	defer SetAgentPlugins("")
-	if got := OfferCommand(old, "http://localhost:8370"); got != "claude plugin marketplace add /tmp/wb/marketplace && claude plugin install wakeshift@wakeshift --config issuer=http://localhost:8370" {
+	if got := OfferCommand(old, "http://localhost:8370"); got != "claude plugin marketplace add /tmp/wb/marketplace && claude plugin install wakeshift@wakeshift" {
 		t.Errorf("local: %s", got)
 	}
 	// Without a marketplace for the Wakeshift, the installer, whatever the version.

@@ -132,8 +132,8 @@ func TestForegroundNote(t *testing.T) {
 }
 
 // pi is recognized by its client name and named by a claim (the harness
-// argument lists it), never by a "pi-…" variant of its name; until its
-// extension ships, it's told nothing will notify it.
+// argument lists it), never by a "pi-…" variant of its name, and offered
+// Wakeshift's extension.
 func TestPiRecognizedAndClaimed(t *testing.T) {
 	if h, via, ok := Recognize("pi", nil, "undici"); !ok || h.ID != "pi" || via != ByClient {
 		t.Fatalf("recognize: %v %v %v", h.ID, via, ok)
@@ -151,7 +151,7 @@ func TestPiRecognizedAndClaimed(t *testing.T) {
 		t.Fatal(ArgDescription())
 	}
 	h, _ := Get("pi")
-	if n := InstallNote(h, "https://app.wakeshift.ai"); n != CantWake("pi") {
+	if n := InstallNote(h, "https://app.wakeshift.ai"); !strings.Contains(n, "Install Wakeshift's extension for pi? It runs `curl -fsSL https://app.wakeshift.ai/install/pi.sh | sh`.") {
 		t.Fatalf("note: %s", n)
 	}
 }

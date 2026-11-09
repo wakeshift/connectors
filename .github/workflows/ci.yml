@@ -43,7 +43,7 @@ jobs:
           node-version: 22
       - name: OpenClaw plugin
         run: cd plugins/openclaw && npm ci --no-fund --no-audit && npm run lint && npm test
-      - name: npm packages (@wakeshift/connect, @wakeshift/opencode)
+      - name: npm packages (@wakeshift/connect, @wakeshift/opencode, @wakeshift/pi)
         run: cd plugins/connect && npm test
       - name: The developers' CLI (@wakeshift/cli)
         run: cd sdk/cli && npm ci --ignore-scripts --no-fund --no-audit && npm run lint && npm test && npm pack --dry-run

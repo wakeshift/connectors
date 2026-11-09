@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -290,7 +291,7 @@ func TestRotationStaysOnTheServer(t *testing.T) {
 	}))
 	defer srv.Close()
 	ctx, cancel := context.WithCancelCause(context.Background())
-	c := &conn{cfg: Config{Stream: "ws" + strings.TrimPrefix(srv.URL, "http") + "/v1/stream?link=first", Log: slog.New(slog.DiscardHandler)}, cancel: cancel,
+	c := &conn{cfg: trusting(Config{Stream: "ws" + strings.TrimPrefix(srv.URL, "http") + "/v1/stream?link=first", Log: slog.New(slog.DiscardHandler)}), cancel: cancel,
 		seen: map[string]uint64{}, unconfirmed: map[string]bool{}}
 	done := make(chan struct{})
 	go func() { c.stream(ctx); close(done) }()
@@ -344,7 +345,7 @@ func TestStreamHonoursRetryAfter(t *testing.T) {
 	}))
 	defer srv.Close()
 	ctx, cancel := context.WithCancelCause(context.Background())
-	c := &conn{cfg: Config{Stream: "ws" + strings.TrimPrefix(srv.URL, "http"), Log: slog.New(slog.DiscardHandler)}, cancel: cancel,
+	c := &conn{cfg: trusting(Config{Stream: "ws" + strings.TrimPrefix(srv.URL, "http"), Log: slog.New(slog.DiscardHandler)}), cancel: cancel,
 		seen: map[string]uint64{}, unconfirmed: map[string]bool{}}
 	done := make(chan struct{})
 	go func() { c.stream(ctx); close(done) }()
@@ -374,7 +375,9 @@ func TestRunStopsWithAFullQueue(t *testing.T) {
 	sock := d.serve(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Run(ctx, Config{Stream: wakeshiftStream(t, 100), Thread: thread, Socket: sock}) }()
+	go func() {
+		done <- Run(ctx, trusting(Config{Stream: wakeshiftStream(t, 100), Thread: thread, Socket: sock}))
+	}()
 	time.Sleep(500 * time.Millisecond) // the events arrive and fill the queue
 	cancel()
 	select {
@@ -398,7 +401,9 @@ func TestTurnEndedBeforeItsAnswer(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	next := make(chan struct{}, 1)
-	go func() { done <- Run(ctx, Config{Stream: pacedStream(t, 2, next, nil), Thread: thread, Socket: sock}) }()
+	go func() {
+		done <- Run(ctx, trusting(Config{Stream: pacedStream(t, 2, next, nil), Thread: thread, Socket: sock}))
+	}()
 	for i := range 2 {
 		select {
 		case <-d.turns:
@@ -433,7 +438,9 @@ func TestBurstIsOneTurn(t *testing.T) {
 		next <- struct{}{} // the first five arrive together
 	}
 	done := make(chan error, 1)
-	go func() { done <- Run(ctx, Config{Stream: pacedStream(t, 8, next, acks), Thread: thread, Socket: sock}) }()
+	go func() {
+		done <- Run(ctx, trusting(Config{Stream: pacedStream(t, 8, next, acks), Thread: thread, Socket: sock}))
+	}()
 	select {
 	case <-d.turns:
 	case <-time.After(5 * time.Second):
@@ -513,8 +520,8 @@ func TestReconnectsToCodex(t *testing.T) {
 	done := make(chan error, 1)
 	next := make(chan struct{}, 1)
 	go func() {
-		done <- Run(ctx, Config{Stream: pacedStream(t, 2, next, nil), Thread: thread, Socket: sock, CodexGrace: 10 * time.Second,
-			Log: slog.New(slog.DiscardHandler)})
+		done <- Run(ctx, trusting(Config{Stream: pacedStream(t, 2, next, nil), Thread: thread, Socket: sock, CodexGrace: 10 * time.Second,
+			Log: slog.New(slog.DiscardHandler)}))
 	}()
 	turn := func(i int) {
 		t.Helper()
@@ -540,7 +547,7 @@ func TestReconnectsToCodex(t *testing.T) {
 	sock2 := d2.serve(t)
 	done2 := make(chan error, 1)
 	go func() {
-		done2 <- Run(context.Background(), Config{Stream: wakeshiftStream(t, 0), Thread: thread, Socket: sock2, Log: slog.New(slog.DiscardHandler)})
+		done2 <- Run(context.Background(), trusting(Config{Stream: wakeshiftStream(t, 0), Thread: thread, Socket: sock2, Log: slog.New(slog.DiscardHandler)}))
 	}()
 	time.Sleep(300 * time.Millisecond)
 	d2.drop()
@@ -564,6 +571,7 @@ func runThread(t *testing.T, d *codexDaemon, n int, cfg Config) (turn func(i int
 	done := make(chan error, 1)
 	next = make(chan struct{}, n)
 	cfg.Stream, cfg.Thread, cfg.Socket = pacedStream(t, n, next, nil), thread, sock
+	cfg = trusting(cfg)
 	if cfg.Log == nil {
 		cfg.Log = slog.New(slog.DiscardHandler)
 	}
@@ -776,14 +784,14 @@ func TestStartNeedsALoadedThread(t *testing.T) {
 	d := &codexDaemon{status: "notLoaded", turns: make(chan struct{}, 1)}
 	sock := d.serve(t)
 	start := time.Now()
-	err := Run(context.Background(), Config{Stream: wakeshiftStream(t, 0), Thread: thread, Socket: sock, StartGrace: time.Second,
-		Log: slog.New(slog.DiscardHandler)})
+	err := Run(context.Background(), trusting(Config{Stream: wakeshiftStream(t, 0), Thread: thread, Socket: sock, StartGrace: time.Second,
+		Log: slog.New(slog.DiscardHandler)}))
 	if !errors.Is(err, ErrNotLoaded) || time.Since(start) < time.Second {
 		t.Fatalf("returned %v after %v", err, time.Since(start))
 	}
 	d.set(func(d *codexDaemon) { d.status, d.path = "notLoaded", "/x/archived_sessions/r.jsonl" })
-	if err := Run(context.Background(), Config{Stream: wakeshiftStream(t, 0), Thread: thread, Socket: sock, StartGrace: time.Minute,
-		Log: slog.New(slog.DiscardHandler)}); !errors.Is(err, ErrThreadEnded) {
+	if err := Run(context.Background(), trusting(Config{Stream: wakeshiftStream(t, 0), Thread: thread, Socket: sock, StartGrace: time.Minute,
+		Log: slog.New(slog.DiscardHandler)})); !errors.Is(err, ErrThreadEnded) {
 		t.Fatalf("archived: returned %v", err)
 	}
 }
@@ -861,7 +869,7 @@ func TestTakenInTheTurnIsntDeliveredAgain(t *testing.T) {
 	acks := make(chan string, 20)
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(ctx, Config{Stream: scriptedStream(t, frames, acks), Thread: thread, Socket: sock})
+		done <- Run(ctx, trusting(Config{Stream: scriptedStream(t, frames, acks), Thread: thread, Socket: sock}))
 	}()
 	// Three arrive while the thread is busy; the wait takes the first and
 	// the last; one of those comes again (its wait never acked it).
@@ -937,7 +945,7 @@ func TestTakenPastAFullQueue(t *testing.T) {
 	acks := make(chan string, 2*n)
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(ctx, Config{Stream: scriptedStream(t, frames, acks), Thread: thread, Socket: sock})
+		done <- Run(ctx, trusting(Config{Stream: scriptedStream(t, frames, acks), Thread: thread, Socket: sock}))
 	}()
 	for i := range n {
 		frames <- event(i)
@@ -981,7 +989,7 @@ func TestQueuedPastOneTurnAllDelivered(t *testing.T) {
 	acks := make(chan string, n)
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(ctx, Config{Stream: scriptedStream(t, frames, acks), Thread: thread, Socket: sock})
+		done <- Run(ctx, trusting(Config{Stream: scriptedStream(t, frames, acks), Thread: thread, Socket: sock}))
 	}()
 	for i := range n {
 		frames <- event(i)
@@ -1028,10 +1036,10 @@ func TestTwoAppsShareTheThread(t *testing.T) {
 	done := make(chan error, 2)
 	quiet := slog.New(slog.DiscardHandler)
 	go func() {
-		done <- Run(ctx, Config{Stream: pacedStream(t, 3, nextA, acksA), Thread: thread, Socket: sock, Log: quiet})
+		done <- Run(ctx, trusting(Config{Stream: pacedStream(t, 3, nextA, acksA), Thread: thread, Socket: sock, Log: quiet}))
 	}()
 	go func() {
-		done <- Run(ctx, Config{Stream: pacedStream(t, 3, nextB, acksB), Thread: thread, Socket: sock, Log: quiet})
+		done <- Run(ctx, trusting(Config{Stream: pacedStream(t, 3, nextB, acksB), Thread: thread, Socket: sock, Log: quiet}))
 	}()
 	got := map[string]int{}
 	for len(got) < 6 {
@@ -1070,4 +1078,14 @@ func TestTwoAppsShareTheThread(t *testing.T) {
 			t.Fatalf("%s confirmed %d times", k, n)
 		}
 	}
+}
+
+// trusting is cfg trusting its stream link's own origin, as Codex's hooks
+// trust the Wakeshift that issued it (the tests' servers are on loopback).
+func trusting(cfg Config) Config {
+	if u, err := url.Parse(cfg.Stream); err == nil && cfg.Issuers == nil {
+		scheme := map[string]string{"ws": "http", "wss": "https", "http": "http", "https": "https"}[u.Scheme]
+		cfg.Issuers = []string{scheme + "://" + u.Host}
+	}
+	return cfg
 }

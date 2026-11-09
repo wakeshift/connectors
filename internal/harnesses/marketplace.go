@@ -13,9 +13,7 @@ import (
 // a launcher that fetches the connector the plugin pins and trusts the
 // Wakeshift the marketplace's branch was built for (docs/native-installs.md).
 //
-// Its commands name the marketplace as {source}, and the Wakeshift whose
-// offer it is as {origin} (Claude Code's install passes it to an option the
-// plugin no longer has, for an older copy: harnesses.go): wakeshift/agent-plugins for
+// Its commands name the marketplace as {source}: wakeshift/agent-plugins for
 // production, with the harness's way of naming a branch (RefSep) for staging
 // (Route). For any other Wakeshift (a local core) the offers fall back to
 // Wakeshift's installer, unless SetAgentPlugins names a marketplace for it.
@@ -182,11 +180,10 @@ func Route(h Harness, base string) Harness {
 // it has none there).
 func marketplaceCommand(h Harness, base, tmpl string) string {
 	src := marketplaceSource(h, base)
-	origin := strings.TrimSuffix(base, "/")
-	if src == "" || tmpl == "" || strings.Contains(tmpl, "{origin}") && !originRE.MatchString(origin) {
+	if src == "" || tmpl == "" {
 		return ""
 	}
-	return strings.ReplaceAll(strings.ReplaceAll(tmpl, "{source}", src), "{origin}", origin)
+	return strings.ReplaceAll(tmpl, "{source}", src)
 }
 
 // PluginRoute reports whether h's offers from the Wakeshift at base install

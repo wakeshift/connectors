@@ -55,7 +55,7 @@ test("every package has the release's version, and the launcher and plugin depen
     const mode = execFileSync("tar", ["-tvzf", tgz(`connect-${p}`)], { encoding: "utf8" }).split("\n").find((l) => l.endsWith("package/bin/wakeshift"));
     assert.match(mode, /^-rwxr-xr-x/);
   }
-  for (const name of ["connect", "opencode"]) {
+  for (const name of ["connect", "opencode", "pi"]) {
     const m = manifest(tgz(name));
     assert.equal(m.version, VERSION);
     assert.equal(m.scripts, undefined, "no install scripts");
@@ -66,6 +66,16 @@ test("every package has the release's version, and the launcher and plugin depen
   assert.equal(oc.exports["."], "./index.js", "opencode needs a root export");
   const plugin = execFileSync("tar", ["-xzOf", tgz("opencode"), "package/index.js"], { encoding: "utf8" });
   assert.ok(plugin.includes(`const DEFAULT_ISSUERS = ["${ISSUER}"]`), "the plugin trusts --issuer");
+  // pi's extension: pi loads it from the manifest's pi.extensions, and lists
+  // the package in its gallery by the pi-package keyword.
+  const pm = manifest(tgz("pi"));
+  assert.equal(pm.name, "@wakeshift/pi");
+  assert.deepEqual(pm.pi, { extensions: ["./index.js"] });
+  assert.ok(pm.keywords.includes("pi-package"));
+  const files = execFileSync("tar", ["-tzf", tgz("pi")], { encoding: "utf8" }).trim().split("\n").sort();
+  assert.deepEqual(files, ["package/LICENSE", "package/README.md", "package/index.js", "package/package.json"]);
+  const ext = execFileSync("tar", ["-xzOf", tgz("pi"), "package/index.js"], { encoding: "utf8" });
+  assert.ok(ext.includes(`const DEFAULT_ISSUERS = ["${ISSUER}"]`), "the extension trusts --issuer");
 });
 
 test("installs the connector and runs its install", { skip: !supported }, () => {

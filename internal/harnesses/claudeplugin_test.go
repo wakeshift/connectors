@@ -15,13 +15,13 @@ func TestClaudeCodeMarketplace(t *testing.T) {
 	h, _ := Get("claude-code")
 	h = WithClient(h, newClaudeUA, "", "")
 	for base, want := range map[string]string{
-		"https://app.wakeshift.ai/":        "claude plugin install wakeshift --marketplace wakeshift/agent-plugins --config issuer=https://app.wakeshift.ai",
-		"https://app.staging.wakeshift.ai": "claude plugin install wakeshift --marketplace wakeshift/agent-plugins#staging --config issuer=https://app.staging.wakeshift.ai",
+		"https://app.wakeshift.ai/":        "claude plugin install wakeshift --marketplace wakeshift/agent-plugins",
+		"https://app.staging.wakeshift.ai": "claude plugin install wakeshift --marketplace wakeshift/agent-plugins#staging",
 	} {
 		if got := OfferCommand(h, base); got != want {
 			t.Errorf("%s: %s", base, got)
 		}
-		if got := UpdateCommand(h, base); got != strings.Split(want, " --config")[0]+" && claude plugin marketplace update wakeshift && claude plugin update wakeshift@wakeshift" || strings.Contains(got, "--config") {
+		if got := UpdateCommand(h, base); got != want+" && claude plugin marketplace update wakeshift && claude plugin update wakeshift@wakeshift" || strings.Contains(got, "--config") {
 			t.Errorf("%s update: %s", base, got)
 		}
 	}
@@ -31,11 +31,11 @@ func TestClaudeCodeMarketplace(t *testing.T) {
 	}
 	SetAgentPlugins("/tmp/wb/marketplace")
 	defer SetAgentPlugins("")
-	if got := OfferCommand(h, "http://localhost:8370"); got != "claude plugin install wakeshift --marketplace /tmp/wb/marketplace --config issuer=http://localhost:8370" {
+	if got := OfferCommand(h, "http://localhost:8370"); got != "claude plugin install wakeshift --marketplace /tmp/wb/marketplace" {
 		t.Errorf("configured: %s", got)
 	}
-	// An address that can't go into the command as it is: the installer.
-	if got := OfferCommand(h, "http://localhost:8370/a b"); strings.Contains(got, "claude plugin") {
+	// The command never carries the address, so an odd one changes nothing.
+	if got := OfferCommand(h, "http://localhost:8370/a b"); got != "claude plugin install wakeshift --marketplace /tmp/wb/marketplace" {
 		t.Errorf("odd base: %s", got)
 	}
 }

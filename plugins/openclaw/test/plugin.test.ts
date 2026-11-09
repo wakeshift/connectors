@@ -812,9 +812,20 @@ test("stream links are bound to the pinned issuer", async (t) => {
   t.after(w.close);
   const o = await openclaw(w, mkdtempSync(join(tmpdir(), "wsoc-")));
   t.after(stop(o));
-  w.redeemAnswer = { status: 200, body: { url: "wss://evil.example/v1/stream?link=tok1" } };
-  const out = await o.middleware!({ toolName: "try__watch", toolCallId: "c", result: { content: [{ type: "text", text: textBeacon(beaconFor(w)) }] } }, ctx);
-  assert.match(out!.result.content.at(-1).text, /couldn't connect this conversation \(Wakeshift gave a stream link on another host\)/);
+  const mine = w.url.replace("http://", "");
+  for (const url of [
+    "wss://evil.example/v1/stream?link=SECRET",
+    `ws://localhost:${mine.split(":")[1]}/v1/stream?link=SECRET`, // the issuer by another name
+    `ws://x:y@${mine}/v1/stream?link=SECRET`, // userinfo
+    `ws://${mine}@evil.example/v1/stream?link=SECRET`, // the issuer as userinfo
+    `wss://${mine}/v1/stream?link=SECRET`, // wss to an http issuer
+  ]) {
+    w.redeemAnswer = { status: 200, body: { url } };
+    const out = await o.middleware!({ toolName: "try__watch", toolCallId: "c", result: { content: [{ type: "text", text: textBeacon(beaconFor(w)) }] } }, ctx);
+    const text: string = out!.result.content.at(-1).text;
+    assert.match(text, /couldn't connect this conversation \(refused a stream link to /, url);
+    for (const leaked of ["SECRET", "x:y"]) assert.ok(!text.includes(leaked), `${url}: ${text}`);
+  }
 
   // Saved links: one from the pinned issuer connects; one saved under
   // another issuer (the pin changed since) or one pointing elsewhere doesn't.

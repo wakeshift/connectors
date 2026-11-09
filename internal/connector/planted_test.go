@@ -183,10 +183,10 @@ func TestHooksFollowNoRedirects(t *testing.T) {
 		http.Redirect(w, r, elsewhere.URL+"/steal", http.StatusTemporaryRedirect)
 	}))
 	defer redirecting.Close()
-	if _, err := RedeemCall(context.Background(), nil, "", beacon.Claims{Ticket: "wst_t", Redeem: redirecting.URL + "/v1/connector/redeem"}, "c1", ""); err == nil {
+	if _, err := RedeemCall(context.Background(), nil, "", beacon.Claims{Issuer: redirecting.URL, Ticket: "wst_t", Redeem: redirecting.URL + "/v1/connector/redeem"}, "c1", ""); err == nil {
 		t.Fatal("a redirected redeem succeeded")
 	}
-	(&HTTPPoller{}).Poll(context.Background(), strings.Replace(redirecting.URL, "http", "ws", 1)+"/v1/stream?link=SECRET", 0, false)
+	(&HTTPPoller{Issuers: []string{redirecting.URL}}).Poll(context.Background(), strings.Replace(redirecting.URL, "http", "ws", 1)+"/v1/stream?link=SECRET", 0, false)
 	if n := reached.Load(); n != 0 {
 		t.Fatalf("followed %d redirects", n)
 	}

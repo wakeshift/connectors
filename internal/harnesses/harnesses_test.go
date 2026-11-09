@@ -122,16 +122,21 @@ func TestForClient(t *testing.T) {
 		"hermes-agent":          "hermes", // Hermes Agent 0.22.5's own
 		"goose-cli":             "goose",
 		"Visual Studio Code":    "vscode",
-		"openai-mcp":            "chatgpt", // from OpenAI's developer forum, not captured
-		"capy":                  "capy",    // captured from Capy's backend, November 5, 2026
-		"muse-custom-connector": "muse",    // captured from Meta's servers, November 5, 2026
+		"openai-mcp":            "chatgpt",       // from OpenAI's developer forum, not captured
+		"capy":                  "capy",          // captured from Capy's backend, November 5, 2026
+		"muse-custom-connector": "muse",          // captured from Meta's servers, November 5, 2026
+		"claude-ai":             "claude-cowork", // Claude's apps' connectors: Cowork's, and claude.ai chat's (Shared)
+		"Claude-AI":             "claude-cowork",
+		// A local MCP server in a Cowork plugin (the spike's probe, November 7, 2026).
+		"local-agent-mode-plugin:wakeshift-cowork-probe:wakeshift-probe": "claude-cowork",
+		"LOCAL-AGENT-MODE-PLUGIN:p:s":                                    "claude-cowork",
 	} {
 		h, ok := ForClient(name)
 		if !ok || h.ID != id {
 			t.Fatalf("%q: %v %v", name, h.ID, ok)
 		}
 	}
-	for _, name := range []string{"", "claude", "my-client", "opencode2"} {
+	for _, name := range []string{"", "claude", "my-client", "opencode2", "local-agent-mode-plugin:", "local-agent-mode-plugin", "x-local-agent-mode-plugin:p:s", "claude-ai-2", "claude.ai"} {
 		if h, ok := ForClient(name); ok {
 			t.Fatalf("%q matched %s", name, h.ID)
 		}
@@ -154,7 +159,10 @@ func TestForClient(t *testing.T) {
 		if !h.Installable && h.ZeroInstall == Background && (h.Wake != Background && h.Wake != OneShot && (h.Wake != Webhook || h.Fallback != OneShot) || h.When == "" || h.Ack == "" || h.Blocker != "") {
 			t.Fatalf("%s: woken by a background command alone but incomplete: %+v", h.ID, h)
 		}
-		if !h.Installable && h.Wake != Events && h.Wake != Background && h.Wake != OneShot && h.Wake != Webhook && h.Blocker == "" {
+		if !h.Installable && h.Wake == Monitor && (h.When == "" || h.Ack == "" || h.Blocker != "" || h.Unsure == "") {
+			t.Fatalf("%s: woken by a Monitor alone but incomplete: %+v", h.ID, h)
+		}
+		if !h.Installable && h.Wake != Events && h.Wake != Background && h.Wake != OneShot && h.Wake != Webhook && h.Wake != Monitor && h.Blocker == "" {
 			t.Fatalf("%s: not installable and no blocker", h.ID)
 		}
 	}
@@ -167,10 +175,10 @@ func TestInstallNote(t *testing.T) {
 	h = WithClient(h, newClaudeUA, "", "")
 	n := InstallNote(h, "https://app.wakeshift.ai/")
 	for _, want := range []string{"Ask them one question with your AskUserQuestion tool",
-		`"Notify me in every session" (description: runs ` + "`claude plugin install wakeshift --marketplace wakeshift/agent-plugins --config issuer=https://app.wakeshift.ai` (Wakeshift's plugin for Claude Code), which installs Wakeshift's plugin for Claude Code from github.com/wakeshift/agent-plugins with Claude Code's own plugin installer; its hooks fetch Wakeshift's connector into ~/.wakeshift/bin, checking its SHA-256, and it adds one permission rule to ~/.claude/settings.json so Claude Code runs Wakeshift's wait command (~/.wakeshift/bin/wakeshift wait) without asking each time)",
+		`"Notify me in every session" (description: runs ` + "`claude plugin install wakeshift --marketplace wakeshift/agent-plugins` (Wakeshift's plugin for Claude Code), which installs Wakeshift's plugin for Claude Code from github.com/wakeshift/agent-plugins with Claude Code's own plugin installer; its hooks fetch Wakeshift's connector into ~/.wakeshift/bin, checking its SHA-256, and it adds one permission rule to ~/.claude/settings.json so Claude Code runs Wakeshift's wait command (~/.wakeshift/bin/wakeshift wait) without asking each time)",
 		`"Notify me while this session is open" (description: starts a background listener (the Monitor) for this session only; nothing is installed)`,
 		`Only if they pick "Notify me in every session", run`, "if running it is refused (auto mode's classifier or a permission denial)",
-		"type themselves, as it is: `! claude plugin install wakeshift --marketplace wakeshift/agent-plugins --config issuer=https://app.wakeshift.ai`",
+		"type themselves, as it is: `! claude plugin install wakeshift --marketplace wakeshift/agent-plugins`",
 		"don't start the Monitor", "type /reload-plugins here", "send any message here", "connects this conversation by itself once it's loaded"} {
 		if !strings.Contains(n, want) {
 			t.Fatalf("missing %q in %s", want, n)
@@ -195,7 +203,7 @@ func TestInstallNote(t *testing.T) {
 		if name == "subscribe" || name == "upgrade" {
 			wants = []string{"Ask them one question with your AskUserQuestion tool", `"` + AskEvery + "\" (description: runs `claude plugin install", `"` + AskSession + `"`, `"` + AskNone + `"`, `Only if they pick "` + AskEvery + `"`}
 		}
-		for _, want := range append(wants, "type themselves, as it is: `! claude plugin install wakeshift --marketplace wakeshift/agent-plugins --config issuer=https://app.wakeshift.ai`") {
+		for _, want := range append(wants, "type themselves, as it is: `! claude plugin install wakeshift --marketplace wakeshift/agent-plugins`") {
 			if !strings.Contains(note, want) {
 				t.Fatalf("%s: missing %q in %s", name, want, note)
 			}

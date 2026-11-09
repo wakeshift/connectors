@@ -25,7 +25,7 @@ func TestOfferAsksWithTheCommand(t *testing.T) {
 	kits := map[string]string{
 		"claude-code": "Wakeshift's plugin for Claude Code", "codex": "Wakeshift's plugin for Codex", "copilot": "Wakeshift's plugin for GitHub Copilot CLI",
 		"antigravity": "Wakeshift's plugin for Antigravity CLI", "opencode": "Wakeshift's plugin for opencode", "openclaw": "Wakeshift's plugin for OpenClaw",
-		"hermes": "Wakeshift's plugin for Hermes Agent", "cursor": "Wakeshift's package for Cursor",
+		"hermes": "Wakeshift's plugin for Hermes Agent", "cursor": "Wakeshift's package for Cursor", "pi": "Wakeshift's extension for pi",
 	}
 	for _, h := range All() {
 		if !h.Installable || h.ReplacedBy != "" {

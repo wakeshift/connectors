@@ -195,6 +195,10 @@ func FindWaitTarget(env func(string) string) (WaitTarget, bool) {
 // when messages arrive, which wakes the agent.
 var waitLoops = map[string]bool{cursorName: true}
 
+// RefusedLink is the hub.closed line's note when every link the hooks kept
+// for the conversation is on another origin than the Wakeshift they trust.
+const RefusedLink = "Wakeshift's hooks refused this conversation's stream link because it isn't on the Wakeshift they trust, so nothing was sent to it and no messages will arrive this way."
+
 // NotConnected is the hub.closed line `wakeshift wait` prints when it finds
 // no conversation of this harness that Wakeshift's hooks connected.
 const NotConnected = "Wakeshift's hooks haven't connected this conversation (or this command can't tell which conversation it runs in), so there's nothing for it to wait on."
@@ -204,9 +208,13 @@ type Waiter struct {
 	Target WaitTarget
 	Links  Links
 	Out    io.Writer
-	// HTTP, if set, makes the requests (default: no redirects, a timeout
-	// past the round's).
+	// HTTP, if set, makes the requests (default: a timeout past the
+	// round's). Neither follows a redirect.
 	HTTP *http.Client
+	// Issuers are the Wakeshifts the harness trusts: a link on any other
+	// origin is never waited on (CheckStreamLink). None: every link is
+	// refused.
+	Issuers []string
 	// Loop: keep printing each batch (Cursor), ending after Max messages
 	// with a hub.restart line; otherwise end when messages arrive.
 	Loop bool
@@ -222,7 +230,8 @@ type Waiter struct {
 
 // NewWaiter is the waiter for a target, as `wakeshift wait` runs it.
 func NewWaiter(t WaitTarget, out io.Writer) *Waiter {
-	return &Waiter{Target: t, Links: LinksFor(LoadSettings(t.Harness)), Out: out, Loop: waitLoops[t.Harness], Max: WaitMax,
+	set := LoadSettings(t.Harness)
+	return &Waiter{Target: t, Links: LinksFor(set), Issuers: set.Issuers, Out: out, Loop: waitLoops[t.Harness], Max: WaitMax,
 		Timeout: WaitTimeout, Retry: 5 * time.Second}
 }
 
@@ -248,10 +257,22 @@ func (w *Waiter) Run(ctx context.Context) int {
 	// While it runs, the hooks can see it does (Links.WaitRunning): the
 	// core's "already running" can be a dead one for up to 80s.
 	defer w.Links.HoldWait(w.Target.Conversation)()
-	if len(w.Target.More) > 0 {
-		return w.runMany(ctx, append([]string{w.Target.Link}, w.Target.More...))
+	// Only links on a trusted Wakeshift's origin (CheckStreamLink says why
+	// on stderr for any other); a rotation keeps to the link's origin.
+	var links []string
+	for _, l := range append([]string{w.Target.Link}, w.Target.More...) {
+		if CheckStreamLink(l, w.Issuers) == nil {
+			links = append(links, l)
+		}
 	}
-	link := w.Target.Link
+	switch {
+	case len(links) == 0:
+		w.print(ClosedLine("refused_link", RefusedLink))
+		return 1
+	case len(links) > 1:
+		return w.runMany(ctx, links)
+	}
+	link := links[0]
 	cursor := ""
 	printed := 0
 	retry := w.Retry
@@ -472,15 +493,13 @@ func (w *Waiter) print(lines ...string) bool {
 }
 
 func (w *Waiter) client() *http.Client {
-	if w.HTTP != nil {
-		return w.HTTP
-	}
-	return &http.Client{Timeout: 90 * time.Second, CheckRedirect: noRedirects}
+	return LinkClient(w.HTTP, 90*time.Second)
 }
 
-// waitEndpoint is the wait URL on a stream link's origin, with query.
-func waitEndpoint(link string, query url.Values) (string, string, error) {
-	u, token, err := endpoint(link, "/v1/stream/wait")
+// waitEndpoint is the wait URL on a stream link's origin, with query, for a
+// link on one of issuers' origins only.
+func waitEndpoint(link string, query url.Values, issuers []string) (string, string, error) {
+	u, token, err := endpoint(link, "/v1/stream/wait", issuers)
 	if err != nil {
 		return "", "", err
 	}
@@ -497,7 +516,7 @@ func (w *Waiter) round(ctx context.Context, link, after string) (round, error) {
 	if after != "" {
 		q.Set("after", after)
 	}
-	u, token, err := waitEndpoint(link, q)
+	u, token, err := waitEndpoint(link, q, w.Issuers)
 	if err != nil {
 		return round{}, err
 	}
@@ -547,7 +566,7 @@ func (w *Waiter) confirm(ctx context.Context, link, cursor string) {
 	if cursor == "" {
 		return
 	}
-	u, token, err := waitEndpoint(link, url.Values{"after": {cursor}, "confirm": {"1"}})
+	u, token, err := waitEndpoint(link, url.Values{"after": {cursor}, "confirm": {"1"}}, w.Issuers)
 	if err != nil {
 		return
 	}

@@ -43,6 +43,7 @@ func TestUninstallRemovesWhatInstallCreated(t *testing.T) {
 		"cursor":      {".cursor"},
 		"copilot":     {".copilot/hooks", ".copilot"},
 		"opencode":    {".config/opencode/plugins", ".config/opencode", ".config"},
+		"pi":          {".pi/agent/extensions", ".pi/agent", ".pi"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			home := setHome(t)

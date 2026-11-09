@@ -114,6 +114,13 @@ type Harness struct {
 	// its names it sends, so a conversation keeps its agent (and its
 	// session key) across the harness's versions.
 	Shared []string
+	// ClientPrefix, if set, is a start of client names only it sends,
+	// compared case-insensitively, followed by names that vary (Claude
+	// Cowork's plugin servers: "local-agent-mode-plugin:<plugin>:<server>").
+	// ForClient takes such a name as one of its Clients that others don't
+	// send; its agents are named after the client's own name if it has
+	// Shared ones (NamedByClient).
+	ClientPrefix string
 	// Unsure, set with Shared, is the condition its notes start with ("If
 	// you're …:") when a call was recognized only by a Shared name: the
 	// agent learns whether the note is for it. A call from one of its own
@@ -173,6 +180,16 @@ type Harness struct {
 	// for it (plugins/ID).
 	Installable bool
 	Plugin      bool
+	// KitWord, if set, is what the harness calls what Wakeshift installs for
+	// it, in place of "plugin" or "hooks" (pi: "extension"): Kit says
+	// "Wakeshift's extension for pi".
+	KitWord string
+	// Unload, if set, is what the user does after removing what Wakeshift
+	// installed so the harness stops running it ("type /reload in pi"), and
+	// InstallerFile the file Wakeshift's installer writes in place of a
+	// Package: UninstallNote says how to remove either (unloadNote).
+	Unload        string
+	InstallerFile string
 	// Repo, if set, is the public repository (owner/repo) the harness's own
 	// plugin installer takes Wakeshift's plugin from (Hermes: `hermes plugins
 	// install`): the install offers give that command (OfferCommand) rather
@@ -389,24 +406,24 @@ var all = []Harness{
 		// Wakeshift's plugin (plugins/agent-plugins). It has no options:
 		// its launcher trusts the Wakeshift its marketplace ref was
 		// rendered for, so it works installed as another plugin's
-		// dependency, which sets none. The install still passes the
-		// issuer option the plugin had until November 2026: an older
-		// Claude Code (2.1.280 by `marketplace add`, 2.1.312 by
-		// `--marketplace`) installs from a marketplace clone it already
-		// had without refreshing it, which may hold that version, whose
-		// hooks fail with the option unset; on the current plugin it's
-		// "--config not applied", a warning, exit 0. The update installs
-		// again (a no-op, or the plugin in place of the installer's hooks),
-		// then refreshes the marketplace, since `claude plugin update`
-		// doesn't, and updates: it ends on the current plugin, so it needs
-		// no option. `--marketplace` came in 2.1.292: an older client (or
-		// one that doesn't say its version) adds the marketplace first,
-		// a no-op when it's there already.
+		// dependency, which sets none, and the install passes none. (Until
+		// November 8, 2026 it passed `--config issuer=<origin>`, for a
+		// stale marketplace clone holding the plugin from before that
+		// option went; on the current plugin it only warned "declares no
+		// userConfig options", which agents read as a failed setting. Such a
+		// clone's plugin, installed without it, runs no hook ("Plugin option
+		// "issuer" isn't set") rather than another Wakeshift's, and the
+		// update below moves it on.) The update installs again (a no-op, or
+		// the plugin in place of the installer's hooks), then refreshes the
+		// marketplace, since `claude plugin update` doesn't, and updates.
+		// `--marketplace` came in 2.1.292: an older client (or one that
+		// doesn't say its version) adds the marketplace first, a no-op when
+		// it's there already.
 		Marketplace: &Marketplace{
-			Install:       "claude plugin install wakeshift --marketplace {source} --config issuer={origin}",
+			Install:       "claude plugin install wakeshift --marketplace {source}",
 			Update:        "claude plugin install wakeshift --marketplace {source} && claude plugin marketplace update wakeshift && claude plugin update wakeshift@wakeshift",
 			Since:         "2.1.292",
-			BeforeInstall: "claude plugin marketplace add {source} && claude plugin install wakeshift@wakeshift --config issuer={origin}",
+			BeforeInstall: "claude plugin marketplace add {source} && claude plugin install wakeshift@wakeshift",
 			BeforeUpdate:  "claude plugin marketplace add {source} && claude plugin install wakeshift@wakeshift && claude plugin marketplace update wakeshift && claude plugin update wakeshift@wakeshift",
 			Remove:        "claude plugin uninstall wakeshift@wakeshift",
 			RefSep:        "#",
@@ -431,6 +448,29 @@ var all = []Harness{
 		// (until=hooks), else with the next tool result or wake.
 		NoteAt:   "as the Monitor's last line, or with your next tool result or wake",
 		Verified: "2.1.280",
+	},
+	{
+		// Claude Cowork, the Claude desktop app's Cowork tab. Its connectors
+		// (remote MCP servers) are called from Anthropic's servers with
+		// clientInfo "claude-ai", which claude.ai's web chat (and the app's
+		// own chats) send too, so the name is Shared and its notes say what
+		// to do with a Monitor tool and what without one (Unsure); a local
+		// MCP server in a Cowork plugin sees
+		// "local-agent-mode-plugin:<plugin>:<server>" (ClientPrefix; the
+		// spike's probe, November 7, 2026). The model has named itself
+		// "claude-ai" and "Claude app (claude.ai)" in the harness argument
+		// (Aliases). Cowork runs Claude Code, with its Monitor tool, and
+		// Monitor output wakes an idle task (November 7, 2026: a 3-tick
+		// command woke it three times); plugin hooks don't run in a task,
+		// and its MCP client takes no tasks, so the Monitor is the only wake
+		// path. Its shell runs in a VM behind the workspace's network
+		// allowlist (Settings > Capabilities), which may block the core's
+		// host: the notes have the agent check first and tell the user.
+		ID: "claude-cowork", Name: "Claude Cowork", Aliases: []string{"cowork", "claude-ai", "claude-app"},
+		Clients: []string{"claude-ai"}, Shared: []string{"claude-ai"}, ClientPrefix: "local-agent-mode-plugin:",
+		Unsure: coworkMonitor,
+		Wake:   Monitor, Ack: "at least once, confirmed by the Monitor's next round",
+		When: "as soon as they arrive, even while the task is idle, while Cowork is open and its Monitor runs",
 	},
 	{
 		ID: "cursor", Name: "Cursor", Claim: "cursor", ClaimHint: "local CLI or IDE", Aliases: []string{"cursor-agent", "cursor-cli", "cursor-ide", "cursor-local"}, Clients: []string{"Cursor", "cursor-vscode"}, UserAgents: []string{"Cursor"},
@@ -510,15 +550,44 @@ var all = []Harness{
 		Verified:       "1.18.7",
 	},
 	{
-		// pi (earendil-works/pi, the terminal coding agent): clientInfo "pi"
-		// with its version, User-Agent "undici" (Node's default: no rule),
+		// pi (earendil-works/pi, the terminal coding agent) calls MCP
+		// servers with clientInfo "pi" and its version, protocol
+		// 2025-11-25, User-Agent "undici" (Node's default: no rule) and
 		// tools/call _meta of progressToken only (1.5.0, checked against a
 		// probe server). Exact: "pi-…" client names may be other products.
-		// Recognized and listed in the harness argument; Wakeshift's
-		// extension for pi, which wakes it, is a separate change (#1050).
+		// Its MCP client drops a result's _meta before extensions see it,
+		// so the beacon is the result's last line, which Wakeshift's
+		// extension takes out; the extension sets conversation_id to the
+		// session's ID (PI_SESSION_ID in pi's bash tool) and harness to
+		// "pi" on the app's tools that declare them, so the beacon names
+		// the session (internal/connector, pi.go).
 		ID: "pi", Name: "pi", Claim: "pi", Aliases: []string{"pi-coding-agent", "pi-agent"}, Clients: []string{"pi"}, Exact: true,
-		Wake:    Pull,
-		Blocker: "Wakeshift's extension for pi, which wakes its sessions, isn't available yet",
+		Wake: Plugin, Ack: "at least once, acknowledged when the turn that carries the message starts",
+		Binding: Unbound, Carrier: Text, StripsText: true, Installable: true, ConversationEnv: "PI_SESSION_ID",
+		KitWord: "extension",
+		// pi's own package command, once this Wakeshift knows a published
+		// version (SetPackageVersion): it adds the package to the packages
+		// list in pi's settings and installs it with npm, which also picks
+		// the connector for the computer (an optional dependency). Installing
+		// another version replaces the entry (pi keys packages by name), so
+		// the update is the same command. Until a version is known, the
+		// offer is Wakeshift's installer, which writes the same extension as
+		// a file of its own.
+		Package:        "@wakeshift/pi",
+		PackageCommand: "pi install npm:{spec}",
+		PackageChanges: "installs the npm package @wakeshift/pi with pi's own package command: pi adds it to the packages list in ~/.pi/agent/settings.json, keeping their other settings, and downloads it with Wakeshift's connector for this computer (the extension also removes ~/.pi/agent/extensions/wakeshift.ts, if an earlier install wrote it)",
+		Uninstall:      "pi remove npm:@wakeshift/pi",
+		Unload:         "type /reload in pi",
+		InstallerFile:  "~/.pi/agent/extensions/wakeshift.ts",
+		Changes:        "writes one extension file, ~/.pi/agent/extensions/wakeshift.ts, and puts Wakeshift's connector, which the extension runs, in ~/.wakeshift/bin, checking its SHA-256",
+		Trust:          "There's nothing to approve in pi: type /reload in pi (or restart it with pi --continue) so it loads Wakeshift's extension.",
+		// Its connected sessions reconnect by themselves (the extension, at
+		// session_start), so a later restart needs nothing (Restart "").
+		Resume:      "Once it has connected this conversation, it reconnects by itself whenever pi starts or reloads.",
+		AfterUpdate: "There's nothing to approve: type /reload in pi (or restart it with pi --continue) so it loads the new version.",
+		When:        "as soon as they arrive, even while the session is idle, or once its turn ends if it's busy, as long as pi is open (not in pi -p)",
+		NoteAt:      "right after this result",
+		Verified:    "1.5.0",
 	},
 	{
 		ID: "antigravity", Name: "Antigravity CLI", Claim: "antigravity", Aliases: []string{"agy", "antigravity-cli"}, Clients: []string{"antigravity-client"},
@@ -740,6 +809,9 @@ func ForClient(name string) (Harness, bool) {
 			if strings.ToLower(c) == name {
 				return h, true
 			}
+		}
+		if p := strings.ToLower(h.ClientPrefix); p != "" && strings.HasPrefix(name, p) && len(name) > len(p) {
+			return h, true
 		}
 	}
 	return Harness{}, false
@@ -1270,6 +1342,10 @@ func installNote(h Harness, install string) string {
 		// Muse: the command is the only way, and there's nothing to install.
 		return "You can be woken now, within seconds even while idle, by a command you start in the background (subscribing gives it)."
 	}
+	if h.Wake == Monitor && !h.Installable {
+		// Claude Cowork: a Monitor the agent starts, and nothing to install.
+		return "You can be woken now, within seconds even while idle, by a Monitor you start (subscribing gives its command)."
+	}
 	if !h.Installable {
 		return CantWake(h.Name)
 	}
@@ -1306,6 +1382,8 @@ func KitFor(h Harness, base string) string { return Kit(Route(h, base)) }
 
 func kit(h Harness) string {
 	switch {
+	case h.KitWord != "":
+		return h.KitWord
 	case h.routed, h.Wake == Plugin, h.Plugin, h.Repo != "" && h.Installable:
 		return "plugin"
 	case PackageSpec(h) != "" && h.Package == ConnectPackage:

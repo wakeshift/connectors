@@ -24,6 +24,7 @@ import (
 // *UpdateRequired with Wakeshift's message: the poll keeps the link, the
 // hook's note says what to tell the user.
 func TestRequestsNameTheConnector(t *testing.T) {
+	setHome(t)
 	was := version.Version
 	version.Version = "2026.10.20.1435+abc1234"
 	defer func() { version.Version = was }()
@@ -51,12 +52,16 @@ func TestRequestsNameTheConnector(t *testing.T) {
 	}))
 	defer srv.Close()
 	ctx := context.Background()
-	claims := beacon.Claims{Ticket: "t", Redeem: srv.URL + "/v1/connector/redeem"}
+	claims := beacon.Claims{Issuer: srv.URL, Ticket: "t", Redeem: srv.URL + "/v1/connector/redeem"}
 	link, err := RedeemCall(ctx, nil, "cursor", claims, "conv", "call")
 	if err != nil {
 		t.Fatal(err)
 	}
 	spec, _ := Lookup("cursor")
+	set := LoadSettings("cursor")
+	if err := set.Trust(srv.URL); err != nil {
+		t.Fatal(err)
+	}
 	p := spec.NewHook(nil, nil).Poller
 	if _, err := p.Poll(ctx, link, 0, false); err != nil {
 		t.Fatal(err)

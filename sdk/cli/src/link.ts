@@ -30,9 +30,13 @@ export function resolveOrigin(flag: string | undefined, env: string | undefined,
 
 export const isProduction = (origin: string) => origin === PRODUCTION;
 
-/** The console page that creates an app with this public key. Everything after # stays in the browser. */
+/**
+ * The console page that creates an app with this public key. Everything
+ * after # stays in the browser; ?ref=cli tells sign-in where a new account
+ * came from (it's saved on the account, and goes nowhere else).
+ */
 export function newAppLink(origin: string, publicKey: string, id: string, name: string): string {
-  return `${origin}/new-app#pk=${publicKey}&id=${encodeURIComponent(id)}&name=${encodeURIComponent(name)}`;
+  return `${origin}/new-app?ref=cli#pk=${publicKey}&id=${encodeURIComponent(id)}&name=${encodeURIComponent(name)}`;
 }
 
 /** The console page that adds this public key to an existing app. */

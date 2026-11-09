@@ -6,6 +6,8 @@ What changed in each release of `@wakeshift/cli`.
 
 - **`init` says plainly when you're on Wakeshift's waitlist**, and exits 3: "You're on Wakeshift's waitlist, so the app wasn't created. Wakeshift will email you when your account is ready; run init again then (it keeps the key in .env)." Wakeshift now answers the link's key with `403 waitlisted` once the waitlist page has seen the link, so `init` stops at once instead of waiting 10 minutes and timing out (earlier versions exit 3 there too, with Wakeshift's own message).
 
+- **`init`'s console link ends in `?ref=cli`** before its fragment, so Wakeshift can count accounts that start from the CLI. Sign-in saves the tag on the new account and nowhere else; the key stays in the fragment.
+
 ## 0.1.2 (2026-11-06)
 
 - **`verify`'s cleanup report is accurate when it fails early.** It ends every subscription the tool made, by its ID from `list_subscriptions` (a tool that subscribes to several events, too), including after it fails at the event check, and passes once it sees none left. When it can't end them or check that it did, it says why, rather than warning that `unsubscribe_events` was missing when it was there.

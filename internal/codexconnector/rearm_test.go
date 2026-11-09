@@ -55,7 +55,7 @@ func TestHookRearms(t *testing.T) {
 	if got := noteOf(t, run(hookInput(thread, ws.beacon(t, thread, nil)))); got != NoteConnected || len(started) != 1 {
 		t.Fatalf("connect: %q %v", got, started)
 	}
-	if l := h.links().Load(thread); l != "ws://link-for-"+thread {
+	if l := h.links().Load(thread); l != ws.link(thread) {
 		t.Fatalf("kept %q", l)
 	}
 	// Running: nothing more at either event.
@@ -72,7 +72,7 @@ func TestHookRearms(t *testing.T) {
 		if out := run(eventInput(thread, ev)); out != "" {
 			t.Fatalf("%s said %q", ev, out)
 		}
-		if want := thread + " ws://link-for-" + thread + " (re-armed at " + ev + ")"; started[len(started)-1] != want {
+		if want := thread + " " + ws.link(thread) + " (re-armed at " + ev + ")"; started[len(started)-1] != want {
 			t.Fatalf("%s: started %v", ev, started)
 		}
 	}
@@ -164,7 +164,7 @@ func TestConnectorKeepsTheLink(t *testing.T) {
 	stream := func() error {
 		ctx, cancel := context.WithCancelCause(context.Background())
 		defer cancel(nil)
-		c := &conn{cfg: Config{Stream: first, Thread: thread, Links: &links, Log: slog.New(slog.DiscardHandler)}, cancel: cancel,
+		c := &conn{cfg: trusting(Config{Stream: first, Thread: thread, Links: &links, Log: slog.New(slog.DiscardHandler)}), cancel: cancel,
 			seen: map[string]uint64{}, unconfirmed: map[string]bool{}}
 		done := make(chan struct{})
 		go func() { c.stream(ctx); close(done) }()
@@ -222,7 +222,7 @@ func TestRearmIsExclusive(t *testing.T) {
 	defer cancel()
 	first := make(chan error, 1)
 	go func() {
-		first <- Run(ctx, Config{Stream: wakeshiftStream(t, 0), Thread: thread, Socket: sock, Lock: lock, Exclusive: true, Log: slog.New(slog.DiscardHandler)})
+		first <- Run(ctx, trusting(Config{Stream: wakeshiftStream(t, 0), Thread: thread, Socket: sock, Lock: lock, Exclusive: true, Log: slog.New(slog.DiscardHandler)}))
 	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for !Running(lock) {
@@ -231,7 +231,7 @@ func TestRearmIsExclusive(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	err := Run(context.Background(), Config{Stream: wakeshiftStream(t, 0), Thread: thread, Socket: sock, Lock: lock, Exclusive: true, Log: slog.New(slog.DiscardHandler)})
+	err := Run(context.Background(), trusting(Config{Stream: wakeshiftStream(t, 0), Thread: thread, Socket: sock, Lock: lock, Exclusive: true, Log: slog.New(slog.DiscardHandler)}))
 	if !errors.Is(err, ErrRunning) {
 		t.Fatalf("a second re-arm: %v", err)
 	}

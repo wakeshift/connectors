@@ -14,6 +14,7 @@
 //	                                                nothing at all with WAKESHIFT_DISABLED=1 (or true)
 //	wakeshift wait                                  wait for this conversation's next messages (the agent runs it)
 //	wakeshift bridge --harness opencode             the opencode plugin's child (JSON lines)
+//	wakeshift bridge --harness pi                   the pi extension's child (the same lines)
 //	wakeshift harnesses                             the harnesses it knows
 //	wakeshift run --thread ID | status ID           Codex's per-thread connector
 //	wakeshift version
@@ -87,7 +88,7 @@ func Main() {
 func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	prog := filepath.Base(args[0])
 	usage := func() int {
-		fmt.Fprintf(stderr, "usage: %s install --harness NAME --issuer URL [--yes] [--plugin] | uninstall --harness NAME | allow --harness NAME --app ID (--tools A,B | --none) | hook --harness NAME [--rewake] | wait | bridge --harness opencode | harnesses | version\n", prog)
+		fmt.Fprintf(stderr, "usage: %s install --harness NAME --issuer URL [--yes] [--plugin] | uninstall --harness NAME | allow --harness NAME --app ID (--tools A,B | --none) | hook --harness NAME [--rewake] | wait | bridge --harness opencode|pi | grok init|prove --bot ID --issuer URL | harnesses | version\n", prog)
 		fmt.Fprintf(stderr, "harnesses: %s\n", strings.Join(connector.Names(), ", "))
 		return 2
 	}
@@ -258,11 +259,13 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return h.Run(ctx, stdin, stdout, stderr)
 	case "wait":
 		return waitCmd(ctx, rest, stdout, stderr, prog)
+	case "grok":
+		return grokCmd(ctx, rest, stdout, stderr, prog)
 	case "bridge":
-		if *harness != "opencode" {
-			return fail(errors.New("bridge is for --harness opencode"))
+		if *harness != "opencode" && *harness != "pi" {
+			return fail(errors.New("bridge is for --harness opencode or pi"))
 		}
-		spec, _ := connector.Lookup("opencode")
+		spec, _ := connector.Lookup(*harness)
 		b := &connector.Bridge{Hook: spec.NewHook(nil, nil)}
 		return fail(b.Run(ctx, stdin, stdout))
 	case "harnesses":
@@ -271,7 +274,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			switch {
 			case h.ReplacedBy != "":
 				how = "retired: " + h.Blocker
-			case !h.Installable && h.ZeroInstall == harnesses.Background:
+			case !h.Installable && (h.ZeroInstall == harnesses.Background || h.Wake == harnesses.Monitor):
 				how += ": nothing to install"
 			case !h.Installable:
 				how = "not yet: " + h.Blocker
@@ -287,8 +290,9 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		}
 		log := slog.New(slog.NewTextHandler(stderr, nil))
 		log.Info("connector: starting", "thread", *thread, "version", version.Version)
-		links := connector.LinksFor(codexconnector.LoadSettings())
-		err := codexconnector.Run(ctx, codexconnector.Config{Stream: link, Thread: *thread, Socket: codexconnector.Socket(),
+		set := codexconnector.LoadSettings()
+		links := connector.LinksFor(set)
+		err := codexconnector.Run(ctx, codexconnector.Config{Stream: link, Issuers: set.Issuers, Thread: *thread, Socket: codexconnector.Socket(),
 			Lease: lease, Window: &codexconnector.Window{Thread: *thread}, Links: &links,
 			Lock: codexconnector.AppRunLock(*thread, *app), Exclusive: *rearm, StartGrace: 15 * time.Second, CodexGrace: time.Minute, Log: log})
 		log.Info("connector: stopped", "why", err)
@@ -318,6 +322,34 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return 0
 	}
 	return usage()
+}
+
+// grokCmd is `wakeshift grok init|prove --bot ID --issuer URL
+// [--challenge ID]` (connector.GrokInit, connector.GrokProve): a Grok Bot's
+// key and proofs. It prints the outcome on stdout, never the key, and
+// exits with the connector.GrokExit* codes.
+func grokCmd(ctx context.Context, rest []string, stdout, stderr io.Writer, prog string) int {
+	if len(rest) < 1 || (rest[0] != "init" && rest[0] != "prove") {
+		fmt.Fprintf(stderr, "usage: %s grok init --bot ID --issuer URL | grok prove --bot ID --issuer URL [--challenge ID]\n", prog)
+		return connector.GrokExitUsage
+	}
+	fs := flag.NewFlagSet("grok "+rest[0], flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	bot := fs.String("bot", "", "the bot's ID, as Wakeshift wrote it")
+	issuer := fs.String("issuer", "", "the Wakeshift, as Wakeshift wrote it")
+	challenge := fs.String("challenge", "", "prove: the register challenge's ID, as Wakeshift wrote it (none: the setup check a webhook's run answers)")
+	if fs.Parse(rest[1:]) != nil || fs.NArg() != 0 || *bot == "" || *issuer == "" || (rest[0] == "init" && *challenge != "") {
+		fmt.Fprintf(stderr, "usage: %s grok init --bot ID --issuer URL | grok prove --bot ID --issuer URL [--challenge ID]\n", prog)
+		return connector.GrokExitUsage
+	}
+	var r connector.GrokResult
+	if rest[0] == "init" {
+		r = connector.GrokInit(*bot, *issuer)
+	} else {
+		r = connector.GrokProve(ctx, *bot, *issuer, *challenge)
+	}
+	fmt.Fprintln(stdout, r.Out)
+	return r.Code
 }
 
 // waitCmd is `wakeshift wait` (connector.Waiter): exactly that, no arguments,

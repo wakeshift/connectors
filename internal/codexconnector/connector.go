@@ -75,8 +75,12 @@ var (
 // Config is one thread's connector.
 type Config struct {
 	Stream string // the session's stream link (made with ack=true)
-	Thread string // the Codex thread
-	Socket string // Codex's app-server control socket
+	// Issuers are the Wakeshifts Codex's hooks trust: the connector dials
+	// a link (the first, and each rotation) only on one of their origins
+	// (connector.CheckStreamLink). None: it dials nothing.
+	Issuers []string
+	Thread  string // the Codex thread
+	Socket  string // Codex's app-server control socket
 	// Lease: exit when the thread has had no turn but ours for this long
 	// (0: none). Turns anyone else starts (the user) renew it.
 	Lease time.Duration
@@ -539,7 +543,12 @@ func (c *conn) stream(ctx context.Context) {
 	link, wait := c.cfg.Stream, time.Second
 	for ctx.Err() == nil {
 		next, err := c.streamOnce(ctx, link)
+		var off *connector.ErrOffOrigin
 		switch {
+		case errors.As(err, &off):
+			// Never dialed; kept, in case its Wakeshift is trusted again.
+			c.cancel(err)
+			return
 		case errors.Is(err, ErrRevoked), errors.Is(err, ErrOutdated):
 			c.forget(link)
 			c.cancel(err)
@@ -583,7 +592,11 @@ func (c *conn) forget(link string) {
 }
 
 func (c *conn) streamOnce(ctx context.Context, link string) (next string, err error) {
-	ws, resp, err := websocket.Dial(ctx, link, &websocket.DialOptions{HTTPHeader: http.Header{connectorversion.Header: {connector.ClientHeader(harness)}}})
+	if err := connector.CheckStreamLink(link, c.cfg.Issuers); err != nil {
+		return "", err
+	}
+	ws, resp, err := websocket.Dial(ctx, link, &websocket.DialOptions{HTTPClient: connector.LinkClient(nil, 0),
+		HTTPHeader: http.Header{connectorversion.Header: {connector.ClientHeader(harness)}}})
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusUpgradeRequired {
 			return "", ErrOutdated

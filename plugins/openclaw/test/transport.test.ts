@@ -117,7 +117,7 @@ test("a delivery that can't be recorded ends the connection there: nothing after
   const seen: string[] = [];
   let failed = false;
   const s = new Transport({
-    link: f.link(),
+    link: f.link(), issuer: f.url,
     minBackoff: 10,
     receive: async (ds) => {
       const id = ds[0].delivery_id;
@@ -145,7 +145,7 @@ test("every request names the plugin and its version; a 426 update_required stop
     sse(res, "event", ev("d1", "one"), "d1");
   };
   const r = recorder();
-  const s = new Transport({ link: f.link(), minBackoff: 10, receive: r.receive }).start();
+  const s = new Transport({ link: f.link(), issuer: f.url, minBackoff: 10, receive: r.receive }).start();
   t.after(() => s.stop());
   await until(() => r.seen.includes("d1"));
   assert.equal(await s.ack(["d1"]), 200);
@@ -155,7 +155,7 @@ test("every request names the plugin and its version; a 426 update_required stop
   const g = await fake();
   t.after(g.close);
   g.onSSE = (res) => void res.writeHead(426, { "Content-Type": "application/json" }).end(JSON.stringify({ error: { code: "update_required", message: "out of date" } }));
-  const old = new Transport({ link: g.link(), minBackoff: 10, receive: recorder().receive }).start();
+  const old = new Transport({ link: g.link(), issuer: g.url, minBackoff: 10, receive: recorder().receive }).start();
   t.after(() => old.stop());
   assert.deepEqual(await old.done, { why: "outdated" });
   assert.equal(g.sse.length, 1, "not tried again");
@@ -167,7 +167,7 @@ test("every request names the plugin and its version; a 426 update_required stop
     open(res);
     sse(res, "hub.closed", { type: "hub.closed", reason: "update_required", note: "out of date" });
   };
-  const live = new Transport({ link: h.link(), minBackoff: 10, receive: recorder().receive }).start();
+  const live = new Transport({ link: h.link(), issuer: h.url, minBackoff: 10, receive: recorder().receive }).start();
   t.after(() => live.stop());
   assert.deepEqual(await live.done, { why: "outdated" });
 });
@@ -181,7 +181,7 @@ test("SSE: hands deliveries over in order, with the token in a header", async (t
     sse(res, "event", ev("d2", "two"), "d2");
   };
   const r = recorder();
-  const s = new Transport({ link: f.link(), receive: r.receive }).start();
+  const s = new Transport({ link: f.link(), issuer: f.url, receive: r.receive }).start();
   t.after(() => s.stop());
   await until(() => r.seen.length === 2);
   assert.deepEqual(r.seen, ["d1", "d2"]);
@@ -199,7 +199,7 @@ test("the cursor moves only past what's recorded", async (t) => {
   };
   let n = 0;
   const s = new Transport({
-    link: f.link(),
+    link: f.link(), issuer: f.url,
     minBackoff: 10,
     receive: async () => {
       if (++n === 1) throw new Error("disk full");
@@ -223,7 +223,7 @@ test("SSE: follows hub.rotate to the same origin only", async (t) => {
     else sse(res, "event", ev("d1", "one"), "d1");
   };
   const r = recorder();
-  const s = new Transport({ link: f.link(), onLink: (l) => links.push(l), receive: r.receive }).start();
+  const s = new Transport({ link: f.link(), issuer: f.url, onLink: (l) => links.push(l), receive: r.receive }).start();
   t.after(() => s.stop());
   await until(() => r.seen.length === 1);
   assert.deepEqual(
@@ -247,7 +247,7 @@ test("hub.closed: replaced stops quietly; unsubscribed and revoked are gone; res
       sse(res, "closed", { type: "hub.closed", reason, note: "…" });
       res.end();
     };
-    const s = new Transport({ link: f.link(), receive: async () => 1 }).start();
+    const s = new Transport({ link: f.link(), issuer: f.url, receive: async () => 1 }).start();
     assert.equal((await s.done).why, want, reason);
     assert.equal(f.sse.length, 1);
     await f.close();
@@ -262,7 +262,7 @@ test("hub.closed: replaced stops quietly; unsubscribed and revoked are gone; res
     } else sse(res, "event", ev("d1", "one"), "d1");
   };
   const r = recorder();
-  const s = new Transport({ link: f.link(), receive: r.receive }).start();
+  const s = new Transport({ link: f.link(), issuer: f.url, receive: r.receive }).start();
   t.after(() => s.stop());
   await until(() => r.seen.length === 1);
   assert.equal(f.sse.length, 2);
@@ -272,7 +272,7 @@ test("a revoked link (401) stops for good", async (t) => {
   const f = await fake();
   t.after(f.close);
   f.onSSE = (res) => res.writeHead(401).end();
-  const s = new Transport({ link: f.link(), receive: async () => 1 }).start();
+  const s = new Transport({ link: f.link(), issuer: f.url, receive: async () => 1 }).start();
   assert.deepEqual(await s.done, { why: "gone", reason: "link_revoked" });
 });
 
@@ -285,7 +285,7 @@ test("at capacity (503): waits out Retry-After, not its backoff, and keeps to SS
     if (n === 1) return void res.writeHead(503, { "Retry-After": "1" }).end();
     open(res);
   };
-  const s = new Transport({ link: f.link(), minBackoff: 10, maxBackoff: 20, receive: async () => 1 }).start();
+  const s = new Transport({ link: f.link(), issuer: f.url, minBackoff: 10, maxBackoff: 20, receive: async () => 1 }).start();
   t.after(() => s.stop());
   await until(() => at.length >= 2);
   assert.ok(at[1] - at[0] >= 950, `reconnected after ${at[1] - at[0]}ms`);
@@ -299,7 +299,7 @@ test("falls back to long polling when SSE doesn't get through; a poll of nothing
   // Every poll hands out the same unacknowledged delivery at once.
   f.onPoll = (res) => res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ deliveries: [ev("p1", "polled")], acked: [] }));
   const r = recorder();
-  const s = new Transport({ link: f.link(), minBackoff: 50, sseTries: 2, pollWait: 300, receive: r.receive }).start();
+  const s = new Transport({ link: f.link(), issuer: f.url, minBackoff: 50, sseTries: 2, pollWait: 300, receive: r.receive }).start();
   t.after(() => s.stop());
   await until(() => f.polls.length >= 2);
   const at = f.polls.length;
@@ -315,7 +315,7 @@ test("Wakeshift unreachable (restarting) isn't SSE failing: it keeps to SSE", as
   const link = f.link();
   await f.close();
   const logs: string[] = [];
-  const s = new Transport({ link, minBackoff: 10, maxBackoff: 20, sseTries: 2, receive: async () => 1, log: (m) => logs.push(m) }).start();
+  const s = new Transport({ link, issuer: f.url, minBackoff: 10, maxBackoff: 20, sseTries: 2, receive: async () => 1, log: (m) => logs.push(m) }).start();
   t.after(() => s.stop());
   await until(() => logs.length >= 4);
   assert.equal(s.transport, "sse");
@@ -325,7 +325,7 @@ test("silent SSE (a buffering proxy) counts as not getting through", async (t) =
   const f = await fake();
   t.after(f.close);
   f.onSSE = (res) => res.writeHead(200, { "Content-Type": "text/event-stream" });
-  const s = new Transport({ link: f.link(), minBackoff: 10, sseTries: 2, silentFor: 100, pollWait: 300, receive: async () => 1 }).start();
+  const s = new Transport({ link: f.link(), issuer: f.url, minBackoff: 10, sseTries: 2, silentFor: 100, pollWait: 300, receive: async () => 1 }).start();
   t.after(() => s.stop());
   await until(() => f.polls.length >= 1);
   assert.equal(s.transport, "poll");
@@ -339,7 +339,7 @@ test("reconnect() makes a new connection, so Wakeshift hands out again what isn'
     sse(res, "event", ev("d1", "one"), "d1");
   };
   const r = recorder();
-  const s = new Transport({ link: f.link(), receive: r.receive }).start();
+  const s = new Transport({ link: f.link(), issuer: f.url, receive: r.receive }).start();
   t.after(() => s.stop());
   await until(() => r.seen.length === 1);
   s.reconnect();
@@ -348,7 +348,7 @@ test("reconnect() makes a new connection, so Wakeshift hands out again what isn'
 
 test("ack: one POST of up to 100 IDs, its status (0 when unreachable)", async (t) => {
   const f = await fake();
-  const s = new Transport({ link: f.link(), receive: async () => 1 });
+  const s = new Transport({ link: f.link(), issuer: f.url, receive: async () => 1 });
   assert.equal(await s.ack(["a", "b"]), 200);
   assert.deepEqual(f.acks, [["a", "b"]]);
   await assert.rejects(s.ack(Array.from({ length: 101 }, (_, i) => String(i))));
@@ -367,14 +367,14 @@ test("a 403 or 404 that isn't Wakeshift's link_revoked is retried, not gone; lin
     sse(res, "event", ev("d1", "one"), "d1");
   };
   const r = recorder();
-  const s = new Transport({ link: f.link(), minBackoff: 10, maxBackoff: 20, receive: r.receive }).start();
+  const s = new Transport({ link: f.link(), issuer: f.url, minBackoff: 10, maxBackoff: 20, receive: r.receive }).start();
   t.after(() => s.stop());
   await until(() => r.seen.length === 1);
 
   const g = await fake();
   t.after(g.close);
   g.onSSE = (res) => res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: { code: "link_revoked" } }));
-  const s2 = new Transport({ link: g.link(), minBackoff: 10, receive: async () => 1 }).start();
+  const s2 = new Transport({ link: g.link(), issuer: g.url, minBackoff: 10, receive: async () => 1 }).start();
   assert.deepEqual(await s2.done, { why: "gone", reason: "link_revoked" });
 });
 
@@ -382,7 +382,7 @@ test("an ack refused with a 404 that's link_revoked reads as 401; a plain 404 st
   let revoked = true;
   const f = (async () =>
     new Response(revoked ? JSON.stringify({ error: { code: "link_revoked" } }) : "nope", { status: 404 })) as unknown as typeof fetch;
-  const s = new Transport({ link: "ws://x/v1/stream?link=t", fetch: f, receive: async () => 1 });
+  const s = new Transport({ link: "ws://127.0.0.1:1/v1/stream?link=t", issuer: "http://127.0.0.1:1", fetch: f, receive: async () => 1 });
   t.after(() => s.stop());
   assert.equal(await s.ack(["a"]), 401);
   revoked = false;
@@ -399,7 +399,7 @@ test("connections that end at once with nothing new back off instead of reconnec
     sse(res, "closed", { type: "hub.closed", reason: "restarting" });
     res.end();
   };
-  const s = new Transport({ link: f.link(), minBackoff: 50, maxBackoff: 400, receive: async () => 1 }).start();
+  const s = new Transport({ link: f.link(), issuer: f.url, minBackoff: 50, maxBackoff: 400, receive: async () => 1 }).start();
   t.after(() => s.stop());
   await new Promise((r) => setTimeout(r, 800));
   s.stop();
@@ -416,7 +416,7 @@ test("an over-long SSE line is skipped, and the stream goes on", async (t) => {
     sse(res, "event", ev("d1", "one"), "d1");
   };
   const r = recorder();
-  const s = new Transport({ link: f.link(), receive: r.receive }).start();
+  const s = new Transport({ link: f.link(), issuer: f.url, receive: r.receive }).start();
   t.after(() => s.stop());
   await until(() => r.seen.length === 1);
   assert.deepEqual(r.seen, ["d1"]);

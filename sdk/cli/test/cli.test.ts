@@ -55,7 +55,7 @@ test("init: makes the key, writes .env (0600), prints the link and code, waits, 
   assert.equal(await run(c, ["init"]), 0);
   const raw = keyIn(c)!;
   const k = parseKey(raw);
-  assert.match(c.out, new RegExp(`/new-app#pk=${k.publicKey}&id=shipyard-dev&name=Shipyard%20\\(dev\\)`));
+  assert.match(c.out, new RegExp(`/new-app\\?ref=cli#pk=${k.publicKey}&id=shipyard-dev&name=Shipyard%20\\(dev\\)`));
   assert.match(c.out, new RegExp(`Key code: ${k.keyCode}`));
   assert.match(c.out, /Created shipyard-dev\. WAKESHIFT_KEY is in \.env\./);
   if (process.platform !== "win32") assert.equal(statSync(join(c.cwd, ".env")).mode & 0o777, 0o600);
@@ -80,7 +80,7 @@ test("init: opens the browser through $BROWSER when there is one", async () => {
   assert.equal(await run(c, ["init", "--name", "browser-dev"]), 0);
   assert.equal(c.opened.length, 1);
   assert.equal(c.opened[0].cmd, "/bin/echo");
-  assert.match(c.opened[0].args[0], /\/new-app#pk=.*&id=browser-dev&name=Browser%20\(dev\)$/);
+  assert.match(c.opened[0].args[0], /\/new-app\?ref=cli#pk=.*&id=browser-dev&name=Browser%20\(dev\)$/);
   assert.match(c.out, /Opened it in the browser/);
   const n = new TestCtx({ WAKESHIFT_CORE: core.origin, BROWSER: "/bin/echo", WAKESHIFT_NO_BROWSER: undefined });
   confirmAfter(n, "x-dev");
@@ -137,13 +137,13 @@ test("init: a waitlisted person exits 3 at once, with a plain message, and keeps
 
     // Run again while still waitlisted: the same key, the same answer, and
     // no second link.
-    assert.match(c.out, /\/new-app#pk=/);
+    assert.match(c.out, /\/new-app\?ref=cli#pk=/);
     c.out = c.errOut = "";
     c.opened.length = 0;
     assert.equal(await run(c, ["init", "--name", "w-dev"]), 3);
     assert.ok(c.errOut.includes(WAITLISTED), c.errOut);
     assert.equal(keyIn(c), key);
-    assert.doesNotMatch(c.out, /\/new-app#pk=/, "printed the link again");
+    assert.doesNotMatch(c.out, /\/new-app\?ref=cli#pk=/, "printed the link again");
     assert.equal(c.opened.length, 0, "opened the link again");
   } finally {
     core.appAnswer = null;

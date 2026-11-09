@@ -13,12 +13,13 @@ import { TestCtx } from "./fakes.js";
 const PK = "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik";
 
 test("the confirm link carries the public key, ID and name in its fragment", () => {
-  assert.equal(newAppLink(PRODUCTION, PK, "acme-ci-dev", "Acme CI"), `https://app.wakeshift.ai/new-app#pk=${PK}&id=acme-ci-dev&name=Acme%20CI`);
-  assert.equal(newAppLink("http://localhost:8370", PK, "a-dev", "A & B (dev)"), `http://localhost:8370/new-app#pk=${PK}&id=a-dev&name=A%20%26%20B%20(dev)`);
+  assert.equal(newAppLink(PRODUCTION, PK, "acme-ci-dev", "Acme CI"), `https://app.wakeshift.ai/new-app?ref=cli#pk=${PK}&id=acme-ci-dev&name=Acme%20CI`);
+  assert.equal(newAppLink("http://localhost:8370", PK, "a-dev", "A & B (dev)"), `http://localhost:8370/new-app?ref=cli#pk=${PK}&id=a-dev&name=A%20%26%20B%20(dev)`);
   assert.equal(addKeyLink(PRODUCTION, "acme-ci-dev", PK), `https://app.wakeshift.ai/apps/acme-ci-dev/keys#pk=${PK}`);
-  // Nothing before the fragment names the key: no server log or Referer sees it.
+  // Nothing before the fragment names the key: no server log or Referer sees
+  // it. The query is only where the link came from.
   const u = new URL(newAppLink(PRODUCTION, PK, "a-dev", "A"));
-  assert.equal(u.search, "");
+  assert.equal(u.search, "?ref=cli");
   assert.equal(new URLSearchParams(u.hash.slice(1)).get("pk"), PK);
   assert.equal(new URLSearchParams(u.hash.slice(1)).get("name"), "A");
 });

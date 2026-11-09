@@ -5,6 +5,7 @@
 //   @wakeshift/connect-<os>-<arch>   the connector (wakeshift) for one platform
 //   @wakeshift/connect               npx -y @wakeshift/connect <harness> (plugins/connect)
 //   @wakeshift/opencode              the plugin for opencode (plugins/opencode)
+//   @wakeshift/pi                    the extension for pi (plugins/pi)
 //   @wakeshift/openclaw              the plugin for OpenClaw (plugins/openclaw),
 //                                    with --openclaw: its built directory
 //
@@ -12,8 +13,8 @@
 //
 // --bin-dir holds wakeshift-<os>-<arch> for every platform (the release's
 // names, Go's arch: amd64). Every package gets --version, and the launcher
-// and the plugin depend on exactly that version of each platform package.
-// --issuer packs the launcher and the plugin to trust another Wakeshift by
+// and the plugins depend on exactly that version of each platform package.
+// --issuer packs the launcher and the plugins to trust another Wakeshift by
 // default (a local core, for the bench); production's is the default.
 // --openclaw is plugins/openclaw after its build (npm run pack, which
 // stamps Wakeshift's own version into dist/version.js, the one the plugin
@@ -109,11 +110,11 @@ export function main(argv) {
       writeFileSync(join(d, "bin", "wakeshift"), bytes);
       chmodSync(join(d, "bin", "wakeshift"), 0o755);
       copyFileSync(license, join(d, "LICENSE"));
-      writeFileSync(join(d, "README.md"), `# ${name}\n\nWakeshift's connector (\`wakeshift\`) for ${p.label}. You don't install it yourself: [@wakeshift/connect](https://www.npmjs.com/package/@wakeshift/connect) and [@wakeshift/opencode](https://www.npmjs.com/package/@wakeshift/opencode) depend on it, and npm picks the package for your computer. Its source is [github.com/wakeshift/connectors](https://github.com/wakeshift/connectors).\n`);
+      writeFileSync(join(d, "README.md"), `# ${name}\n\nWakeshift's connector (\`wakeshift\`) for ${p.label}. You don't install it yourself: [@wakeshift/connect](https://www.npmjs.com/package/@wakeshift/connect), [@wakeshift/opencode](https://www.npmjs.com/package/@wakeshift/opencode) and [@wakeshift/pi](https://www.npmjs.com/package/@wakeshift/pi) depend on it, and npm picks the package for your computer. Its source is [github.com/wakeshift/connectors](https://github.com/wakeshift/connectors).\n`);
       const j = {
         name,
         version: o.version,
-        description: `Wakeshift's connector (wakeshift) for ${p.label}, installed by @wakeshift/connect and @wakeshift/opencode`,
+        description: `Wakeshift's connector (wakeshift) for ${p.label}, installed by @wakeshift/connect, @wakeshift/opencode and @wakeshift/pi`,
         license: "Apache-2.0",
         homepage: "https://wakeshift.ai/docs/agents",
         repository: { type: "git", url: REPO, directory: "cmd/wakeshift-connector" },
@@ -148,7 +149,17 @@ export function main(argv) {
     copyFileSync(join(here, "opencode", "README.md"), join(oc, "README.md"));
     writeFileSync(join(oc, "package.json"), JSON.stringify(stamp(join(here, "opencode", "package.json"), o.version), null, 2) + "\n");
 
-    names.push(pack(c, out), pack(oc, out));
+    // The extension for pi.
+    const pe = join(stage, "pi");
+    mkdirSync(pe, { recursive: true });
+    let ext = readFileSync(join(here, "pi", "index.js"), "utf8");
+    ext = replaceOnce(ext, `const DEFAULT_ISSUERS = ["${PRODUCTION}"]`, `const DEFAULT_ISSUERS = [${JSON.stringify(o.issuer)}]`, "plugins/pi/index.js");
+    writeFileSync(join(pe, "index.js"), ext);
+    copyFileSync(join(here, "pi", "LICENSE"), join(pe, "LICENSE"));
+    copyFileSync(join(here, "pi", "README.md"), join(pe, "README.md"));
+    writeFileSync(join(pe, "package.json"), JSON.stringify(stamp(join(here, "pi", "package.json"), o.version), null, 2) + "\n");
+
+    names.push(pack(c, out), pack(oc, out), pack(pe, out));
 
     // The plugin for OpenClaw, as built.
     if (o.openclaw) {

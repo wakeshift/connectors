@@ -35,6 +35,9 @@ type fakeWakeshift struct {
 	late []bool
 	// app, if set, is what redeems say about the beacon's app.
 	app *RedeemedApp
+	// answer, if set, is the stream link redeems answer with (default: one
+	// on its own origin).
+	answer string
 }
 
 func newFakeWakeshift(t *testing.T) *fakeWakeshift {
@@ -56,7 +59,7 @@ func newFakeWakeshift(t *testing.T) *fakeWakeshift {
 		f.redeemed = append(f.redeemed, in.Ticket+"@"+in.Thread)
 		f.held = append(f.held, in.Held)
 		f.late = append(f.late, in.Late)
-		status, code, app := f.status, f.code, f.app
+		status, code, app, answer := f.status, f.code, f.app, f.answer
 		f.mu.Unlock()
 		w.WriteHeader(status)
 		if status != 200 {
@@ -64,6 +67,9 @@ func newFakeWakeshift(t *testing.T) *fakeWakeshift {
 			return
 		}
 		out := map[string]any{"url": "ws://" + r.Host + "/v1/stream?link=tok-" + in.Thread}
+		if answer != "" {
+			out["url"] = answer
+		}
 		if app != nil {
 			out["app"] = app
 		}
@@ -189,7 +195,7 @@ func setHome(t *testing.T) string {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("WAKESHIFT_HOME", home+"/.wakeshift")
-	for _, k := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "COPILOT_HOME", "CURSOR_CONFIG_DIR", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG"} {
+	for _, k := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "COPILOT_HOME", "CURSOR_CONFIG_DIR", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG", "PI_CODING_AGENT_DIR"} {
 		t.Setenv(k, "")
 	}
 	return home

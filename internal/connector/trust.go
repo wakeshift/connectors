@@ -248,12 +248,7 @@ func (v *Verifier) now() time.Time {
 	return time.Now()
 }
 
-func client(c *http.Client) *http.Client {
-	if c != nil {
-		return c
-	}
-	return &http.Client{Timeout: 10 * time.Second, CheckRedirect: noRedirects}
-}
+func client(c *http.Client) *http.Client { return LinkClient(c, 10*time.Second) }
 
 // ErrUnreachable: Wakeshift couldn't be reached or answered with a server
 // error or 429; the same beacon may be redeemed again later.
@@ -366,6 +361,11 @@ func redeemHeld(ctx context.Context, hc *http.Client, harness string, c beacon.C
 	json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out)
 	switch {
 	case resp.StatusCode == http.StatusOK && out.URL != "":
+		// Only a link on the beacon's own issuer's origin: the hook keeps
+		// it and sends its token there.
+		if err := CheckStreamLink(out.URL, []string{c.Issuer}); err != nil {
+			return "", RedeemedApp{}, err
+		}
 		var app RedeemedApp
 		// Only about the beacon's own app.
 		if out.App != nil && out.App.ID == c.App {

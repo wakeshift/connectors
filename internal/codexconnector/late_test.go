@@ -139,7 +139,7 @@ func TestHookLateRedeem(t *testing.T) {
 	offer := writeRollout(t, t.TempDir(), thread, rolloutLine(thread, "chat", "watch", metaResult(ws.lateBeacon(t, thread, "watch", minted))))
 
 	l := newHook(time.Now().Add(-time.Minute))
-	if got := run(l, EventSessionStart, offer); got != NoteConnected || len(l.started) != 1 || l.started[0] != thread+" ws://link-for-"+thread {
+	if got := run(l, EventSessionStart, offer); got != NoteConnected || len(l.started) != 1 || l.started[0] != thread+" "+ws.link(thread) {
 		t.Fatalf("late: %q %v", got, l.started)
 	}
 	if len(ws.late) != 1 || !ws.late[0] || ws.redeemed[0] != "wst_late@"+thread {

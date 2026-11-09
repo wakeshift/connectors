@@ -80,7 +80,9 @@ func Picker() []PickerAgent {
 				{Kind: "note", Text: "Then choose Connect."},
 			},
 			Wakes: []string{
-				"{Each} wakes the agent within seconds while Cowork is open, even when it's idle. Nothing to install.",
+				"The agent starts a background listener in the Cowork task. {Each} then wakes it within seconds while Cowork is open, even when it's idle. Nothing to install.",
+				"If the agent says it can't reach Wakeshift, allow app.wakeshift.ai in the Claude app under Settings > Capabilities (on Team and Enterprise plans, an owner does it under Organization settings > Capabilities), then tell the agent.",
+				"In a Claude chat outside Cowork, the agent isn't woken: it sees what's new the next time it uses the app's tools.",
 			},
 		},
 		{
@@ -113,6 +115,18 @@ func Picker() []PickerAgent {
 				"The agent offers a one-time install of Wakeshift's plugin for Hermes. Say yes (Hermes may ask you to approve the command once). If the install says the running gateway loaded the plugin, just send any message. Otherwise Hermes loads it when a chat starts or is resumed, so resume the chat (exit and run hermes chat --continue, or restart the gateway) or start a new one, and send any message.",
 				"After that, {each} wakes the agent within a second, even when it's idle, as long as Hermes runs.",
 				"Chat in Hermes's TUI (hermes --tui) to see each woken turn: the classic hermes chat runs it without showing it.",
+			},
+		},
+		{
+			ID: "pi", Name: "pi", Group: "main",
+			Steps: []PickerStep{
+				run("pi mcp add {name} --url {url}"),
+				{Kind: "note", Text: "In a pi session that's already running, type /reload to pick it up."},
+			},
+			SignIn: "If it says the server needs sign-in, type /mcp in pi, choose {name}, then Sign in (or run pi mcp login {name}).",
+			Wakes: []string{
+				"The agent offers a one-time install of Wakeshift's extension for pi. Say yes, then type /reload in pi and send any message so it connects.",
+				"After that, {each} wakes the agent within seconds, even when it's idle, as long as pi is open. While it's busy, it gets {each} once its turn ends.",
 			},
 		},
 		{

@@ -50,6 +50,7 @@ func runScripted(t *testing.T, d *codexDaemon, cfg Config) (frames chan map[stri
 	ctx, cancel := context.WithCancel(context.Background())
 	frames, acks, done = make(chan map[string]any, 50), make(chan string, 50), make(chan error, 1)
 	cfg.Stream, cfg.Thread, cfg.Socket = scriptedStream(t, frames, acks), thread, sock
+	cfg = trusting(cfg)
 	if cfg.Log == nil {
 		cfg.Log = slog.New(slog.DiscardHandler)
 	}
