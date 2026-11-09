@@ -82,3 +82,26 @@ func (i codexInstaller) Uninstall(bin string, out io.Writer) error {
 	}
 	return nil
 }
+
+// CodexToolHookInstalled reports whether ~/.codex/hooks.json has
+// Wakeshift's PostToolUse hook (any binary's), the one that redeems a
+// result's beacon: the installer's hooks mark a call only if it's there
+// (codexconnector.Hook.markNote), since a mark leaves the install offer out.
+func CodexToolHookInstalled() bool {
+	b, err := os.ReadFile(codexInstaller{}.path())
+	if err != nil {
+		return false
+	}
+	var f struct {
+		Hooks map[string][]json.RawMessage `json:"hooks"`
+	}
+	if json.Unmarshal(b, &f) != nil {
+		return false
+	}
+	for _, item := range f.Hooks["PostToolUse"] {
+		if commandIn(item, filepath.Join(Home(), "bin", "wakeshift"), codexName) {
+			return true
+		}
+	}
+	return false
+}

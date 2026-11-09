@@ -7,10 +7,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/wakeshift/connectors/internal/beacon"
 	"github.com/wakeshift/connectors/internal/connector"
+	"github.com/wakeshift/connectors/internal/pluginmark"
+	"github.com/wakeshift/connectors/internal/version"
 )
 
 // The hook: Codex runs it after MCP tool calls (PostToolUse) with the call
@@ -93,15 +98,36 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 		return
 	}
 	if in.HookEventName == EventSessionStart || in.HookEventName == EventUserPromptSubmit {
+		var notes []string
+		// The daemon is asked at most once in this run (the mark, the
+		// late redeem).
+		var daemon *bool
+		onDaemon := func() bool {
+			if daemon == nil {
+				ok := h.onDaemon(ctx, in.SessionID)
+				daemon = &ok
+			}
+			return *daemon
+		}
+		if in.HookEventName == EventSessionStart {
+			// The mark to pass (internal/pluginmark), so the first watch
+			// result of the thread offers no install.
+			if m := h.markNote(onDaemon); m != "" {
+				notes = append(notes, m)
+			}
+		}
 		// A thread with no link yet may have had the install offered in a
 		// result no hook saw: connected from that result's beacon (late),
 		// without a call of the app's tool, which may have side effects.
-		if note := h.lateRedeem(ctx, in); note != "" {
-			json.NewEncoder(stdout).Encode(map[string]any{"hookSpecificOutput": map[string]any{
-				"hookEventName": in.HookEventName, "additionalContext": note}})
-			return
+		if note := h.lateRedeem(ctx, in, onDaemon); note != "" {
+			notes = append(notes, note)
+		} else {
+			h.rearm(in.SessionID, in.HookEventName)
 		}
-		h.rearm(in.SessionID, in.HookEventName)
+		if len(notes) > 0 {
+			json.NewEncoder(stdout).Encode(map[string]any{"hookSpecificOutput": map[string]any{
+				"hookEventName": in.HookEventName, "additionalContext": strings.Join(notes, "\n\n")}})
+		}
 		return
 	}
 	// Only from the result's own _meta (tool_response._meta): Wakeshift
@@ -167,6 +193,50 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 		return
 	}
 	note(NoteConnected)
+}
+
+// CodexMarkNote is the context the hook adds at SessionStart, with the
+// mark (%s) to pass. Codex runs SessionStart when the thread's first turn
+// starts (and a resumed thread's), before the model's first call, and
+// shows a hook's additionalContext to the model as a developer message.
+const CodexMarkNote = "Wakeshift's plugin is installed in this Codex session, so apps that notify through Wakeshift can wake this thread by themselves, even while it's idle. " +
+	"When you call an app's tool that takes a `harness` argument, pass harness=%q (exactly this): it tells the app the plugin is here, so its result won't ask you to set notifications up."
+
+// CodexHooksMarkNote is CodexMarkNote for the hooks Wakeshift's installer
+// wrote to ~/.codex/hooks.json (no plugin).
+const CodexHooksMarkNote = "Wakeshift's hooks are installed in this Codex session, so apps that notify through Wakeshift can wake this thread by themselves, even while it's idle. " +
+	"When you call an app's tool that takes a `harness` argument, pass harness=%q (exactly this): it tells the app the hooks are here, so its result won't ask you to set notifications up."
+
+// markNote is the mark's context for a thread, or "" when there's nothing
+// to mark with (no trusted Wakeshift) or nothing could wake the thread (it
+// runs in-process, off Codex's daemon: codex exec, --no-daemon), so its
+// results keep saying so. Like Claude Code's (connector.SessionContext),
+// the plugin's install leaves its issuer's file and the installer's hooks
+// don't. That this runs at all is the evidence the hooks are installed and
+// trusted: Codex runs SessionStart only for hooks the user trusted, and the
+// same install added the PostToolUse hook that redeems the beacon (an
+// install from before October 27 has no SessionStart hook, so no mark).
+// The plugin's hooks.json can't be edited without Codex asking again; the
+// installer's can, so for those the PostToolUse entry must still be there.
+func (h *Hook) markNote(onDaemon func() bool) string {
+	set := h.Settings
+	hooks := set.Dir != "" && !fileExists(filepath.Join(set.Dir, connector.PluginIssuerFile))
+	mark, note := pluginmark.Value(harness, version.Version, set.Issuers), CodexMarkNote
+	if hooks {
+		mark, note = pluginmark.HooksValue(harness, version.Version, set.Issuers), CodexHooksMarkNote
+	}
+	if hooks && !connector.CodexToolHookInstalled() {
+		return "" // no hook to redeem the beacon: the offer stays
+	}
+	if mark == "" || !onDaemon() {
+		return ""
+	}
+	return fmt.Sprintf(note, mark)
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // rearm starts the thread's connectors again with their kept links (one

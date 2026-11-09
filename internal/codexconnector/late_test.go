@@ -134,7 +134,8 @@ func TestHookLateRedeem(t *testing.T) {
 		if err := json.Unmarshal(out.Bytes(), &m); err != nil || m.HookSpecificOutput.HookEventName != event {
 			t.Fatalf("hook output %q", out.String())
 		}
-		return m.HookSpecificOutput.AdditionalContext
+		// The mark's note comes at every SessionStart (TestHookMark).
+		return withoutMark(m.HookSpecificOutput.AdditionalContext)
 	}
 	offer := writeRollout(t, t.TempDir(), thread, rolloutLine(thread, "chat", "watch", metaResult(ws.lateBeacon(t, thread, "watch", minted))))
 

@@ -1621,7 +1621,7 @@ func PluginPendingNote(h Harness, base string, tasks bool, again string) string 
 // PluginReadyNote is what subscribing tells a conversation whose call
 // Wakeshift's plugin marked (internal/pluginmark: it's installed, and trusts
 // this Wakeshift) before its hooks have connected it: they connect it from
-// this result when the turn ends, so there's nothing to ask, install or
+// this result when the turn ends (Claude Code), or right after it (Codex), so there's nothing to ask, install or
 // start (no Monitor: in manual mode it would ask the user to approve it).
 // hooks: the mark is from the hooks Wakeshift's installer wrote, not the
 // plugin (pluginmark.Mark.Hooks), which connect it the same way.
@@ -1629,6 +1629,13 @@ func PluginReadyNote(h Harness, app string, hooks bool) string {
 	what, it := "Wakeshift's plugin for "+h.Name+" is", "it connects"
 	if hooks {
 		what, it = "Wakeshift's hooks for "+h.Name+" are", "they connect"
+	}
+	if h.Wake == Connector {
+		// Codex: its PostToolUse hook connects the thread from this
+		// result's beacon right away, and says so in a note after it.
+		return "Subscribed. " + what + " installed here, so " + app + "'s notifications reach this conversation by themselves, even while you're idle: " +
+			it + " this conversation from this result, and a note starting \"" + Connected + "\" follows it. " +
+			"Nothing else needs to run: don't run a background command, don't install anything, and don't ask the user how to be notified; just tell them you'll let them know."
 	}
 	return "Subscribed. " + what + " installed here, so " + app + "'s notifications reach this conversation by themselves, even while you're idle: " +
 		it + " this conversation when this turn ends, and new messages are held for it until then. " +

@@ -28,7 +28,7 @@ func eventInput(thread, event string) *bytes.Reader {
 // start it again) is started again by the hook at the thread's next
 // SessionStart or UserPromptSubmit, with the link the beacon's redeem gave,
 // unless one is running. No link, no start; and the hook says nothing to
-// the model at either.
+// the model at either about it (SessionStart's note is the mark's).
 func TestHookRearms(t *testing.T) {
 	t.Setenv("CODEX_HOME", t.TempDir())
 	t.Setenv("WAKESHIFT_HOME", t.TempDir())
@@ -44,6 +44,13 @@ func TestHookRearms(t *testing.T) {
 	run := func(in *bytes.Reader) string {
 		var out bytes.Buffer
 		h.Run(context.Background(), in, &out)
+		// SessionStart's mark note (TestHookMark) isn't about the link.
+		var m struct {
+			HookSpecificOutput struct{ AdditionalContext string }
+		}
+		if json.Unmarshal(out.Bytes(), &m) == nil && m.HookSpecificOutput.AdditionalContext != "" && withoutMark(m.HookSpecificOutput.AdditionalContext) == "" {
+			return ""
+		}
 		return out.String()
 	}
 

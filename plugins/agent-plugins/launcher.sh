@@ -167,10 +167,13 @@ trap unlock EXIT
 trap 'exit 0' HUP INT TERM
 
 # take_lock: waits for another hook that's fetching (a minute at most); a
-# lock whose holder is gone is taken over.
+# lock whose holder is gone is taken over. The lock is held by whoever
+# creates its pid file, with the shell's own O_EXCL (noclobber): uutils'
+# mkdir (Ubuntu 25.10 on) lets several hooks that start together all
+# create the directory.
 take_lock() {
 	n=0
-	until mkdir "$lock" 2>/dev/null; do
+	until mkdir "$lock" 2>/dev/null && (set -C && echo $$ >"$lock/pid") 2>/dev/null; do
 		pid=
 		[ -r "$lock/pid" ] && read -r pid <"$lock/pid"
 		if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
@@ -185,7 +188,6 @@ take_lock() {
 		sleep 1
 	done
 	locked=1
-	echo $$ >"$lock/pid"
 }
 
 sha256() {
@@ -224,7 +226,10 @@ fetch() {
 	(umask 077 && mkdir -p "$home/bin") || { say "couldn't make $home/bin"; return 1; }
 	tmp=$(mktemp "$home/bin/.wakeshift.XXXXXX") || { say "couldn't write to $home/bin"; return 1; }
 	url=$connector_url/$name
-	if ! curl -fsSL --proto "$proto" --proto-redir "$proto" --retry 2 --retry-max-time 30 --connect-timeout 10 --max-time 120 -o "$tmp" "$url" </dev/null; then
+	# An empty file is a failed download too: curl 8.18 exits 0, having
+	# written nothing, when it gives up on a Retry-After longer than
+	# --retry-max-time (8.5 exits 22).
+	if ! curl -fsSL --proto "$proto" --proto-redir "$proto" --retry 2 --retry-max-time 30 --connect-timeout 10 --max-time 120 -o "$tmp" "$url" </dev/null || [ ! -s "$tmp" ]; then
 		say "couldn't download $url; the hook does nothing until it can"
 		return 1
 	fi

@@ -111,7 +111,7 @@ func lastRolloutBeacon(path, thread string) (rolloutBeacon, bool) {
 // redeem isn't tried at every prompt: the thread then connects from the
 // next result of the app's tools. Returns the note for the model ("" for
 // none).
-func (h *Hook) lateRedeem(ctx context.Context, in HookInput) string {
+func (h *Hook) lateRedeem(ctx context.Context, in HookInput, onDaemon func() bool) string {
 	thread := in.SessionID
 	installed := h.Settings.InstalledAt
 	if !uuidRE.MatchString(thread) || installed.IsZero() || h.Settings.Dir == "" || len(h.links().All(thread)) > 0 {
@@ -144,7 +144,7 @@ func (h *Hook) lateRedeem(ctx context.Context, in HookInput) string {
 	if pins.Allow(found.Server, claims.App) != nil {
 		return ""
 	}
-	if !h.onDaemon(ctx, thread) {
+	if !onDaemon() {
 		return ""
 	}
 	// Tried once: SessionStart and UserPromptSubmit run together at the
