@@ -256,6 +256,27 @@ func (l Links) WaitRunning(conversation string) bool {
 	return running
 }
 
+// LockRedeems serializes the harness's redeems on this machine until the
+// returned func: each reads the link the conversation holds for the app,
+// redeems with it (held) and saves the new one. Two results of one turn
+// (tool calls in parallel, whose hooks run at once) each carry a beacon,
+// for two sessions when the calls came before either result gave the
+// conversation a session_key: one after the other, the second redeem hands
+// back the first's link, and Wakeshift keeps the conversation one session
+// (appapi's mergeInto and foldInto). Without the harness's directory
+// (uninstalled) it does nothing.
+func (l Links) LockRedeems() func() {
+	dir := filepath.Dir(l.Dir)
+	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+		return func() {}
+	}
+	unlock, err := lockFile(filepath.Join(dir, "redeem.lock"))
+	if err != nil {
+		return func() {}
+	}
+	return unlock
+}
+
 // Forget removes all of a conversation's links.
 func (l Links) Forget(conversation string) {
 	os.Remove(l.path(conversation))

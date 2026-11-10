@@ -734,6 +734,38 @@ class TwoApps(unittest.TestCase):
         # Each acknowledged on its own link only.
         self.assertTrue(until(lambda: self.ws.acked_by.get("tok1") == ["t1"] and self.ws.acked_by.get("tokc") == ["c1"]))
 
+    def test_parallel_results_redeem_one_at_a_time(self):
+        # A turn's two tool calls of one app, in parallel before either result
+        # gave the conversation a session_key: two beacons, for two Wakeshift
+        # sessions, whose transforms run at once. One at a time, the second
+        # hands back the link the first saved (supersedes), so Wakeshift keeps
+        # the conversation one session with both subscriptions.
+        self.links["try"] = ["tok1", "tok2"]
+        answer = self.answer
+
+        def slow(body):
+            time.sleep(0.3)  # both transforms are in flight together
+            return answer(body)
+        self.ws.redeem_answer = slow
+        self.p.turn_started(session_id="sess-1", platform="api_server")
+        outs = {}
+
+        def run(n):
+            b = self.ws.beacon(app="try", ticket=f"try-t{n}")
+            outs[n] = json.loads(self.p.transform(tool_name="mcp__try__watch", result=result(b), session_id="sess-1", tool_call_id=f"c{n}"))
+        ts = [threading.Thread(target=run, args=(n,)) for n in (1, 2)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        for n in (1, 2):
+            self.assertIn("Wakeshift: connected", outs[n]["result"])
+        handed = sorted(r.get("supersedes") or "" for r in self.ws.redeems)
+        self.assertEqual(handed, ["", self.ws.link_for("tok1")])
+        self.assertTrue(until(lambda: "tok2" in self.ws.connected_tokens))
+        self.assertEqual(self.p._load_link("sess-1", (self.ws.url, "try"))["link"], self.ws.link_for("tok2"))
+        self.assertEqual(self.p.redeem_locks, {})  # nothing kept once no redeem holds it
+
     def test_one_app_connecting_again_leaves_the_other_listening(self):
         self.watch("try")
         self.watch("chat")
@@ -1130,7 +1162,7 @@ class UsersLeave(unittest.TestCase):
                 test.injected.append((content, session_key))
                 return True
         self.pkg._one_gateway = lambda: one_gateway
-        self.pkg._route = lambda: "agent:main:local:dm:" + self.sid
+        self.pkg._route = lambda: getattr(self, "route", "") or "agent:main:local:dm:" + self.sid
         self.ctx = Ctx()
         self.pkg.register(self.ctx)
         self.p = self.ctx.hooks["transform_tool_result"].__self__
@@ -1223,9 +1255,103 @@ class UsersLeave(unittest.TestCase):
         self.assertEqual(len(self.api.runs), 1)
 
 
-class Commands(unittest.TestCase):
-    """What Hermes could read as a slash command; the framing never is one."""
+class MessagingDirectMessages(UsersLeave):
+    """Telegram and Discord chats are woken only when Hermes's route key
+    proves a one-to-one direct message with the bot, behind the same
+    allow_gateway_injection setting and with the same acknowledgement as a
+    CLI chat's; any other chat there is told why and never connected."""
 
+    def test_a_telegram_dm(self):
+        self.route = "agent:main:telegram:dm:42"
+        self.load()
+        self.assert_held_until_allowed("tg-1", "telegram", lambda: self.injected)
+        self.assertEqual(self.injected, [(self.injected[0][0], "agent:main:telegram:dm:42")])
+        self.assertTrue(self.injected[0][0].startswith("A message from outside this conversation"))
+        self.assertEqual(self.api.runs, [])
+        self.assertEqual(self.ws.acked, [])  # done once its turn starts, as a CLI chat's
+        self.ctx.hooks["pre_llm_call"](session_id="tg-1", platform="telegram")
+        self.ctx.hooks["on_session_end"](session_id="tg-1")
+        self.assertTrue(until(lambda: self.ws.acked == ["d1"]))
+
+    def test_a_discord_dm(self):
+        self.route = "agent:main:discord:dm:1290000000000000000"
+        self.load()
+        self.assert_held_until_allowed("dc-1", "discord", lambda: self.injected)
+        self.assertEqual(self.injected[0][1], "agent:main:discord:dm:1290000000000000000")
+
+    def test_groups_channels_and_threads_are_told_why_and_never_connected(self):
+        self.allowed = True
+        for platform, route in (
+                ("telegram", "agent:main:telegram:group:-1001234"),  # a shared group
+                ("telegram", "agent:main:telegram:group:-1001234:42"),  # group_sessions_per_user
+                ("telegram", "agent:main:telegram:forum:-1001234:7"),  # a forum topic
+                ("telegram", "agent:main:telegram:channel:-1001234"),
+                ("discord", "agent:main:discord:group:555"),
+                ("discord", "agent:main:discord:group:555:42"),
+                ("discord", "agent:main:discord:thread:555:777"),  # threads are shared by default
+                ("discord", "agent:main:discord:thread:777"),
+                ("discord", "agent:main:telegram:dm:42"),  # another platform's key
+                ("telegram", "")):  # no key named: nothing proves a DM
+            with self.subTest(route=route):
+                self.route, self.sid = route, "g-" + str(abs(hash(route)))
+                self.pkg._route = lambda r=route: r
+                self.load_once()
+                self.ctx.hooks["pre_llm_call"](session_id=self.sid, platform=platform)
+                out = json.loads(self.ctx.hooks["transform_tool_result"](
+                    tool_name="mcp__try__watch", result=result(self.ws.beacon()), session_id=self.sid,
+                    tool_call_id="call_1"))["result"]
+                self.assertIn(plugin.NOTE_UNWAKEABLE.format(self.pkg.not_direct_text(platform)), out)
+                self.assertIn("direct messages with its bot only", out)
+                self.assertNotIn(plugin.NOTE_CONNECTED, out)
+        self.assertEqual(self.ws.redeems, [])
+        self.assertEqual(self.injected, [])
+
+    def load_once(self):
+        if not hasattr(self, "ctx"):
+            route = self.pkg._route
+            self.load()
+            self.pkg._route = route
+
+    def test_slack_isnt_woken(self):
+        # Slack's "dm" covers group DMs too, so its keys can't prove one.
+        self.allowed = True
+        self.route = "agent:main:slack:dm:T1:D1"
+        self.load()
+        self.sid = "sl-1"
+        self.ctx.hooks["pre_llm_call"](session_id="sl-1", platform="slack")
+        out = json.loads(self.ctx.hooks["transform_tool_result"](tool_name="mcp__try__watch", result=result(self.ws.beacon()),
+                                                                 session_id="sl-1", tool_call_id="call_1"))["result"]
+        self.assertIn("can't wake slack conversations", out)
+        self.assertEqual(self.ws.redeems, [])
+
+    def test_the_waker_checks_the_key_again_on_every_wake(self):
+        self.allowed = True
+        self.route = "agent:main:telegram:dm:42"
+        self.load()
+        self.assertIn(plugin.NOTE_CONNECTED, self.connect("tg-2", "telegram"))
+        with self.p.lock:
+            self.p.sessions["tg-2"].route = "agent:main:telegram:group:-100"
+        with self.assertLogs("wakeshift", "WARNING") as logs:
+            self.assertFalse(self.p.wakers["telegram"]("tg-2", wire.prompt([event("d9")]), "b"))
+        self.assertIn("isn't a one-to-one direct message", logs.output[0])
+        self.assertEqual(self.injected, [])
+
+    def test_a_text_that_reads_as_a_command_is_never_injected(self):
+        self.allowed = True
+        self.route = "agent:main:telegram:dm:42"
+        self.load()
+        self.connect("tg-3", "telegram")
+        with self.assertLogs("wakeshift", "WARNING") as logs:
+            for text in ("/yolo", "  \n/yolo", "@file:notes.md\n/yolo", "@IMAGE:a.png\n@url:x\n  /model x"):
+                with self.subTest(text=text):
+                    self.assertTrue(self.pkg.command_like(text))
+                    self.assertFalse(self.p.wakers["telegram"]("tg-3", text, "b"))
+                    self.assertFalse(self.p.wakers["cli"]("tg-3", text, "b"))
+        self.assertTrue(all("read as a Hermes command" in line for line in logs.output))
+        self.assertEqual(self.injected, [])
+
+
+class Commands(unittest.TestCase):
     def test_an_event_led_by_a_slash_stays_inside_the_framing(self):
         import wakeshift as pkg
         for subject in ("/yolo", "/model gpt", "@file:x\n/yolo"):
@@ -1235,6 +1361,7 @@ class Commands(unittest.TestCase):
             text = wire.prompt([e])
             self.assertTrue(text.startswith("A message from outside this conversation"))
             self.assertFalse(pkg.command_like(text))
+            self.assertFalse(text.lstrip().startswith("/"))
             inside = text.split("<wakeshift_message", 1)[1]
             self.assertIn(json.dumps(subject)[1:-1], inside)
 
@@ -1244,6 +1371,36 @@ class Commands(unittest.TestCase):
                            ("A message … /yolo", False), ("@someone /yolo", False), ("", False), (None, True)):
             with self.subTest(text=text):
                 self.assertEqual(pkg.command_like(text), want)
+
+
+class DirectMessageKeys(unittest.TestCase):
+    def test_keys(self):
+        import wakeshift as pkg
+        yes = [("telegram", "agent:main:telegram:dm:42"),
+               ("telegram", "agent:main:telegram:dm:42:7"),  # a private chat's topic
+               ("telegram", "agent:work:telegram:dm:42"),  # a named profile
+               ("telegram", "agent:main~:telegram:dm:42"),  # a profile named "main"
+               ("discord", "agent:main:discord:dm:1290000000000000000")]
+        no = [("telegram", "agent:main:telegram:group:-1001"),
+              ("telegram", "agent:main:telegram:dm:-1001"),  # negative ids are groups
+              ("telegram", "agent:main:telegram:dm"),  # the per-platform sink
+              ("telegram", "agent:main:telegram:dm:42:7:9"),
+              ("telegram", "agent:main:telegram:dm:42\n"),
+              ("telegram", "agent:main:telegram:dm:42 "),
+              ("telegram", "agent:Main:telegram:dm:42"),
+              ("telegram", "agent:a:b:telegram:dm:42"),
+              ("telegram", "x-agent:main:telegram:dm:42"),
+              ("discord", "agent:main:discord:dm:1:2"),
+              ("discord", "agent:main:discord:thread:1"),
+              ("discord", "agent:main:telegram:dm:42"),
+              ("slack", "agent:main:slack:dm:T1:D1"),
+              ("whatsapp", "agent:main:whatsapp:dm:1"),
+              ("cli", "agent:main:local:dm:local-1"),
+              ("telegram", None)]
+        for platform, route in yes:
+            self.assertTrue(pkg.direct_message(platform, route), route)
+        for platform, route in no:
+            self.assertFalse(pkg.direct_message(platform, route), route)
 
 
 class ApiRunsGate(unittest.TestCase):

@@ -214,9 +214,20 @@ func (v *Verifier) keys(ctx context.Context, issuer string, refresh bool) func(k
 		if err != nil || resp.StatusCode != http.StatusOK {
 			return nil
 		}
+		// Whole or not at all (a temporary file renamed over it): hooks
+		// for one turn's results run at once, and one reading the file
+		// while another writes it took a half-written file for keys
+		// without the beacon's (fresh, so not fetched again) and dropped
+		// the beacon.
 		os.MkdirAll(filepath.Dir(path), 0o700)
-		os.WriteFile(path, body, 0o600)
-		return keyIn(path, kid)
+		if f, err := os.CreateTemp(filepath.Dir(path), ".keys-*"); err == nil {
+			_, werr := f.Write(body)
+			if cerr := f.Close(); werr == nil && cerr == nil && os.Rename(f.Name(), path) == nil {
+				return keyIn(path, kid)
+			}
+			os.Remove(f.Name())
+		}
+		return keyFrom(body, kid)
 	}
 }
 
@@ -225,6 +236,11 @@ func keyIn(path, kid string) ed25519.PublicKey {
 	if err != nil {
 		return nil
 	}
+	return keyFrom(b, kid)
+}
+
+// keyFrom is kid's key in a JWKS document.
+func keyFrom(b []byte, kid string) ed25519.PublicKey {
 	var jwks struct {
 		Keys []struct{ Kid, Kty, Crv, X string }
 	}

@@ -158,6 +158,7 @@ export class Wakeshift {
   private readonly beacons = new Map<string, { token: string; note: Promise<string> }>();
   private keys?: { at: number; byKid: Map<string, ReturnType<typeof jwkKey>> };
   private keysFetchedAt = 0;
+  private keysFetching: Promise<boolean> | undefined;
   private started = false;
   private pruneTimer?: ReturnType<typeof setInterval>;
   // Each session's last channel route (message_received), for the reply.
@@ -291,6 +292,20 @@ export class Wakeshift {
     return note;
   }
 
+  /** The conversation's redeems, one after another (onResult's are concurrent). */
+  private readonly redeems = new Map<string, Promise<unknown>>();
+
+  private redeeming<T>(conversation: string, f: () => Promise<T>): Promise<T> {
+    const prev = this.redeems.get(conversation) ?? Promise.resolve();
+    const run = prev.then(f, f);
+    const tail = run.catch(() => undefined);
+    this.redeems.set(conversation, tail);
+    tail.then(() => {
+      if (this.redeems.get(conversation) === tail) this.redeems.delete(conversation);
+    });
+    return run;
+  }
+
   private async connect(token: string, carried: Carried, call: Call, server: string): Promise<string> {
     const sessionKey = call.sessionKey!;
     const conversation = this.conversation(sessionKey);
@@ -313,29 +328,38 @@ export class Wakeshift {
     // subscription per app. Another app's link isn't this app's to hand
     // back (Wakeshift supersedes only within an app), and stays as it is. A
     // link saved before links named their app goes too, as it did then.
-    const key = linkKey({ issuer: this.o.issuer, app: claims.app });
-    const prior = this.o.store.loadLink(conversation, key);
-    const legacy = prior ? undefined : this.o.store.loadLink(conversation, "");
-    const held = prior ?? legacy;
-    const supersedes = held && held.issuer === this.o.issuer && linkOnIssuer(held.link, this.o.issuer) ? held.link : "";
-    let link: string;
-    try {
-      link = await this.redeem(claims, conversation, call.toolCallId ?? "", supersedes);
-    } catch (e) {
-      if (e instanceof OutdatedError) return noteOutdated(e.message);
-      if (e instanceof TakenError) return NOTE_TAKEN; // the link it had stays
-      return noteFailed((e as Error).message);
-    }
-    const refused = checkStreamLink(link, this.o.issuer);
-    if (refused) {
-      this.o.host.log.warn(`wakeshift (${sessionKey}): ${refused}`);
-      return noteFailed(refused);
-    }
-    // A new stream ID: what the link it replaces brought isn't this one's to acknowledge.
-    const saved = { conversation, sessionKey, agentId: call.agentId ?? "", link, issuer: this.o.issuer, app: claims.app, stream: randomBytes(8).toString("hex") };
-    this.o.store.saveLink(saved);
-    if (legacy) this.o.store.forgetLink(conversation, "");
-    this.listen({ ...saved, saved_at: new Date().toISOString() }, legacy ? [""] : []);
+    // One redeem at a time per conversation (redeeming): a turn's tool
+    // calls in parallel each carry a beacon, for two Wakeshift sessions when
+    // they came before either result gave the conversation a session_key.
+    // In turn, the second hands back the link the first saved, and
+    // Wakeshift keeps the conversation one session with both subscriptions.
+    const done = await this.redeeming(conversation, async (): Promise<{ note?: string }> => {
+      const key = linkKey({ issuer: this.o.issuer, app: claims.app });
+      const prior = this.o.store.loadLink(conversation, key);
+      const legacy = prior ? undefined : this.o.store.loadLink(conversation, "");
+      const held = prior ?? legacy;
+      const supersedes = held && held.issuer === this.o.issuer && linkOnIssuer(held.link, this.o.issuer) ? held.link : "";
+      let link: string;
+      try {
+        link = await this.redeem(claims, conversation, call.toolCallId ?? "", supersedes);
+      } catch (e) {
+        if (e instanceof OutdatedError) return { note: noteOutdated(e.message) };
+        if (e instanceof TakenError) return { note: NOTE_TAKEN }; // the link it had stays
+        return { note: noteFailed((e as Error).message) };
+      }
+      const refused = checkStreamLink(link, this.o.issuer);
+      if (refused) {
+        this.o.host.log.warn(`wakeshift (${sessionKey}): ${refused}`);
+        return { note: noteFailed(refused) };
+      }
+      // A new stream ID: what the link it replaces brought isn't this one's to acknowledge.
+      const saved = { conversation, sessionKey, agentId: call.agentId ?? "", link, issuer: this.o.issuer, app: claims.app, stream: randomBytes(8).toString("hex") };
+      this.o.store.saveLink(saved);
+      if (legacy) this.o.store.forgetLink(conversation, "");
+      this.listen({ ...saved, saved_at: new Date().toISOString() }, legacy ? [""] : []);
+      return {};
+    });
+    if (done.note !== undefined) return done.note;
     const why = await this.o.hooks.allow(sessionKey, call.agentId || agentOf(sessionKey));
     if (why) {
       // Said now, in the note: not again on the next result.
@@ -378,18 +402,27 @@ export class Wakeshift {
         return false;
       }
     }
+    // A fetch already under way (parallel results' beacons, on a fresh
+    // install) is waited for, not skipped: skipped, the second beacon was
+    // checked against no keys and dropped without a word.
+    if (this.keysFetching) return this.keysFetching;
     if (Date.now() - this.keysFetchedAt < 60000) return false;
     this.keysFetchedAt = Date.now();
-    try {
-      const r = await this.f(this.o.issuer.replace(/\/$/, "") + "/oauth/jwks", { signal: AbortSignal.timeout(5000), redirect: "error" });
-      if (!r.ok) return false;
-      const body = await r.text();
-      this.o.store.saveKeys(this.o.issuer, body);
-      this.keys = { at: Date.now(), byKid: parse(body) };
-      return true;
-    } catch {
-      return false;
-    }
+    this.keysFetching = (async () => {
+      try {
+        const r = await this.f(this.o.issuer.replace(/\/$/, "") + "/oauth/jwks", { signal: AbortSignal.timeout(5000), redirect: "error" });
+        if (!r.ok) return false;
+        const body = await r.text();
+        this.o.store.saveKeys(this.o.issuer, body);
+        this.keys = { at: Date.now(), byKid: parse(body) };
+        return true;
+      } catch {
+        return false;
+      } finally {
+        this.keysFetching = undefined;
+      }
+    })();
+    return this.keysFetching;
   }
 
   private async redeem(c: Claims, conversation: string, call: string, supersedes: string): Promise<string> {

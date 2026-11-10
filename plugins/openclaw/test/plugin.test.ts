@@ -31,6 +31,7 @@ async function wakeshift() {
     acksBy: new Map<string, string[][]>(),
     statusBy: new Map<string, number>(),
     redeemLink: undefined as undefined | ((body: Record<string, string>) => string),
+    redeemDelay: 0, // ms before a redeem answers
     private: privateKey as KeyObject,
     close: async () => {},
   };
@@ -48,7 +49,8 @@ async function wakeshift() {
         w.redeemClients.push(String(req.headers["x-wakeshift-connector"] ?? ""));
         const link = w.redeemLink?.(JSON.parse(body)) ?? w.url.replace("http", "ws") + "/v1/stream?link=tok1";
         const a = w.redeemAnswer ?? { status: 200, body: { url: link, session: "openclaw#1" } };
-        return res.writeHead(a.status, { "Content-Type": "application/json", ...(a.headers ?? {}) }).end(JSON.stringify(a.body));
+        const answer = () => res.writeHead(a.status, { "Content-Type": "application/json", ...(a.headers ?? {}) }).end(JSON.stringify(a.body));
+        return w.redeemDelay ? void setTimeout(answer, w.redeemDelay) : answer();
       }
       const tok = String(req.headers.authorization ?? "").replace(/^Bearer /, "");
       if (u.pathname === "/v1/stream" && u.searchParams.get("format") === "sse") {
@@ -872,7 +874,7 @@ test("a beacon is remembered only while it connected: a failed redeem, or a stre
 
 // Several apps in one conversation: a link and a stream per app.
 const linkOf = (w: W, tok: string) => w.url.replace("http", "ws") + "/v1/stream?link=" + tok;
-const watchResult = (w: W, app: string, ticket: string) => ({ content: [{ type: "text", text: textBeacon(beaconFor(w, { app, ticket })) }] });
+const watchResult = (w: W, app: string, ticket: string, tool = "watch") => ({ content: [{ type: "text", text: textBeacon(beaconFor(w, { app, ticket, tool })) }] });
 const sseFrom = (res: ServerResponse, id: string, subject: string, event: Record<string, unknown>) =>
   res.write(`id: ${id}\nevent: event\ndata: ${JSON.stringify({ type: "event", delivery_id: id, attempt: 1, app: "Try",
     event: { id: "e-" + id, subject, trust: "external", from: { kind: "app", id: "try" }, attrs: { topic: "u/x/webhook" }, ...event } })}\n\n`);
@@ -905,6 +907,32 @@ test("two apps in one conversation: each has its own link and stream, both wake 
   assert.equal(o.hookCalls.length, 2, "each woke the conversation");
   assert.ok(o.hookCalls[0].body.message.includes("from try"));
   assert.ok(o.hookCalls[1].body.message.includes("from news"));
+});
+
+test("parallel results of one app redeem one at a time: the second hands back the first's link", async (t) => {
+  // A turn's two tool calls of one app, in parallel before either result
+  // gave the conversation a session_key: two beacons, for two Wakeshift
+  // sessions, whose results arrive together. One at a time, the second
+  // hands back the link the first saved, so Wakeshift keeps the
+  // conversation one session with both subscriptions.
+  const w = await wakeshift();
+  t.after(w.close);
+  linkPerTicket(w);
+  w.redeemDelay = 200;
+  const dir = mkdtempSync(join(tmpdir(), "wsoc-"));
+  const o = await openclaw(w, dir);
+  t.after(stop(o));
+  const [a, b] = await Promise.all([
+    o.middleware!({ toolName: "try__watch_builds", toolCallId: "c1", result: watchResult(w, "try", "wsct_t1_a", "watch_builds") }, ctx),
+    o.middleware!({ toolName: "try__watch_deploys", toolCallId: "c2", result: watchResult(w, "try", "wsct_t1_b", "watch_deploys") }, ctx),
+  ]);
+  assert.ok(a!.result.content.at(-1).text.startsWith(CONNECTED));
+  assert.ok(b!.result.content.at(-1).text.startsWith(CONNECTED), JSON.stringify(b!.result.content));
+  assert.equal(w.redeems.length, 2);
+  assert.equal(w.redeems[0].supersedes, undefined);
+  assert.equal(w.redeems[1].supersedes, linkOf(w, "tok-" + w.redeems[0].ticket.split("_").at(-1)), "the second hands back the first's link");
+  const last = linkOf(w, "tok-" + w.redeems[1].ticket.split("_").at(-1));
+  assert.deepEqual(savedLinks(dir).map((l) => l.link), [last]);
 });
 
 test("one app connecting again replaces only its own link: the other app's stream goes on, and its link is never handed back", async (t) => {

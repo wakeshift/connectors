@@ -240,7 +240,11 @@ class CliWaker(unittest.TestCase):
                 ctx.unload()
                 for platform in ("cli", "api_server"):
                     self.assertEqual(ws.cant_wake(platform), wakeshift.cant_wake_text("wakeshift"), (one_gateway, platform))
-                self.assertEqual(ws.cant_wake("telegram"), "")  # not woken at all: NOTE_UNSUPPORTED says so
+                # Telegram and Discord DMs are woken (and gated) only where one gateway names their key.
+                for platform in ("telegram", "discord"):
+                    self.assertEqual(platform in ws.wakers, one_gateway)
+                    self.assertEqual(ws.cant_wake(platform), wakeshift.cant_wake_text("wakeshift") if one_gateway else "")
+                self.assertEqual(ws.cant_wake("slack"), "")  # not woken at all: NOTE_UNSUPPORTED says so
                 # Ink TUI chats are woken (and gated) only where one gateway runs them.
                 self.assertEqual("tui" in ws.wakers, one_gateway)
                 self.assertEqual(ws.cant_wake("tui"), wakeshift.cant_wake_text("wakeshift") if one_gateway else "")

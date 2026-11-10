@@ -3,8 +3,8 @@
 `wakeshift-cli` sets up a [Wakeshift](https://wakeshift.ai) app for your MCP server and checks that the server wakes agents. Your coding agent can run it for you, and it never shows the app's key to anyone: not on the screen, not in a link, not in the agent's transcript.
 
 ```sh
-npx -y @wakeshift/cli@0.1.3 init
-npx -y @wakeshift/cli@0.1.3 verify --url http://localhost:3000/mcp --tool watch_build --args '{"number":412}'
+npx -y @wakeshift/cli@0.1.4 init
+npx -y @wakeshift/cli@0.1.4 verify --url http://localhost:3000/mcp --tool watch_build --args '{"number":412}'
 ```
 
 It needs Node 22 or later, and has no dependencies beyond Node itself.

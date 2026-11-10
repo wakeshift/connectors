@@ -675,7 +675,7 @@ var all = []Harness{
 		Wake:             Plugin, Ack: "at least once, acknowledged once Hermes accepts the run",
 		Binding: Unbound, Carrier: Meta, Installable: true,
 		Repo:    "wakeshift/hermes-plugin",
-		Changes: "installs Wakeshift's plugin from its public repository, github.com/wakeshift/hermes-plugin, with Hermes's own plugin installer, into $HERMES_HOME/plugins/wakeshift, enables it, and lets it start turns in your Hermes chats (Hermes's allow_gateway_injection setting for it, without which the plugin wakes no Hermes chat, through the API server or `hermes chat`); it starts them only in conversations connected to Wakeshift",
+		Changes: "installs Wakeshift's plugin from its public repository, github.com/wakeshift/hermes-plugin, with Hermes's own plugin installer, into $HERMES_HOME/plugins/wakeshift, enables it, and lets it start turns in your Hermes chats (Hermes's allow_gateway_injection setting for it, without which the plugin wakes no Hermes chat, through the API server, `hermes chat` or a Telegram or Discord direct message); it starts them only in conversations connected to Wakeshift",
 		Allow:   "hermes config set plugins.entries.wakeshift.allow_gateway_injection true",
 		// The command a user types is `hermes …`; only the agent's own run
 		// may need another form (wakebench, November 2, 2026: the bare
@@ -687,9 +687,9 @@ var all = []Harness{
 			"If its output warns \"custom (unreviewed) source\", tell them in one line: Wakeshift's plugin isn't in Hermes's catalog yet, so Hermes installed it from Wakeshift's public repository, github.com/wakeshift/hermes-plugin. " +
 			"If its output says \"Gateway reloaded plugins\" and that the plugin is active in the running gateway now, Hermes loaded it already: skip the restart and resume below, and just ask them to send any message.",
 		Trust:       "There's nothing to approve in Hermes after the install, but Hermes loads plugins only when a chat starts or is resumed, so Wakeshift can't wake this chat until they resume it: through Hermes's gateway or API server, restart the gateway and keep sending to this session as before; in `hermes chat`, exit and run `hermes chat --continue`, or `hermes chat --tui --continue` to resume it in Hermes's TUI, which shows each woken turn as it runs (the classic `hermes chat` runs a woken turn without showing it, until Hermes adds that). A new chat works too. If the plugin isn't enabled, first run `hermes plugins enable wakeshift` where Hermes runs.",
-		Restart:     "After a later restart of hermes chat, send any message once you've resumed it, so it reconnects (conversations through Hermes's gateway reconnect by themselves).",
+		Restart:     "After a later restart of hermes chat, send any message once you've resumed it, so it reconnects (conversations through Hermes's API server reconnect by themselves; after a gateway restart, a Telegram or Discord direct message reconnects with its next message).",
 		AfterUpdate: "There's nothing to approve again, but Hermes loads plugins only when a chat starts or is resumed: ask them to resume this chat (exit and run `hermes chat --continue`, or restart Hermes's gateway) or start a new one, so it loads the new plugin.",
-		When:        "as soon as they arrive, even while it's idle, as long as Hermes is running (conversations through Hermes's API server or CLI)",
+		When:        "as soon as they arrive, even while it's idle, as long as Hermes is running (conversations through Hermes's API server, CLI or TUI, and Telegram and Discord direct messages with its bot)",
 		NoteAt:      "right after this result",
 		Verified:    "0.22.5",
 	},

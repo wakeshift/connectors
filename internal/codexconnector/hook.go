@@ -174,13 +174,27 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 		note(NoteInProcess)
 		return
 	}
-	link, err := h.redeem(ctx, claims, in.SessionID)
+	// The thread's link for this app goes along (held), read, redeemed with
+	// and replaced one redeem at a time (LockRedeems): two results of one
+	// turn whose calls came before either result gave the thread a
+	// session_key carry beacons for two sessions, and the second redeem,
+	// handing back the first's link, keeps the thread one session.
+	unlock := h.links().LockRedeems()
+	held := h.links().LoadFor(in.SessionID, claims.App)
+	link, err := h.redeem(ctx, claims, in.SessionID, held)
 	var outdated *connector.UpdateRequired
 	if errors.As(err, &outdated) {
+		unlock()
 		note(fmt.Sprintf(NoteOutdated, outdated.Message))
 		return
 	}
+	if errors.Is(err, connector.ErrTaken) {
+		unlock()
+		note(connector.NoteTaken)
+		return
+	}
 	if err != nil {
+		unlock()
 		note(fmt.Sprintf(NoteFailed, err))
 		return
 	}
@@ -188,6 +202,7 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 	// the next start needs a tool call, as before. Per app: another app's
 	// link, and its connector, stay as they are.
 	h.links().SaveFor(in.SessionID, link, claims.App)
+	unlock()
 	if err := h.Start(in.SessionID, link, claims.App, "a beacon in "+in.ToolName+"'s result", false); err != nil {
 		note(fmt.Sprintf(NoteFailed, "the connector didn't start"))
 		return
@@ -279,9 +294,10 @@ func (h *Hook) onDaemon(ctx context.Context, thread string) bool {
 	return err == nil
 }
 
-// redeem exchanges the beacon's ticket for the thread's stream link.
-func (h *Hook) redeem(ctx context.Context, c beacon.Claims, thread string) (string, error) {
-	return connector.Redeem(ctx, h.HTTP, harness, c, thread)
+// redeem exchanges the beacon's ticket for the thread's stream link,
+// saying which link the thread holds for the app now (held), if any.
+func (h *Hook) redeem(ctx context.Context, c beacon.Claims, thread, held string) (string, error) {
+	return connector.RedeemHeld(ctx, h.HTTP, harness, c, thread, "", held, "")
 }
 
 func (h *Hook) now() time.Time {

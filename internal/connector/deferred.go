@@ -80,6 +80,10 @@ func (h *Hook) connectVerified(ctx context.Context, in Input, claims beacon.Clai
 	// won't move a connected conversation to another workspace's session.
 	// Another app's link stays as it is, and isn't sent: each app the
 	// conversation watches has its own (Links), and every one wakes it.
+	// Read, redeemed with and replaced one redeem at a time (LockRedeems):
+	// a parallel call's hook hands back the link this one saves.
+	unlock := h.Links.LockRedeems()
+	defer unlock()
 	held := h.Links.LoadFor(in.Conversation, claims.App)
 	if held == "" {
 		held = h.Links.LoadFor(in.Conversation, "") // saved before links named their app

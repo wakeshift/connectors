@@ -29,8 +29,15 @@ be tested without them (``__init__.register`` wires it in).
    - TUI sessions (`hermes --tui`, platform "tui"), from 0.22.3: local sessions
      of the same gateway, woken as CLI ones are. The TUI shows the woken turn;
      the classic CLI runs it but doesn't show it.
-   Other platforms (Telegram, Discord…) aren't woken: Hermes's only way to start
-   a turn there marks it internal (as if the user's own), which we never use.
+   - Telegram and Discord direct messages, from 0.22.3: a plugin turn in the
+     session named by its route key, as for CLI ones (the same setting, the
+     same acknowledgement). Only a key that proves a one-to-one direct message
+     with the bot is woken (__init__.direct_message); a group, channel or thread
+     is told why when it would connect, and never redeems: there Hermes runs a
+     plugin turn as the chat's last human speaker. Never a text Hermes could
+     read as a slash command (__init__.command_like): under its session
+     authority a plugin turn can run one.
+   Other platforms (Slack, WhatsApp…) aren't woken.
 3. Approvals stay as Hermes sets them: a woken run is unattended, so what needs
    approval is denied unless the user changed approvals.unattended_mode.
 4. One conversation can be connected to several Wakeshift apps at once: it
@@ -95,8 +102,10 @@ MISSING_CRYPTOGRAPHY = ("Hermes's Python environment is missing the cryptography
 # The chat connected, but this Hermes won't let the plugin start its turns
 # (cant_wake says why, and the fix).
 NOTE_CANT_WAKE = "Wakeshift: connected, but new messages can't wake this conversation yet. {}"
-NOTE_UNSUPPORTED = ("Wakeshift: Hermes can't wake {} conversations yet (only API server, CLI and TUI ones), "
-                    "so new messages wait until you next use this app's tools.")
+NOTE_UNSUPPORTED = ("Wakeshift: Hermes can't wake {} conversations yet (only API server, CLI and TUI ones, and "
+                    "Telegram and Discord direct messages), so new messages wait until you next use this app's tools.")
+# A chat on a platform the plugin wakes that it won't wake (unwakeable says why).
+NOTE_UNWAKEABLE = "Wakeshift: didn't connect this conversation. {}"
 # A beacon in a turn that started before the plugin loaded (it was installed
 # or enabled during the turn, and Hermes made its hooks live at once): Hermes
 # names a session's platform only when a turn starts (pre_llm_call), so the
@@ -127,7 +136,7 @@ STARTED_FOR = 7 * 24 * 3600
 # Platforms whose waker only queues the message (the CLI's input queue, or a
 # plugin turn in a local session): it's done once the next turn in that
 # session starts, not when it's queued.
-QUEUES = {"cli", "tui"}
+QUEUES = {"cli", "tui", "telegram", "discord"}
 
 
 # A local chat's interfaces: one gateway's classic CLI and Ink TUI chats are
@@ -343,12 +352,15 @@ class Wakeshift:
     (session, framed text, batch id) -> accepted. route() is Hermes's route
     key for the session whose hook is running ("" if it has none);
     cant_wake(platform) says why this Hermes won't let the plugin start that
-    platform's turns, and the fix ("" when it will)."""
+    platform's turns, and the fix ("" when it will). unwakeable(platform,
+    route) says why a conversation on a platform it wakes won't be woken (a
+    Telegram group: only direct messages are), "" when it will; such a
+    conversation is never connected."""
 
     def __init__(self, *, state_dir: Path, issuers: list[str], wakers: dict, spawn: Callable = None,
                  http_get: Callable = None, now: Callable[[], float] = time.time, listener_args: Optional[dict] = None,
                  sleep: Callable[[float], None] = time.sleep, route: Callable[[], str] = None,
-                 cant_wake: Callable[[str], str] = None):
+                 cant_wake: Callable[[str], str] = None, unwakeable: Callable[[str, str], str] = None):
         self.dir = Path(state_dir)
         self.issuers = [i.rstrip("/") for i in issuers if isinstance(i, str)]
         self.wakers = wakers
@@ -362,10 +374,12 @@ class Wakeshift:
         self.sessions: dict[str, Session] = {}
         self.route = route or (lambda: "")
         self.cant_wake = cant_wake or (lambda platform: "")
+        self.unwakeable = unwakeable or (lambda platform, route: "")
         # (session, (issuer, app)) -> the session_key Wakeshift gave the
         # conversation for that app (its redeem's answer), kept after its link
         # ends (the key outlives a subscription).
         self.handles: dict[tuple, str] = {}
+        self.redeem_locks: dict[str, list] = {}  # per conversation: [its lock, holders and waiters] (_redeeming)
 
     # -- files --
     def _link_path(self, sid: str, key: tuple = LEGACY) -> Path:
@@ -666,12 +680,20 @@ class Wakeshift:
         with self.lock:
             s = self._session(session_id)
             self._note_route(s)
-            platform, started = s.platform, s.started
+            platform, started, route = s.platform, s.started, s.route
         if platform not in self.wakers:
             if not platform and not started:
                 log.info("wakeshift: a beacon arrived in a turn that started before the plugin loaded; it connects from the next turn")
                 return wire.add_note(stripped, NOTE_JUST_LOADED)
             return wire.add_note(stripped, NOTE_UNSUPPORTED.format(platform or "these"))
+        try:
+            unwakeable = self.unwakeable(platform, route)
+        except Exception:
+            log.warning("wakeshift: couldn't check whether this conversation can be woken", exc_info=True)
+            unwakeable = "Wakeshift's plugin couldn't check whether this conversation can be woken."
+        if unwakeable:
+            log.info("wakeshift: didn't connect a %s conversation: %s", platform, unwakeable)
+            return wire.add_note(stripped, NOTE_UNWAKEABLE.format(unwakeable))
         call = "" if claims.get("thread") else (tool_call_id or "")
         key = (claims.get("iss", "").rstrip("/"), claims.get("app", ""))
         # The link this conversation had until now for this app, if any:
@@ -681,40 +703,47 @@ class Wakeshift:
         # while that link is live). Another app's link isn't this app's to
         # hand back, and stays as it is. A link saved before links named
         # their app goes too, as it did then.
-        prior = self._load_link(session_id, key)
-        legacy = self._load_link(session_id) if prior is None else None
-        held = prior or legacy
-        supersedes = held["link"] if held and not wire.check_stream_link(held["link"], [claims.get("iss", "")]) else ""
-        try:
-            link, session, redeemed_key = _redeem(claims, session_id, call, supersedes, sleep=self.sleep)
-        except Outdated as e:
-            log.warning("wakeshift: Wakeshift refused this plugin's version: %s", e)
-            return wire.add_note(stripped, NOTE_OUTDATED.format(e))
-        except Taken:
-            log.warning("wakeshift: Wakeshift kept a conversation connected where it was (another workspace's session)")
-            return wire.add_note(stripped, NOTE_TAKEN)  # the link it had stays
-        except RedeemError as e:
-            log.warning("wakeshift: couldn't connect a conversation: %s", e)
-            return wire.add_note(stripped, NOTE_FAILED.format(e))
-        refused = wire.check_stream_link(link, [claims.get("iss", "")])
-        if refused:
-            # A link on another host would get the token: refused, unused.
-            log.warning("wakeshift: %s", refused)
-            return wire.add_note(stripped, NOTE_FAILED.format(refused))
-        # The session_key Wakeshift gave the conversation for this app: the
-        # one the redeem just answered for this conversation; from an older
-        # Wakeshift, the one this result tells it to pass back that names
-        # the session the redeem answered (wire.session_key_in). Never a
-        # line the tool's own text may carry.
-        handle = redeemed_key or wire.session_key_in(stripped, session)
-        with self.lock:
-            if handle:
-                self.handles[(session_id, key)] = handle
-            handle = self.handles.get((session_id, key), "")
-        try:
-            self._save_link(session_id, platform, link, key, handle)
-        except OSError:
-            return wire.add_note(stripped, NOTE_FAILED.format("its link couldn't be saved"))
+        # One redeem at a time per conversation, across threads and Hermes
+        # processes (_redeeming): a turn's tool calls in parallel each carry a
+        # beacon, for two Wakeshift sessions when they came before either
+        # result gave the conversation a session_key. In turn, the second
+        # hands back the link the first saved, and Wakeshift keeps the
+        # conversation one session with both subscriptions.
+        with self._redeeming(session_id):
+            prior = self._load_link(session_id, key)
+            legacy = self._load_link(session_id) if prior is None else None
+            held = prior or legacy
+            supersedes = held["link"] if held and not wire.check_stream_link(held["link"], [claims.get("iss", "")]) else ""
+            try:
+                link, session, redeemed_key = _redeem(claims, session_id, call, supersedes, sleep=self.sleep)
+            except Outdated as e:
+                log.warning("wakeshift: Wakeshift refused this plugin's version: %s", e)
+                return wire.add_note(stripped, NOTE_OUTDATED.format(e))
+            except Taken:
+                log.warning("wakeshift: Wakeshift kept a conversation connected where it was (another workspace's session)")
+                return wire.add_note(stripped, NOTE_TAKEN)  # the link it had stays
+            except RedeemError as e:
+                log.warning("wakeshift: couldn't connect a conversation: %s", e)
+                return wire.add_note(stripped, NOTE_FAILED.format(e))
+            refused = wire.check_stream_link(link, [claims.get("iss", "")])
+            if refused:
+                # A link on another host would get the token: refused, unused.
+                log.warning("wakeshift: %s", refused)
+                return wire.add_note(stripped, NOTE_FAILED.format(refused))
+            # The session_key Wakeshift gave the conversation for this app: the
+            # one the redeem just answered for this conversation; from an older
+            # Wakeshift, the one this result tells it to pass back that names
+            # the session the redeem answered (wire.session_key_in). Never a
+            # line the tool's own text may carry.
+            handle = redeemed_key or wire.session_key_in(stripped, session)
+            with self.lock:
+                if handle:
+                    self.handles[(session_id, key)] = handle
+                handle = self.handles.get((session_id, key), "")
+            try:
+                self._save_link(session_id, platform, link, key, handle)
+            except OSError:
+                return wire.add_note(stripped, NOTE_FAILED.format("its link couldn't be saved"))
         if legacy is not None:
             self._forget_link(session_id)
         self._set_busy(session_id, self.now() + BUSY_FOR)  # this turn is still running
@@ -802,6 +831,34 @@ class Wakeshift:
     # that's also where a turn start decides, reserves, starts and records.
     def _state_path(self, sid: str) -> Path:
         return self.dir / "started" / (hashlib.sha256(sid.encode()).hexdigest()[:32] + ".json")
+
+    @contextlib.contextmanager
+    def _redeeming(self, sid: str):
+        """Holds the conversation's redeem lock: reading its link, redeeming
+        and saving the new one, one at a time (its own file, never taken
+        under _locked, nor _locked under it but for _save_link's own)."""
+        p = self.dir / "redeem" / (hashlib.sha256(sid.encode()).hexdigest()[:32] + ".lock")
+        self._dir(p.parent)
+        # Among this process's threads first (a flock is per open file, so two
+        # threads' opens would each take it), kept only while one holds or
+        # waits for it.
+        with self.lock:
+            entry = self.redeem_locks.setdefault(sid, [threading.Lock(), 0])
+            entry[1] += 1
+        try:
+            with entry[0]:
+                fd = os.open(p, os.O_RDWR | os.O_CREAT, 0o600)
+                try:
+                    if fcntl is not None:
+                        fcntl.flock(fd, fcntl.LOCK_EX)
+                    yield
+                finally:
+                    os.close(fd)  # releases the flock
+        finally:
+            with self.lock:
+                entry[1] -= 1
+                if entry[1] == 0 and self.redeem_locks.get(sid) is entry:
+                    del self.redeem_locks[sid]
 
     @contextlib.contextmanager
     def _locked(self, sid: str):

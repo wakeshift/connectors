@@ -1,6 +1,6 @@
 {
   "name": "@wakeshift/cli",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Wakeshift's command line for developers: create an app with a key made on your machine, check it, and verify your MCP server wakes agents.",
   "license": "Apache-2.0",
   "repository": {

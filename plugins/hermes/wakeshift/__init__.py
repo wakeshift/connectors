@@ -1,5 +1,6 @@
 """Wakeshift's plugin for Hermes Agent: lets Wakeshift messages wake your Hermes
-conversations (API server, CLI and TUI ones), only once the user allows it
+conversations (API server, CLI and TUI ones, and Telegram and Discord direct
+messages), only once the user allows it
 (plugins.entries.wakeshift.allow_gateway_injection: true). Installed by
 ``hermes plugins install wakeshift``, by Wakeshift's installer
 (``/install/hermes.sh``) or by ``wakeshift install --harness hermes``; remove
@@ -169,20 +170,58 @@ def command_like(text: str) -> bool:
     return _ATTACHMENT_REFS.sub("", text.lstrip()).lstrip().startswith("/")
 
 
-def cli_waker(ctx, ws, one_gateway: bool, allowed):
-    """The CLI's waker: (session, framed text, batch) -> accepted, only while
-    the user lets the plugin start turns (allowed(), read on each try, so
-    turning it on needs no restart). In a `hermes chat` that loads its own
-    plugins (up to 0.22.2), its REPL's input queue. Where one gateway runs
-    every CLI chat (0.22.3 and later), a plugin turn in the session named by
-    its route key; never key-less there, which Hermes may hand to another
-    chat."""
-    told: dict = {}  # session -> why it was last refused, logged once (offered again every few seconds)
+# Messaging platforms whose chats the plugin wakes, direct messages only.
+MESSAGING = ("telegram", "discord")
+
+# A one-to-one direct message's route key, which Hermes builds as
+# agent:<profile>:<platform>:<chat type>:<chat id>[:<thread id>]
+# (gateway/session.py, build_session_key; the same on 0.22.5 and 0.23.0).
+# The profile is "main", "main~" or a profile id ([a-z0-9][a-z0-9_-]{0,63}).
+# Telegram says "dm" only for a private chat with the bot (groups and
+# supergroups are "group" or "forum", channels "channel"); a private chat's
+# topics add a thread id. Discord says "dm" only for a DMChannel (guild
+# channels are "group", threads "thread") and has no threads in DMs. Slack
+# isn't here: its "dm" covers group DMs (mpim) too, so a key can't prove one.
+_NAMESPACE = r"agent:(?:main~|[a-z0-9][a-z0-9_-]{0,63})"
+_DIRECT = {
+    "telegram": re.compile(_NAMESPACE + r":telegram:dm:[1-9][0-9]{0,19}(?::[0-9]{1,20})?"),
+    "discord": re.compile(_NAMESPACE + r":discord:dm:[1-9][0-9]{0,19}"),
+}
+
+
+def direct_message(platform: str, route: str) -> bool:
+    """Whether route is Hermes's key for a one-to-one direct message with the
+    bot on platform (Telegram or Discord). Anything it can't prove is no."""
+    pattern = _DIRECT.get(platform)
+    return bool(pattern and isinstance(route, str) and pattern.fullmatch(route))
+
+
+def not_direct_text(platform: str) -> str:
+    """What a messaging chat that isn't a direct message is told."""
+    name = {"telegram": "Telegram", "discord": "Discord"}.get(platform, platform)
+    return (f"Hermes can wake {name} direct messages with its bot only, not groups, channels or threads: in a shared "
+            "chat, Hermes would show Wakeshift's message to the model as if a person in the chat had written it. "
+            "New messages wait until you next use this app's tools here, or use them from a direct message with "
+            "the bot instead.")
+
+
+def _keyed_waker(ctx, ws, allowed, what: str, keyless: bool = False, unfit=None):
+    """A waker that starts a plugin turn through inject_message: (session,
+    framed text, batch) -> accepted. The one policy every such waker shares:
+    only while the user lets the plugin start turns (allowed(), read on each
+    try, so turning it on needs no restart), never a text Hermes could read as
+    a command, and in the session named by its route key (never key-less,
+    which Hermes may hand to another chat), unless keyless (a `hermes chat`
+    that loads its own plugins, whose REPL is the only chat). unfit(session,
+    route) says why that session mustn't be woken ("" when it may), checked on
+    every wake. A refusal is logged once per session and reason (it's offered
+    again every few seconds)."""
+    told: dict = {}
 
     def refuse(session: str, why: str) -> bool:
         if told.get(session) != why:
             told[session] = why
-            log.warning("wakeshift: can't wake a CLI conversation yet: %s", why)
+            log.warning("wakeshift: can't wake a %s conversation yet: %s", what, why)
         return False
 
     def wake(session: str, text: str, batch: str) -> bool:
@@ -190,15 +229,40 @@ def cli_waker(ctx, ws, one_gateway: bool, allowed):
             return refuse(session, not_allowed(_plugin_id(ctx)))
         if command_like(text):
             return refuse(session, "its text would read as a Hermes command")
-        if not one_gateway:
+        if keyless:
             told.pop(session, None)
             return bool(ctx.inject_message(text))
         route = ws.route_of(session)
         if not route:
             return refuse(session, "Hermes hasn't named its session to the plugin (it will on the conversation's next turn)")
+        why = unfit(session, route) if unfit is not None else ""
+        if why:
+            return refuse(session, why)
         told.pop(session, None)
         return bool(ctx.inject_message(text, session_key=route))
     return wake
+
+
+def cli_waker(ctx, ws, one_gateway: bool, allowed):
+    """The CLI's waker (_keyed_waker). In a `hermes chat` that loads its own
+    plugins (up to 0.22.2), its REPL's input queue. Where one gateway runs
+    every CLI chat (0.22.3 and later), a plugin turn in the session named by
+    its route key."""
+    return _keyed_waker(ctx, ws, allowed, "CLI", keyless=not one_gateway)
+
+
+def messaging_waker(ctx, ws, allowed):
+    """A Telegram or Discord chat's waker (_keyed_waker): a plugin turn in the
+    session named by its route key (Hermes's documented
+    inject_message(session_key=...)), only when that key proves a one-to-one
+    direct message with the bot (direct_message), checked again on every
+    wake."""
+    def unfit(session: str, route: str) -> str:
+        with ws.lock:
+            s = ws.sessions.get(session)
+            platform = s.platform if s is not None else ""
+        return "" if direct_message(platform, route) else "it isn't a one-to-one direct message with the bot"
+    return _keyed_waker(ctx, ws, allowed, "messaging", unfit=unfit)
 
 
 def register(ctx) -> None:
@@ -221,17 +285,30 @@ def register(ctx) -> None:
             return cant_wake_text(_plugin_id(ctx))
         return ""
 
+    # Telegram and Discord chats are woken only when they're one-to-one
+    # direct messages with the bot (their route key says so); any other chat
+    # on those platforms is told why when it would connect.
+    def unwakeable(platform: str, route: str) -> str:
+        if platform in MESSAGING and not direct_message(platform, route):
+            return not_direct_text(platform)
+        return ""
+
     # By the session's platform: a gateway's API server sessions get a run on
-    # its API server; CLI sessions, a turn through inject_message (cli_waker).
+    # its API server; CLI sessions, a turn through inject_message (cli_waker),
+    # and Telegram and Discord direct messages too (messaging_waker).
     # Where one gateway runs every local chat (0.22.3 and later), Ink TUI chats
     # (`hermes --tui`, platform "tui") are local sessions of it too, woken the
     # same way: the TUI shows a plugin turn, which the classic CLI doesn't yet.
     wakers = {"api_server": ApiRuns(port, _api_key, allowed=allowed, why=not_allowed(_plugin_id(ctx)))}
     ws = Wakeshift(state_dir=_hermes_home() / "wakeshift", issuers=trusted_issuers(_setting(ctx), _pinned()), wakers=wakers,
-                   spawn=_spawn, route=_route, cant_wake=cant_wake)
+                   spawn=_spawn, route=_route, cant_wake=cant_wake, unwakeable=unwakeable)
     wakers["cli"] = cli_waker(ctx, ws, one_gateway, allowed)
     if one_gateway:
         wakers["tui"] = wakers["cli"]
+        # Telegram and Discord direct messages: the plugin reads their route
+        # key only where one gateway names it (0.22.3 and later).
+        for platform in MESSAGING:
+            wakers[platform] = messaging_waker(ctx, ws, allowed)
     try:
         import cryptography  # noqa: F401  (Hermes's own dependency: checks beacons' signatures)
     except ImportError:
