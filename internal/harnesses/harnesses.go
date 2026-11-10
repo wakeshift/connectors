@@ -658,7 +658,11 @@ var all = []Harness{
 		// hooks; #1125). It connects only from a result of the app's tools,
 		// so the note says when, rather than "my next turn": an agent told
 		// that waited a turn with no call, saw nothing connect, and guessed
-		// at a gateway restart.
+		// at a gateway restart. In Codex the install turn's own results go by
+		// (the thread's hooks are the turn's), and its next call to the app's
+		// tools may pass no session_key: in a user's workspace the core finds
+		// the session by the Codex thread (appapi.codexThreadSession), so that
+		// call's result carries the beacon (#1125).
 		Trust:       "There's nothing to approve in OpenClaw, and no gateway restart, whether OpenClaw runs my turns itself or in Codex: the plugin is live as soon as the install finishes.",
 		Resume:      "It connects this conversation the next time I use this app's tools; messages that arrive before then wait, and reach me once it's connected. After that, it reconnects by itself whenever the gateway starts.",
 		AfterUpdate: "There's nothing to approve again, and no restart. The new plugin starts with your next turn, so ask them to send any reply first.",
@@ -1457,15 +1461,16 @@ func installedAlready(h Harness) string {
 }
 
 // CantWake is what a conversation in a harness Wakeshift can't wake (name
-// "" for one it doesn't know) is told: one neutral line, so the agent
-// doesn't promise the user a notification. Nothing to do: the app's own
+// "" for one it doesn't know) is told: a neutral note that it won't be
+// notified and mustn't say it's watching, so the agent doesn't promise the
+// user a notification. Nothing to do: the app's own
 // tools are how it checks, as without Wakeshift.
 func CantWake(name string) string {
 	who := "this agent"
 	if name != "" {
 		who = name + " conversations"
 	}
-	return "Wakeshift can't wake " + who + ", so nothing will notify you here when something arrives."
+	return "Wakeshift can't wake " + who + ", so nothing will notify you here when something arrives. " + DontClaimWatching
 }
 
 // ConnectorProxyClients are the MCP client names Anthropic's servers state
@@ -1493,6 +1498,11 @@ func ViaConnectorProxy(client string) bool {
 // bound to): the agent may have been told when the session started that the
 // plugin is installed, and would otherwise wait for it.
 const UnconnectableNote = "Subscribed. This app reaches this conversation by a route Wakeshift's plugin for Claude Code can't connect (a claude.ai connector, for one), so only the Monitor below wakes it, whether or not the plugin is installed."
+
+// DontClaimWatching ends every note that says nothing can wake the
+// conversation: with the bare fact, agents still told the user they were
+// watching.
+const DontClaimWatching = "Tell the user so plainly, and don't say you're watching or that you'll let them know."
 
 // RetiredNote is what an agent in a retired harness (one with ReplacedBy)
 // is told: it can't be woken, and what replaced it ("" for any other).

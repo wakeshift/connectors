@@ -107,9 +107,12 @@ NOTE_UNSUPPORTED = ("Wakeshift: Hermes can't wake {} conversations yet (only API
 # A chat on a platform the plugin wakes that it won't wake (unwakeable says why).
 NOTE_UNWAKEABLE = "Wakeshift: didn't connect this conversation. {}"
 # A beacon in a turn that started before the plugin loaded (it was installed
-# or enabled during the turn, and Hermes made its hooks live at once): Hermes
-# names a session's platform only when a turn starts (pre_llm_call), so the
-# plugin can't tell yet whether it can wake this one. It can on the next turn.
+# or enabled during the turn, and Hermes made its hooks live at once), where
+# Hermes can't name the turn's platform either: it names a session's platform
+# when a turn starts (pre_llm_call), which ran before the plugin loaded, and
+# from 0.22.3 also to the turn's own hooks (surface()), so the plugin connects
+# such a turn at once there. Without either, the plugin can't tell yet whether
+# it can wake this one. It can on the next turn.
 NOTE_JUST_LOADED = ("Wakeshift: not connected yet. Wakeshift's plugin for Hermes was loaded during this turn (it was "
                     "just installed or enabled), so it can connect this conversation only from its next turn. Ask the "
                     "user to send any message (\"done\" is enough), then call this app's tool again: a note "
@@ -355,12 +358,16 @@ class Wakeshift:
     platform's turns, and the fix ("" when it will). unwakeable(platform,
     route) says why a conversation on a platform it wakes won't be woken (a
     Telegram group: only direct messages are), "" when it will; such a
-    conversation is never connected."""
+    conversation is never connected. surface() is the platform of the turn
+    whose hook is running, as Hermes names it to that turn's hooks ("" if it
+    can't): what a turn that started before the plugin loaded is, since its
+    pre_llm_call never reached the plugin."""
 
     def __init__(self, *, state_dir: Path, issuers: list[str], wakers: dict, spawn: Callable = None,
                  http_get: Callable = None, now: Callable[[], float] = time.time, listener_args: Optional[dict] = None,
                  sleep: Callable[[float], None] = time.sleep, route: Callable[[], str] = None,
-                 cant_wake: Callable[[str], str] = None, unwakeable: Callable[[str, str], str] = None):
+                 cant_wake: Callable[[str], str] = None, unwakeable: Callable[[str, str], str] = None,
+                 surface: Callable[[], str] = None):
         self.dir = Path(state_dir)
         self.issuers = [i.rstrip("/") for i in issuers if isinstance(i, str)]
         self.wakers = wakers
@@ -373,6 +380,7 @@ class Wakeshift:
         self.lock = threading.Condition()
         self.sessions: dict[str, Session] = {}
         self.route = route or (lambda: "")
+        self.surface = surface or (lambda: "")
         self.cant_wake = cant_wake or (lambda platform: "")
         self.unwakeable = unwakeable or (lambda platform, route: "")
         # (session, (issuer, app)) -> the session_key Wakeshift gave the
@@ -560,6 +568,14 @@ class Wakeshift:
         if isinstance(r, str) and r:
             s.route = r
 
+    def _surface(self) -> str:
+        """Hermes's platform for the turn whose hook is running ("" if it can't say)."""
+        try:
+            p = self.surface()
+        except Exception:
+            return ""
+        return p if isinstance(p, str) else ""
+
     def route_of(self, sid: str) -> str:
         """Hermes's route key for the session, "" if none was seen."""
         with self.lock:
@@ -680,6 +696,18 @@ class Wakeshift:
         with self.lock:
             s = self._session(session_id)
             self._note_route(s)
+            if not s.platform:
+                # A turn that started before the plugin loaded (it was just
+                # installed or enabled, and Hermes made its hooks live at
+                # once): its pre_llm_call, which names the platform, never
+                # reached the plugin, but Hermes names it to the turn's own
+                # hooks too (0.22.3 and later). So the install turn's beacon
+                # connects the conversation at once: one left for a later
+                # turn may never come back, since Wakeshift doesn't hand the
+                # same tool's result another for a few minutes, and after a
+                # resume only a session_key the model passes finds the
+                # conversation's session (issue #1131).
+                s.platform = self._surface()
             platform, started, route = s.platform, s.started, s.route
         if platform not in self.wakers:
             if not platform and not started:

@@ -103,6 +103,18 @@ def _route() -> str:
     return r if isinstance(r, str) else ""
 
 
+def _surface() -> str:
+    """Hermes's platform for the session whose hook is running here ("cli",
+    "tui", "api_server", "telegram"…; "" outside one, or on a Hermes before
+    0.22.3): the one its pre_llm_call names, read by a turn's own hooks."""
+    try:
+        from hermes_cli.plugin_session import session_surface
+        p = session_surface()
+    except Exception:
+        return ""
+    return p if isinstance(p, str) else ""
+
+
 def _plugin_id(ctx) -> str:
     pid = getattr(ctx, "plugin_id", None)
     return pid if isinstance(pid, str) and pid else "wakeshift"
@@ -301,7 +313,8 @@ def register(ctx) -> None:
     # same way: the TUI shows a plugin turn, which the classic CLI doesn't yet.
     wakers = {"api_server": ApiRuns(port, _api_key, allowed=allowed, why=not_allowed(_plugin_id(ctx)))}
     ws = Wakeshift(state_dir=_hermes_home() / "wakeshift", issuers=trusted_issuers(_setting(ctx), _pinned()), wakers=wakers,
-                   spawn=_spawn, route=_route, cant_wake=cant_wake, unwakeable=unwakeable)
+                   spawn=_spawn, route=_route, cant_wake=cant_wake, unwakeable=unwakeable,
+                   surface=_surface)
     wakers["cli"] = cli_waker(ctx, ws, one_gateway, allowed)
     if one_gateway:
         wakers["tui"] = wakers["cli"]

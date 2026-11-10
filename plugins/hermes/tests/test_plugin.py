@@ -161,6 +161,41 @@ class Plugin(unittest.TestCase):
         self.assertTrue(out["result"].endswith(plugin.NOTE_CONNECTED))
         self.assertEqual(len(self.ws.redeems), 1)
 
+    def test_a_plugin_loaded_mid_turn_connects_at_once_where_hermes_names_the_turn(self):
+        # Hermes 0.22.3 and later name the running turn's platform to its own
+        # hooks too (hermes_cli.plugin_session.session_surface): the install
+        # turn's beacon connects the chat there and then. Left for a later
+        # turn, it never came back (#1131): Wakeshift hands the same tool's
+        # result no new beacon for a few minutes, and after `/exit` and a
+        # resume only a session_key the model passes finds the session.
+        for platform in ("cli", "tui", "api_server"):
+            with self.subTest(platform=platform):
+                surfaces = [platform]
+                self.p.surface = lambda: surfaces[0]
+                sid = "loaded-" + platform
+                out = json.loads(self.p.transform(tool_name="mcp__try__watch", result=result(self.ws.beacon()), session_id=sid, tool_call_id="c"))
+                self.assertTrue(out["result"].endswith(plugin.NOTE_CONNECTED), out["result"])
+                self.assertEqual(self.ws.redeems[-1]["thread"], sid)
+                self.assertEqual(self.p._load_link(sid, (self.ws.url, "try"))["platform"], platform)
+                # Its next turn names the same platform, and it stays connected.
+                surfaces[0] = ""
+                self.p.turn_ended(session_id=sid)
+                self.p.turn_started(session_id=sid, platform=platform)
+                self.assertEqual(len(self.p._links_of(sid)), 1)
+                self.p.turn_ended(session_id=sid)
+        self.assertEqual(len(self.ws.redeems), 3)
+
+    def test_a_plugin_loaded_mid_turn_never_connects_a_platform_it_cant_wake(self):
+        # What Hermes names is checked as a pre_llm_call's platform would be.
+        self.p.surface = lambda: "telegram"
+        out = json.loads(self.p.transform(tool_name="mcp__try__watch", result=result(self.ws.beacon()), session_id="tg-1", tool_call_id="c"))
+        self.assertIn("can't wake telegram conversations", out["result"])
+        self.assertEqual(self.ws.redeems, [])
+        self.p.surface = lambda: (_ for _ in ()).throw(RuntimeError("no session context"))
+        out = json.loads(self.p.transform(tool_name="mcp__try__watch", result=result(self.ws.beacon()), session_id="sess-9", tool_call_id="c"))
+        self.assertTrue(out["result"].endswith(plugin.NOTE_JUST_LOADED))
+        self.assertEqual(self.ws.redeems, [])
+
     def test_a_turn_with_no_platform_isnt_called_just_loaded(self):
         # A turn that started after the plugin loaded but named no platform.
         self.p.turn_started(session_id="sess-1")

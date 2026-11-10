@@ -409,11 +409,18 @@ func TestRepeatNote(t *testing.T) {
 // A harness Wakeshift can't wake is told it's Wakeshift that can't, not the
 // app, in one neutral line that asks for nothing.
 func TestCantWake(t *testing.T) {
-	if n := CantWake(""); n != "Wakeshift can't wake this agent, so nothing will notify you here when something arrives." {
+	if n := CantWake(""); n != "Wakeshift can't wake this agent, so nothing will notify you here when something arrives. Tell the user so plainly, and don't say you're watching or that you'll let them know." {
 		t.Fatal(n)
 	}
 	if g, _ := Get("goose"); !strings.Contains(InstallNote(g, "https://x.test"), "Wakeshift can't wake Goose conversations,") {
 		t.Fatal(InstallNote(g, "https://x.test"))
+	}
+	// Every can't-wake note, named or not, tells the agent not to claim
+	// it's watching.
+	for _, n := range []string{CantWake(""), CantWake("Goose")} {
+		if !strings.HasSuffix(n, " Tell the user so plainly, and don't say you're watching or that you'll let them know.") {
+			t.Fatal(n)
+		}
 	}
 }
 
