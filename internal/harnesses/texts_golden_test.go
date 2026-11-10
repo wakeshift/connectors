@@ -7,6 +7,7 @@ import (
 	"flag"
 	"os"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -114,6 +115,17 @@ func TestTextsGolden(t *testing.T) {
 			t.Errorf("%s: gone", k)
 		} else if g != want[k] {
 			t.Errorf("%s changed; it's now: %s", k, texts[k])
+		}
+	}
+}
+
+// No text an agent is given, and may relay, names an app by its internal
+// ID ("app/try"): apps are named by their display names (QA pass,
+// November 9, 2026).
+func TestTextsNameNoAppIDs(t *testing.T) {
+	for k, v := range goldenTexts() {
+		if strings.Contains(v, "app/") {
+			t.Errorf("%s names an app ID: %s", k, v)
 		}
 	}
 }

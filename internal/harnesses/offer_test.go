@@ -109,6 +109,12 @@ func TestHermesText(t *testing.T) {
 		"every command you give the user starts with `hermes`, so `hermes chat --continue`",
 		"custom (unreviewed) source", "in one line",
 		"Gateway reloaded plugins", "skip the restart and resume below",
+		// The gateway's reload doesn't reach a running hermes chat, so a
+		// CLI or TUI chat still resumes first (QA pass, November 9, 2026:
+		// a classic chat was told only to send a message).
+		"for a chat through the gateway (Hermes's API server, or a Telegram or Discord direct message)",
+		"if this chat is in Hermes's CLI or TUI, still give them the resume below, then a message",
+		"in the classic `hermes chat`, exit and resume this chat with the command Hermes prints as it exits (`hermes --resume <session>`)", "in Hermes's TUI, exit and run `hermes chat --tui --continue`",
 		"`hermes config set plugins.entries.wakeshift.settings.issuers '[\"https://app.staging.wakeshift.ai\"]' && hermes plugins install wakeshift/hermes-plugin --enable && ",
 	} {
 		if !strings.Contains(n, want) {
@@ -117,5 +123,49 @@ func TestHermesText(t *testing.T) {
 	}
 	if strings.Contains(n, "$HERMES_PYTHON\" -m hermes_cli.main chat") {
 		t.Errorf("a resume step in the fallback form: %s", n)
+	}
+}
+
+// Codex: the offer says the install is Wakeshift's, not the app's, and that
+// a blocked command is asked to run outside the sandbox, never only printed
+// (QA pass, November 9, 2026: the agent said "The Webhooks tool requires
+// this one-time setup", and printed the command when the sandbox blocked
+// it). Other harnesses' offers don't change.
+func TestCodexOfferCreditsWakeshiftAndEscalates(t *testing.T) {
+	codex, _ := Get("codex")
+	for _, base := range []string{ProductionIssuer, "http://localhost:8370"} {
+		n := SubscribeNote(codex, base)
+		for _, want := range []string{
+			"The install is Wakeshift's, not this app's: when you ask, say it's for Wakeshift",
+			"run it with escalated permissions, so the user approves it",
+			"If the sandbox blocks it anyway, ask to run it outside the sandbox rather than only printing the command",
+		} {
+			if !strings.Contains(n, want) {
+				t.Errorf("%s: missing %q: %s", base, want, n)
+			}
+		}
+	}
+	for _, h := range all {
+		if h.ID != "codex" && strings.Contains(SubscribeNote(h, ProductionIssuer), "The install is Wakeshift's") {
+			t.Errorf("%s's offer changed too", h.ID)
+		}
+	}
+}
+
+// Claude Code: the session-only answer is described in the user's terms,
+// without the wait tool's name (QA pass, November 9, 2026), and the first
+// wake's note isn't given as words the user will see.
+func TestClaudeCodeOfferInUserTerms(t *testing.T) {
+	claude, _ := Get("claude-code")
+	for _, tasks := range []bool{true, false} {
+		n := PluginFirstNote(claude, ProductionIssuer, "Webhooks", tasks, "FALLBACK")
+		desc := n[strings.Index(n, `"`+AskSession+`" (description: `):]
+		desc = desc[:strings.Index(desc, ")")]
+		if strings.Contains(desc, WaitTool) || strings.Contains(desc, "wakeshift_") {
+			t.Errorf("tasks=%v: the session-only answer names a tool: %s", tasks, desc)
+		}
+		if !strings.Contains(n, `note starting "Wakeshift: connected" (for you, not words the user sees: don't quote it to them)`) || strings.Contains(n, `first wake starts with "Wakeshift: connected"`) {
+			t.Errorf("tasks=%v: the first wake is predicted as the user's words: %s", tasks, n)
+		}
 	}
 }

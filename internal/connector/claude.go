@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/wakeshift/connectors/internal/harnesses"
 )
 
 // Claude Code (2.1.280, verified). Its MCP client sends
@@ -220,6 +222,100 @@ func (claudeFormat) LastBeacon(in Input) (FoundBeacon, bool) {
 	}
 	found.ToolName = names[found.Call]
 	return found, found.ToolName != ""
+}
+
+// LastPromise: the newest result of an MCP tool (mcp__<server>__<tool>) in
+// the session's transcript whose text starts a paragraph with the core's
+// "the plugin (or hooks) connects this conversation" lead
+// (harnesses.PluginReadyLead), and when it was written.
+func (claudeFormat) LastPromise(in Input) (Promise, bool) {
+	path := in.transcript
+	if path == "" || !filepath.IsAbs(path) || filepath.Ext(path) != ".jsonl" {
+		return Promise{}, false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return Promise{}, false
+	}
+	defer f.Close()
+	h, _ := harnesses.Get(claudeName)
+	leads := []string{harnesses.PluginReadyLead(h, false), harnesses.PluginReadyLead(h, true)}
+	promised := func(text string) bool {
+		for _, para := range strings.Split(text, "\n\n") {
+			for _, lead := range leads {
+				if strings.HasPrefix(strings.TrimSpace(para), lead) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	names := map[string]string{} // tool_use ID → tool name
+	// Results that promised, in transcript order: a result can come before
+	// its tool_use line, so they're checked against names at the end, as
+	// FindBeacon does.
+	var promises []Promise
+	r := bufio.NewReaderSize(f, 1<<16)
+	for {
+		line, err := r.ReadBytes('\n')
+		if len(line) > 0 && json.Valid(line) {
+			var l struct {
+				SessionID string    `json:"sessionId"`
+				Timestamp time.Time `json:"timestamp"`
+				Message   struct {
+					Content json.RawMessage `json:"content"`
+				} `json:"message"`
+			}
+			if json.Unmarshal(line, &l) == nil && l.SessionID == in.Conversation {
+				var parts []struct {
+					Type      string          `json:"type"`
+					ID        string          `json:"id"`
+					Name      string          `json:"name"`
+					ToolUseID string          `json:"tool_use_id"`
+					Content   json.RawMessage `json:"content"`
+				}
+				json.Unmarshal(l.Message.Content, &parts)
+				for _, p := range parts {
+					switch {
+					case p.Type == "tool_use" && p.ID != "":
+						names[p.ID] = p.Name
+					case p.Type == "tool_result" && p.ToolUseID != "" && promised(claudeResultText(p.Content)):
+						promises = append(promises, Promise{Call: p.ToolUseID, At: l.Timestamp})
+					}
+				}
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	for i := len(promises) - 1; i >= 0; i-- {
+		if strings.HasPrefix(names[promises[i].Call], "mcp__") {
+			return promises[i], true
+		}
+	}
+	return Promise{}, false
+}
+
+// claudeResultText is a transcript tool_result's text: its content as a
+// string, or its text items joined.
+func claudeResultText(content json.RawMessage) string {
+	var s string
+	if json.Unmarshal(content, &s) == nil {
+		return s
+	}
+	var items []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	json.Unmarshal(content, &items)
+	var texts []string
+	for _, it := range items {
+		if it.Type == "text" {
+			texts = append(texts, it.Text)
+		}
+	}
+	return strings.Join(texts, "\n\n")
 }
 
 // ClaudeSessionContextEvent is the --event of the plugin's SessionStart

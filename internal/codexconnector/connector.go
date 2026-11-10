@@ -70,11 +70,18 @@ var (
 	ErrLease     = errors.New("nobody used the thread for the lease")
 	// ErrRunning: a re-arm found another connector running for the thread.
 	ErrRunning = errors.New("another connector is running for the thread")
+	// ErrDisabled: Wakeshift was turned off on this machine
+	// (connector.DisabledFile) before a wake; what was waiting is left
+	// unacknowledged, for Wakeshift to hand out again once it's on.
+	ErrDisabled = errors.New("Wakeshift is turned off on this machine")
 )
 
 // Config is one thread's connector.
 type Config struct {
 	Stream string // the session's stream link (made with ack=true)
+	// Disabled, if set, is asked before each turn the connector would
+	// start: true stops it, without the turn (connector.SwitchedOff).
+	Disabled func() bool
 	// Issuers are the Wakeshifts Codex's hooks trust: the connector dials
 	// a link (the first, and each rotation) only on one of their origins
 	// (connector.CheckStreamLink). None: it dials nothing.
@@ -800,6 +807,10 @@ func (c *conn) startTurn(ctx context.Context, batch []delivery) bool {
 			continue
 		} else if err != nil { // still open, and still able to take a turn?
 			c.cancel(err)
+			return false
+		}
+		if c.cfg.Disabled != nil && c.cfg.Disabled() {
+			c.cancel(ErrDisabled)
 			return false
 		}
 		from, ok := c.claim()

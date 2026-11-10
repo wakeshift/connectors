@@ -290,7 +290,7 @@ const opencodePlugin = `// Wakeshift's plugin for opencode: lets Wakeshift messa
 import { spawn } from "node:child_process"
 import { createInterface } from "node:readline"
 import { createHash } from "node:crypto"
-import { closeSync, existsSync, mkdirSync, openSync } from "node:fs"
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
@@ -327,7 +327,13 @@ export default {
     const queue = new Map() // session ID -> [{id, text}]
     const acks = new Map() // wake ID -> send ack
     const retries = new Map() // session ID -> {timer, delay, input}
-    const starting = new Map() // session ID -> bridge still starting
+    // Session ID -> its bridges still starting. More than one only for
+    // beacons: two results in one turn each carry one, and each bridge
+    // redeems its own (the connector takes one redeem at a time, the second
+    // handing back the first's link), so neither is stopped for the other.
+    const starting = new Map()
+    const carrying = new WeakSet() // bridges started with a beacon
+    const isStarting = (sid) => (starting.get(sid)?.size ?? 0) > 0
     const gone = new Set() // deleted sessions: never started again
     const stopped = new WeakSet() // bridges this plugin ended on purpose
     let disposed = false
@@ -343,7 +349,7 @@ export default {
       r.delay = Math.min(r.delay * 2, RETRY_MAX_MS)
       r.timer = setTimeout(() => {
         r.timer = undefined
-        if (!children.has(sid) && !starting.has(sid)) void start(sid, r.input)
+        if (!children.has(sid) && !isStarting(sid)) void start(sid, r.input)
       }, wait)
       r.timer.unref?.()
     }
@@ -415,13 +421,16 @@ export default {
         } finally {
           if (typeof errs === "number") { try { closeSync(errs) } catch {} } // the child has its own
         }
-        starting.set(sid, child)
+        if (!starting.has(sid)) starting.set(sid, new Set())
+        starting.get(sid).add(child)
+        if (input?.hook_event_name === "PostToolUse") carrying.add(child)
         let first = true
         let connected = false
         const done = (text, noteId) => {
           if (!first) return
           first = false
-          if (starting.get(sid) === child) starting.delete(sid)
+          starting.get(sid)?.delete(child)
+          if (starting.get(sid)?.size === 0) starting.delete(sid)
           clearTimeout(timer)
           const ack = noteId ? () => { try { child.stdin.write(JSON.stringify({ ack: noteId }) + "\n") } catch {} } : undefined
           resolve(text ? { text, ack } : undefined)
@@ -498,7 +507,7 @@ export default {
             .sort((a, b) => (b.time?.updated ?? 0) - (a.time?.updated ?? 0))
             .slice(0, REARM_MAX)
           for (const s of roots) {
-            if (disposed || gone.has(s.id) || tried.has(s.id) || children.has(s.id) || starting.has(s.id)) continue
+            if (disposed || gone.has(s.id) || tried.has(s.id) || children.has(s.id) || isStarting(s.id)) continue
             tried.add(s.id)
             void start(s.id, { hook_event_name: "SessionIdle", session_id: s.id })
           }
@@ -510,17 +519,93 @@ export default {
     const rearmTimer = setTimeout(() => void rearm().catch(() => {}), REARM_MS)
     rearmTimer.unref?.()
 
+    // The session key of the session that installed this plugin (issue
+    // #1106). Its result that offered the install went by before there was
+    // a plugin, and opencode keeps no result's _meta, so its beacon is gone:
+    // the session connects from the next result of the app's tools, whose
+    // beacon the core adds only for a call that names the session, by the
+    // session_key that result told the agent to pass. Where the agent
+    // leaves it out of a call to that server's tools, the plugin passes it,
+    // while the session has no link here: taken from the session's own
+    // results of that server's tools from the hour before this plugin was
+    // installed (installed_at, which no result after the install can
+    // change), and only if they hold one key (one quoted in what a tool
+    // showed, beside the session's own, passes nothing).
+    const KEY_LINE = /Pass session_key="(wsc_[A-Za-z0-9_-]{22,26})" to this app's tools/g
+    const KEY_WINDOW_MS = 3600000
+    const installedAt = () => {
+      try {
+        const file = join(process.env.WAKESHIFT_HOME || join(homedir(), ".wakeshift"), "opencode", "config.json")
+        const t = Date.parse(JSON.parse(readFileSync(file, "utf8")).installed_at)
+        return Number.isFinite(t) ? t : 0
+      } catch {
+        return 0
+      }
+    }
+    // The MCP servers' tool prefixes, as opencode names their tools
+    // (<server>_<tool>, each with every character but letters, digits, _
+    // and - turned into _); a tool two of them could name is neither's.
+    let prefixes
+    const serverOf = async (tool) => {
+      if (!prefixes) {
+        const r = await client.mcp?.status?.().catch(() => undefined)
+        if (!r?.data || typeof r.data !== "object") return undefined
+        prefixes = Object.keys(r.data).map((n) => n.replace(/[^a-zA-Z0-9_-]/g, "_") + "_")
+      }
+      const m = prefixes.filter((p) => tool.startsWith(p) && tool.length > p.length)
+      return m.length === 1 ? m[0] : undefined
+    }
+    const keys = new Map() // root session ID and server -> its key ("" for none)
+    const sessionKey = async (sid, server) => {
+      const k = sid + " " + server
+      if (keys.has(k)) return keys.get(k)
+      const at = installedAt()
+      if (!at) return ""
+      const r = await client.session.messages({ path: { id: sid } }).catch(() => undefined)
+      if (!Array.isArray(r?.data)) return "" // not kept: asked again at the next call
+      const found = new Set()
+      for (const m of r.data) {
+        for (const p of Array.isArray(m?.parts) ? m.parts : []) {
+          const st = p?.state
+          if (p?.type !== "tool" || typeof p.tool !== "string" || st?.status !== "completed" || typeof st.output !== "string") continue
+          const end = st.time?.end
+          if (typeof end !== "number" || !(end < at && end >= at - KEY_WINDOW_MS)) continue
+          if ((await serverOf(p.tool)) !== server) continue
+          for (const x of st.output.matchAll(KEY_LINE)) found.add(x[1])
+        }
+      }
+      const key = found.size === 1 ? [...found][0] : ""
+      keys.set(k, key)
+      return key
+    }
+
     return {
+      // The session key, where the agent left it out (sessionKey).
+      "tool.execute.before": async (input, output) => {
+        try {
+          const args = output?.args
+          if (!args || typeof args !== "object" || Array.isArray(args) || typeof input?.tool !== "string") return
+          if (typeof args.session_key === "string" && args.session_key.trim()) return
+          const server = await serverOf(input.tool)
+          if (!server) return
+          const sid = await root(input.sessionID)
+          if (children.has(sid) || isStarting(sid) || linked(sid)) return
+          const key = await sessionKey(sid, server)
+          if (key) args.session_key = key // opencode passes these same args to the tool
+        } catch {}
+      },
       "tool.execute.after": async (input, output) => {
         try {
           const beacon = output?._meta?.[KEY] // the MCP result's _meta; the model never sees it
           if (typeof beacon !== "string" || !Array.isArray(output.content)) return
           const sid = await root(input.sessionID)
           tried.add(sid)
-          // A fresh beacon replaces a pending retry, and one still starting.
+          // A fresh beacon replaces a pending retry, and a bridge still
+          // starting without one; one still redeeming another beacon (an
+          // earlier result of the same turn) carries on, so that beacon's
+          // session is merged into this one's rather than lost.
           settle(sid)
-          const pending = starting.get(sid)
-          if (pending) stop(pending)
+          for (const pending of [...(starting.get(sid) ?? [])]) if (!carrying.has(pending)) stop(pending)
           const note = await start(sid, { hook_event_name: "PostToolUse", session_id: sid, call_id: input.callID,
             tool_name: input.tool, tool_response: output })
           if (note) {
@@ -535,7 +620,7 @@ export default {
           if (event.type === "session.status" && p.status?.type === "busy") busy.add(p.sessionID)
           if (event.type === "session.idle" && p.sessionID) {
             busy.delete(p.sessionID)
-            if (!children.has(p.sessionID) && !starting.has(p.sessionID) && !tried.has(p.sessionID)) {
+            if (!children.has(p.sessionID) && !isStarting(p.sessionID) && !tried.has(p.sessionID)) {
               tried.add(p.sessionID) // after a restart: listen again if it was connected
               void start(p.sessionID, { hook_event_name: "SessionIdle", session_id: p.sessionID })
             }
@@ -552,7 +637,7 @@ export default {
             const sid = p.info?.id ?? p.sessionID
             gone.add(sid)
             settle(sid)
-            for (const c of [starting.get(sid), children.get(sid)]) if (c) stop(c)
+            for (const c of [...(starting.get(sid) ?? []), children.get(sid)]) if (c) stop(c)
             starting.delete(sid)
             children.delete(sid)
           }
@@ -564,7 +649,7 @@ export default {
         clearTimeout(rearmTimer)
         for (const r of retries.values()) if (r.timer) clearTimeout(r.timer)
         retries.clear()
-        for (const c of starting.values()) stop(c)
+        for (const set of starting.values()) for (const c of set) stop(c)
         starting.clear()
         for (const c of children.values()) stop(c)
         children.clear()

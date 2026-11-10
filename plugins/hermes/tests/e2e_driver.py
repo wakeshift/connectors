@@ -6,7 +6,10 @@ then {"run": text} for each turn it starts, as Hermes would run it. Each
 later line ({"result", "tool"}) is another tool result in the same
 conversation, answered with {"result"}; {"session_key_for": tool[,
 "session"]} is answered with {"session_key"}, what the tool_request
-middleware would fill in for that tool. Stops when stdin closes."""
+middleware would fill in for that tool. {"links": true} is answered with
+{"links": [the saved links' apps]}; {"restart": true} stops the plugin and
+starts it again on the same state, as a gateway restart does (resume), and
+is answered with {"resumed": n}. Stops when stdin closes."""
 import json
 import sys
 import tempfile
@@ -41,8 +44,15 @@ def run(session, text, batch):
     return True
 
 
-p = plugin.Wakeshift(state_dir=Path(tempfile.mkdtemp()), issuers=[first["issuer"]], wakers={"api_server": run},
-                     listener_args={"poll_wait": 1, "backoff_max": 1})
+state = Path(tempfile.mkdtemp())
+
+
+def start():
+    return plugin.Wakeshift(state_dir=state, issuers=[first["issuer"]], wakers={"api_server": run},
+                            listener_args={"poll_wait": 1, "backoff_max": 1})
+
+
+p = start()
 calls = [0]
 
 
@@ -69,6 +79,14 @@ for line in iter(sys.stdin.readline, ""):
     if not line.strip():
         continue
     d = json.loads(line)
+    if d.get("links"):
+        say({"links": sorted(x.get("app", "") for x in p._stored())})
+        continue
+    if d.get("restart"):
+        p.stop()
+        p = start()
+        say({"resumed": p.resume(("api_server",))})
+        continue
     if "session_key_for" in d:  # what the tool_request middleware would fill in for that tool
         say({"session_key": p.session_key_for(d.get("session", sid), d["session_key_for"])})
     else:

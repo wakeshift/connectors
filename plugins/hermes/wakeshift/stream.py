@@ -7,7 +7,9 @@ Server-Sent Events first (GET /v1/stream?format=sse), long poll as the fallback
 True); what isn't acknowledged comes back on reconnect (at least once).
 Deliveries already accepted are only acknowledged again, never handed over twice.
 Rotation (hub.rotate, a poll's rotate) moves to the next link; hub.closed and a
-401 end it. The token is never logged.
+401 end it, except an ack's 401 link_expired (a token that expired under a
+connection still open), which renews the link and acks again. The token is
+never logged.
 """
 from __future__ import annotations
 
@@ -108,6 +110,17 @@ def _gone(e: urllib.error.HTTPError) -> bool:
     return isinstance(err, dict) and err.get("code") == "link_revoked"
 
 
+def _code(e: urllib.error.HTTPError) -> str:
+    """The error code in a refusal's body ("" if it has none)."""
+    try:
+        body = json.loads(e.read(4096) or b"{}")
+    except Exception:
+        return ""
+    err = body.get("error") if isinstance(body, dict) else None
+    code = err.get("code") if isinstance(err, dict) else None
+    return code if isinstance(code, str) else ""
+
+
 def _http(method: str, url: str, token: str, body: Optional[dict] = None, timeout: float = 30,
           headers: Optional[dict] = None):
     data = json.dumps(body).encode() if body is not None else None
@@ -159,6 +172,7 @@ class Listener:
         self._spawn = spawn or (lambda target, name: threading.Thread(target=target, name=name, daemon=True))
         self._stop = threading.Event()
         self._lock = threading.Condition()
+        self._rotating = threading.Lock()  # one link transition at a time (_rotate)
         self._pending: dict[str, dict] = {}  # delivery ID -> delivery, in arrival order
         self._adopted: set = set()  # pending IDs from a replaced listener, not from this link
         self._threads: list = []
@@ -221,18 +235,24 @@ class Listener:
                 log.debug("wakeshift: forgetting the link failed", exc_info=True)
         self.stop()
 
-    def _rotate(self, link: str) -> None:
+    def _rotate(self, link: str, replacing: Optional[str] = None) -> None:
+        """Moves to link (and saves it); with replacing, only if that's still
+        the token in use (a renewal's successor never overwrites a rotation
+        the stream made meanwhile)."""
         try:
             origin, token = link_parts(link)
         except ValueError:
             return
         if origin != self.origin or check_stream_link(link, self.issuers):
             return  # only ever the same Wakeshift
-        self.token = token
-        try:
-            self.on_link(link)
-        except Exception:
-            log.debug("wakeshift: saving the rotated link failed", exc_info=True)
+        with self._rotating:
+            if replacing is not None and self.token != replacing:
+                return
+            self.token = token
+            try:
+                self.on_link(link)
+            except Exception:
+                log.debug("wakeshift: saving the rotated link failed", exc_info=True)
 
     # -- reading --
     def _read(self) -> None:
@@ -483,14 +503,50 @@ class Listener:
         return retry
 
     def _ack_once(self, ids: list) -> str:
+        token = self.token
         try:
-            with _http("POST", self.origin + "/v1/stream/ack", self.token, {"delivery_ids": ids}, timeout=5):
+            with _http("POST", self.origin + "/v1/stream/ack", token, {"delivery_ids": ids}, timeout=5):
                 return "ok"
         except urllib.error.HTTPError as e:
-            if _gone(e):
+            if e.code == 401 and _code(e) == "link_expired":
+                # The token expired under a connection that's still open (a
+                # Wakeshift that didn't hand over the next link in time): the
+                # link isn't gone, it's renewed, and the ack tried again.
+                self._renew(token)
+            elif _gone(e):
                 self._end("gone")
             elif e.code == 400:
                 return "bad"
             return "retry"
         except Exception:
             return "retry"
+
+    def _renew(self, token: str) -> None:
+        """Asks for the successor of an expired token (a poll that doesn't
+        wait, which Wakeshift answers with the next link in rotate, taking
+        nothing); a token that can't be renewed is gone. Only if the token is
+        still the one in use: one the stream rotated meanwhile is acked with
+        the new one, and a poll on that would take the stream."""
+        if token != self.token or self.stopped:
+            return
+        try:
+            resp = _http("GET", self.origin + "/v1/stream/poll?wait=0ms", token, timeout=10)
+        except urllib.error.HTTPError as e:
+            # Gone only if the stream didn't move to a newer link meanwhile
+            # (which this one, no longer the latest, can't be renewed past).
+            if _gone(e) and token == self.token:
+                self._end("gone")
+            return
+        except Exception:
+            return
+        with resp:
+            try:
+                out = json.loads(resp.read(8 << 20) or b"{}")
+            except ValueError:
+                return
+        rot = out.get("rotate") if isinstance(out, dict) else None
+        if isinstance(rot, dict) and isinstance(rot.get("url"), str):
+            self._rotate(rot["url"], replacing=token)
+        ds = [d for d in (out.get("deliveries") or []) if isinstance(d, dict) and isinstance(d.get("delivery_id"), str)]
+        if ds and not self.stopped:
+            self._add(ds)

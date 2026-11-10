@@ -53,11 +53,22 @@
 # download, no lock, no connector run, nothing on stdout or stderr, and a
 # conversation's link and a listener already running are left as they are.
 # The connector's own hook command checks it too (internal/connectcli).
+#
+# That variable reaches only hooks the harness runs in the environment it
+# was started with. Codex runs its threads' hooks in its app-server daemon,
+# which outlives the `codex` that started it, so the off switch that works
+# everywhere is a file: while ~/.wakeshift/disabled exists (`wakeshift
+# disable` makes it, `wakeshift enable` removes it), the launcher exits 0
+# just the same. A switch it can't see (an unreadable ~/.wakeshift) doesn't
+# stop it, but the connector it runs counts one it can't check as on.
 set -u
 
 case "${WAKESHIFT_DISABLED:-}" in
 1 | [Tt][Rr][Uu][Ee]) exit 0 ;;
 esac
+if [ -n "${WAKESHIFT_HOME:-}${HOME:-}" ] && [ -e "${WAKESHIFT_HOME:-${HOME:-}/.wakeshift}/disabled" ]; then
+	exit 0
+fi
 
 say() { printf 'wakeshift: %s\n' "$*" >&2; }
 

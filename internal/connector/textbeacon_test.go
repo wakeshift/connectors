@@ -167,7 +167,8 @@ func TestCopilotInstall(t *testing.T) {
 		}
 	}
 	if json.Unmarshal(b, &f) != nil || f.Version != 1 || f.Hooks["preMcpToolCall"][0].Bash != bin+" hook --harness copilot --event preMcpToolCall" ||
-		f.Hooks["agentStop"][0].TimeoutSec == 0 || len(f.Hooks) != 4 ||
+		f.Hooks["agentStop"][0].TimeoutSec == 0 || len(f.Hooks) != 5 ||
+		f.Hooks["sessionStart"][0].Bash != bin+" hook --harness copilot --event sessionStart" ||
 		f.Hooks["permissionRequest"][0].Bash != bin+" hook --harness copilot --event permissionRequest" || f.Hooks["permissionRequest"][0].Matcher != "bash" {
 		t.Fatalf("%s", b)
 	}
@@ -279,5 +280,60 @@ func TestCursorInstall(t *testing.T) {
 	spec.Install(bin, "https://app.wakeshift.ai", &out)
 	if _, err := os.Stat(path); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Copilot's sessionStart hook (the plugin's, and the installer's) adds the
+// mark for the model to pass as an app's harness argument: the plugin's
+// wording where the plugin's install left its issuer file, the hooks'
+// otherwise; nothing with no Wakeshift trusted (nothing to mark with), or
+// with no wait command here (the marked result has the agent run it).
+// Copilot 1.0.107 puts a sessionStart hook's top-level additionalContext
+// in the model's context before its first turn.
+func TestCopilotSessionStart(t *testing.T) {
+	ws := newFakeWakeshift(t)
+	const start = `{"sessionId":"1b47c0de-2f6e-4a8e-9c1d-6a1e2b3c4d5e","timestamp":1794273229340,"cwd":"/p","source":"new","initialPrompt":"hi"}`
+	in, err := copilotFormat{}.ParseEvent(CopilotSessionStartEvent, []byte(start))
+	if err != nil || in.Event != SessionContext || in.Conversation != "1b47c0de-2f6e-4a8e-9c1d-6a1e2b3c4d5e" {
+		t.Fatalf("parse: %+v %v", in, err)
+	}
+	for _, plugin := range []bool{true, false} {
+		h := specHook(t, "copilot", ws, newFakePoller())
+		h.Harness, h.WaitCommand = "copilot", WaitCommand("/Users/ada/.wakeshift/bin/wakeshift")
+		if plugin {
+			os.WriteFile(filepath.Join(h.Verifier.Settings.Dir, PluginIssuerFile), []byte(ws.URL+"\n"), 0o600)
+		}
+		var o struct {
+			AdditionalContext string `json:"additionalContext"`
+		}
+		out := runAs(h, CopilotSessionStartEvent, start)
+		if json.Unmarshal([]byte(out), &o) != nil {
+			t.Fatalf("plugin %v: %q", plugin, out)
+		}
+		what, mark := "Wakeshift's plugin is installed in this GitHub Copilot CLI session", "copilot; wakeshift-plugin="
+		if !plugin {
+			what = "Wakeshift's hooks are installed in this GitHub Copilot CLI session"
+		}
+		if !strings.HasPrefix(o.AdditionalContext, what) || !strings.Contains(o.AdditionalContext, `pass harness="`+mark) ||
+			strings.Contains(o.AdditionalContext, "install=hooks") == plugin || strings.Contains(o.AdditionalContext, ws.URL) {
+			t.Fatalf("plugin %v: %s", plugin, o.AdditionalContext)
+		}
+	}
+	// No Wakeshift trusted: no mark, nothing said.
+	h := specHook(t, "copilot", ws, newFakePoller())
+	h.Harness, h.WaitCommand = "copilot", WaitCommand("/Users/ada/.wakeshift/bin/wakeshift")
+	h.Verifier.Settings.Issuers = nil
+	if out := runAs(h, CopilotSessionStartEvent, start); out != "" {
+		t.Fatalf("no issuer: %s", out)
+	}
+	// No wait command (a binary under /tmp, say): no mark, so the result
+	// gives the shell loop, which wakes the conversation without it.
+	h = specHook(t, "copilot", ws, newFakePoller())
+	h.Harness, h.WaitCommand = "copilot", WaitCommand("/tmp/x/.wakeshift/bin/wakeshift")
+	if h.WaitCommand != "" {
+		t.Fatal("a wait command under /tmp")
+	}
+	if out := runAs(h, CopilotSessionStartEvent, start); out != "" {
+		t.Fatalf("no wait command: %s", out)
 	}
 }

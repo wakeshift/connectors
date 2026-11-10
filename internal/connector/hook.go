@@ -85,6 +85,14 @@ type SessionContextFormat interface {
 	SessionContext(mark string, hooks bool) (Output, bool)
 }
 
+// WaitMarkFormat is a SessionContextFormat whose marked result tells the
+// agent to run Wakeshift's wait command (Copilot CLI's): without one here
+// (WaitCommand "": a path no rule can hold), no mark, so the result is the
+// unmarked one, whose shell loop still wakes the conversation.
+type WaitMarkFormat interface {
+	MarkNeedsWait() bool
+}
+
 // StripFormat is a Format that can take a beacon out of the result the
 // model sees.
 type StripFormat interface {
@@ -333,6 +341,9 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout, stderr io.Write
 			out, ok = pf.PreCall(in)
 		}
 	case SessionContext:
+		if wf, is := h.Format.(WaitMarkFormat); is && wf.MarkNeedsWait() && h.WaitCommand == "" {
+			break
+		}
 		if sf, is := h.Format.(SessionContextFormat); is {
 			// The plugin's install leaves its issuer's file; the
 			// installer's hooks (in user settings) don't have one.
@@ -534,7 +545,9 @@ func (h *Hook) listen(ctx context.Context, in Input, wait time.Duration) (Output
 			return Output{}, false
 		}
 		if !h.installedSince(ctx, in) && !h.waitForLink(ctx, in.Conversation) {
-			return Output{}, false
+			// Still none: if a result promised the plugin connects this
+			// conversation, say it isn't connected (unconnected).
+			return h.unconnected(ctx, in)
 		}
 	}
 	text, ack := h.take(ctx, in.Conversation, wait, false)
@@ -543,6 +556,10 @@ func (h *Hook) listen(ctx context.Context, in Input, wait time.Duration) (Output
 	}
 	if h.Alive != nil && !h.Alive() {
 		h.why = "the harness quit before the messages could be handed over"
+		return Output{}, false // not acknowledged: Wakeshift hands it out again
+	}
+	if SwitchedOff() {
+		h.why = "Wakeshift was turned off on this machine (wakeshift disable)"
 		return Output{}, false // not acknowledged: Wakeshift hands it out again
 	}
 	h.why = "handed messages over"

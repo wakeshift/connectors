@@ -8,7 +8,7 @@
 import { spawn } from "node:child_process"
 import { createInterface } from "node:readline"
 import { createHash } from "node:crypto"
-import { closeSync, existsSync, mkdirSync, openSync } from "node:fs"
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
@@ -54,6 +54,83 @@ const linked = (sid) => {
   } catch {
     return false
   }
+}
+
+// The session key of the session that installed this extension (issue
+// #1106). Its result that offered the install went by before there was an
+// extension, so no beacon came with it (nothing named the session yet), and
+// it connects from the next result of the app's tools, whose beacon the core
+// adds only for a call that names the session: by the session_key that
+// result told the agent to pass, and the session's ID. Where the agent
+// leaves the key out, the extension passes it, while the session has no
+// link: taken from the session's own results of that server's tools from
+// the hour before the extension was installed (installed_at, which no
+// result after the install can change), and only if they hold one key (one
+// quoted in what a tool showed, beside the session's own, passes nothing).
+const KEY_LINE = /Pass session_key="(wsc_[A-Za-z0-9_-]{22,26})" to this app's tools/g
+const KEY_WINDOW_MS = 3600000
+const installedAt = () => {
+  try {
+    const t = Date.parse(JSON.parse(readFileSync(join(home(), "pi", "config.json"), "utf8")).installed_at)
+    return Number.isFinite(t) ? t : 0
+  } catch {
+    return 0
+  }
+}
+// pi's name for server's MCP tool tool (its createMcpToolName, as the
+// connector's PiToolName checks beacons): mcp__<server>__<tool> with every
+// character but ASCII letters, digits and _ turned into _, or, when that's
+// too long or taken, its first 55 characters, _ and 8 hex digits of
+// SHA-256(server NUL tool).
+const PI_MAX_TOOL = 64
+const piToolName = (server, tool, name) => {
+  const full = (MCP_PREFIX + server + "__" + tool).replace(/[^A-Za-z0-9_]/g, "_")
+  if (name === full && full.length <= PI_MAX_TOOL) return true
+  const hash = createHash("sha256").update(server + "\0" + tool).digest("hex").slice(0, 8)
+  return name === full.slice(0, PI_MAX_TOOL - hash.length - 1) + "_" + hash
+}
+// The MCP server whose tool name is (pi's own record of it: the tool's
+// namespace, whose one alias is the server's exact name), only if no other
+// server pi has could have a tool of that name: two servers whose names
+// pi's naming makes the same (a-b and a_b), or one whose name starts
+// another's (foo and foo__bar), leave the name to neither.
+const serverOfTool = (tools, name) => {
+  const serverOf = (t) => {
+    const ns = t?.namespace
+    const a = Array.isArray(ns?.aliases) && ns.aliases.length === 1 ? ns.aliases[0] : undefined
+    return typeof a === "string" && a && ns.name === MCP_PREFIX + a.replace(/-/g, "_") ? a : undefined
+  }
+  if (!Array.isArray(tools)) return undefined
+  const server = serverOf(tools.find((t) => t?.name === name))
+  if (!server) return undefined
+  const servers = new Set(tools.map(serverOf).filter(Boolean))
+  const could = (s) => {
+    const prefix = (MCP_PREFIX + s + "__").replace(/[^A-Za-z0-9_]/g, "_")
+    return name.startsWith(prefix) || name.startsWith(prefix.slice(0, PI_MAX_TOOL - 9))
+  }
+  const owners = [...servers].filter(could)
+  return owners.length === 1 && owners[0] === server ? server : undefined
+}
+// The key, from the session's results of the exact server the called tool
+// is (server, from serverOfTool): each result pi says came from that
+// server's tool (details), named as pi names it.
+const sessionKey = (entries, server) => {
+  const at = installedAt()
+  if (!at || !server || !Array.isArray(entries)) return ""
+  const keys = new Set()
+  for (const e of entries) {
+    const m = e && e.type === "message" ? e.message : undefined
+    const d = m?.details
+    if (m?.role !== "toolResult" || typeof m.toolName !== "string" || !d || d.server !== server || typeof d.tool !== "string") continue
+    if (!piToolName(d.server, d.tool, m.toolName)) continue
+    const t = typeof m.timestamp === "number" ? m.timestamp : Date.parse(e.timestamp)
+    if (!(t < at && t >= at - KEY_WINDOW_MS)) continue
+    for (const b of Array.isArray(m.content) ? m.content : []) {
+      if (b?.type !== "text" || typeof b.text !== "string") continue
+      for (const x of b.text.matchAll(KEY_LINE)) keys.add(x[1])
+    }
+  }
+  return keys.size === 1 ? [...keys][0] : ""
 }
 
 // The connector's errors, for the user to look at.
@@ -108,7 +185,12 @@ export default function wakeshift(pi) {
   let ctx // the session's context, from session_start
   let sid = ""
   let child // the session's bridge, once it's connected
-  let starting // a bridge still starting
+  // Bridges still starting. More than one only for beacons: two results in
+  // one turn each carry one, and each bridge redeems its own (the connector
+  // takes one redeem at a time, the second handing back the first's link),
+  // so neither is stopped for the other.
+  const starting = new Set()
+  const carrying = new WeakSet() // bridges started with a beacon
   let disposed = false
   let retry // { timer, delay, input }
   const stopped = new WeakSet() // bridges this extension ended on purpose
@@ -134,7 +216,7 @@ export default function wakeshift(pi) {
     retry.delay = Math.min(retry.delay * 2, RETRY_MAX_MS)
     retry.timer = setTimeout(() => {
       retry.timer = undefined
-      if (!child && !starting && !disposed) void start(retry.input)
+      if (!child && !starting.size && !disposed) void start(retry.input)
     }, wait)
     retry.timer.unref?.()
   }
@@ -177,13 +259,14 @@ export default function wakeshift(pi) {
       } finally {
         if (typeof errs === "number") { try { closeSync(errs) } catch {} }
       }
-      starting = c
+      starting.add(c)
+      if (input?.hook_event_name === "PostToolUse") carrying.add(c)
       let first = true
       let connected = false
       const done = (text, noteId) => {
         if (!first) return
         first = false
-        if (starting === c) starting = undefined
+        starting.delete(c)
         clearTimeout(timer)
         const ack = noteId ? () => { try { c.stdin.write(JSON.stringify({ ack: noteId }) + "\n") } catch {} } : undefined
         resolve(text ? { text, ack } : undefined)
@@ -259,27 +342,43 @@ export default function wakeshift(pi) {
     settle()
     if (nudged) clearTimeout(nudged)
     nudged = undefined
-    stop(starting)
+    for (const c of starting) stop(c)
     stop(child)
-    starting = child = undefined
+    starting.clear()
+    child = undefined
     queue.length = 0
     inflight = []
   })
 
   // The app's tools that take Wakeshift's arguments learn which program and
   // session the call is from: harness "pi", and conversation_id this session's
-  // ID, whatever the model passed. Only tools whose schema declares both.
+  // ID, whatever the model passed. Tools whose schema declares both; and,
+  // while this session has no link, the app's tools that declare only
+  // session_key (those that subscribe to nothing, which take all three),
+  // with the session's key where the agent left it out (sessionKey), so
+  // their result can connect the session that installed the extension.
   pi.on("tool_call", async (event, c) => {
     if (!isActive()) return
     try {
       if (typeof event.toolName !== "string" || !event.toolName.startsWith(MCP_PREFIX) || !event.input || typeof event.input !== "object") return
       const id = c?.sessionManager?.getSessionId?.() || sid
       if (!id) return
-      const tool = pi.getAllTools().find((t) => t.name === event.toolName)
+      const tools = pi.getAllTools()
+      const tool = tools.find((t) => t.name === event.toolName)
       const props = tool?.parameters?.properties
-      if (!props || typeof props !== "object" || !("harness" in props) || !("conversation_id" in props)) return
+      if (!props || typeof props !== "object") return
+      const both = "harness" in props && "conversation_id" in props
+      const unlinked = "session_key" in props && !child && !starting.size && !linked(id)
+      if (!both && !unlinked) return
       event.input.harness = "pi"
       event.input.conversation_id = id
+      const passed = event.input.session_key
+      if (unlinked && !(typeof passed === "string" && passed.trim())) {
+        let entries
+        try { entries = (c?.sessionManager ?? ctx?.sessionManager)?.getBranch?.() } catch {}
+        const key = sessionKey(entries, serverOfTool(tools, event.toolName))
+        if (key) event.input.session_key = key
+      }
     } catch {}
   })
 
@@ -308,9 +407,12 @@ export default function wakeshift(pi) {
       const d = event.details
       const mode = c?.mode ?? ctx?.mode
       if (isActive() && id && mode !== "print" && mode !== "json" && event.toolName?.startsWith(MCP_PREFIX) && d && typeof d.server === "string" && typeof d.tool === "string" && trailer(raw ?? event.content)) {
-        // A fresh beacon replaces a pending retry, and a bridge still starting.
+        // A fresh beacon replaces a pending retry, and a bridge still
+        // starting without one; one still redeeming another beacon (an
+        // earlier result of the same turn) carries on, so that beacon's
+        // session is merged into this one's rather than lost.
         settle()
-        if (starting) stop(starting)
+        for (const pending of [...starting]) if (!carrying.has(pending)) stop(pending)
         const note = await start({ hook_event_name: "PostToolUse", session_id: id, call_id: event.toolCallId, tool_name: event.toolName,
           server: d.server, mcp_tool: d.tool, tool_response: { content: raw ?? event.content } })
         if (note) {

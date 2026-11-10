@@ -118,3 +118,27 @@ func TestOpenClawPackage(t *testing.T) {
 		t.Errorf("uninstall note: %s", u)
 	}
 }
+
+// What the agent tells the user after OpenClaw's install is one answer for
+// both of OpenClaw's runtimes (#1125): no gateway restart (a plugin
+// installed from inside a turn hooks the Codex turns after it, OpenClaw
+// 2026.11.2), and that the conversation connects the next time the agent
+// uses the app's tools, not "with my next turn", which left an agent
+// waiting a turn without a call and guessing at a restart.
+func TestOpenClawTrustNote(t *testing.T) {
+	h, _ := Get("openclaw")
+	n := TrustNote(h)
+	for _, want := range []string{"no gateway restart", "whether OpenClaw runs my turns itself or in Codex", "the next time I use this app's tools", "reconnects by itself whenever the gateway starts"} {
+		if !strings.Contains(n, want) {
+			t.Errorf("missing %q: %s", want, n)
+		}
+	}
+	for _, not := range []string{"my next turn", "restart the gateway", "restart is needed"} {
+		if strings.Contains(n, not) {
+			t.Errorf("says %q: %s", not, n)
+		}
+	}
+	if note := InstallNote(h, "https://x.test"); !strings.Contains(note, "Then tell them: "+n) {
+		t.Fatalf("the install note doesn't carry it: %s", note)
+	}
+}

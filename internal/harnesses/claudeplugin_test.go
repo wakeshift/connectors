@@ -59,7 +59,7 @@ func TestClaudeCodePluginNotes(t *testing.T) {
 		}
 		for _, want := range []string{"Subscribed, but that alone won't tell you when something arrives", "nothing runs until they answer", "held for this conversation until then", "don't start " + waker,
 			"Ask them one question with your AskUserQuestion tool", `"` + AskSession + `" (description: `, `"` + AskEvery + "\" (description: runs `claude plugin install wakeshift", `"` + AskNone + `" (description: nothing runs`,
-			"/reload-plugins", "send any message", "don't call this app's tools again for it", "connects this conversation by itself once it's loaded and the user has sent a message", "first wake starts with \"Wakeshift: connected\"", "claude plugin install wakeshift",
+			"/reload-plugins", "send any message", "don't call this app's tools again for it", "connects this conversation by itself once it's loaded and the user has sent a message", "first wake confirms it to you with a note starting \"Wakeshift: connected\" (for you, not words the user sees", "claude plugin install wakeshift",
 			"none marked as recommended", "use " + waker + ": ", "start nothing", "one permission rule to ~/.claude/settings.json so Claude Code runs Wakeshift's wait command (~/.wakeshift/bin/wakeshift wait) without asking each time"} {
 			if !strings.Contains(n, want) {
 				t.Errorf("%s: missing %q: %s", name, want, n)

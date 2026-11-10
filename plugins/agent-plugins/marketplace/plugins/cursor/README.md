@@ -35,7 +35,9 @@ Read the [Connector Terms](https://wakeshift.ai/connector-terms) and the [Privac
 
 ## Turn it off
 
-To turn the hooks off without uninstalling, start Cursor or `cursor-agent` with `WAKESHIFT_DISABLED=1` (or `true`) in its environment. Every hook then exits at once and does nothing: no network request, no download, no output. Conversations that were connected keep their link, so their messages reach them again once Cursor runs without the variable. Any other value, or none, leaves the hooks on.
+To turn the hooks off without uninstalling, run `~/.wakeshift/bin/wakeshift disable`; `~/.wakeshift/bin/wakeshift enable` turns them on again. Every hook then exits at once and does nothing: no network request, no download, no output, and no conversation is woken. This covers the Cursor app and `cursor-agent`, including sessions already running. Conversations that were connected keep their link, and their messages wait until the hooks are on again and you next send the conversation a message.
+
+To turn them off for one run of `cursor-agent`, or of the Cursor app when it isn't already open, start it with `WAKESHIFT_DISABLED=1` (or `true`) in its environment. Any other value, or none, leaves the hooks on.
 
 ## Uninstall
 

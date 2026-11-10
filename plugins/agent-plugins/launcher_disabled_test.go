@@ -66,6 +66,10 @@ func launcherCalls(t *testing.T, hooksJSON string) [][]string {
 // and either prints nothing at all and exits 0. Unset, 0 or false, the same
 // hooks fetch (a first run) and run the connector (a warm one), so this
 // test fails if the check goes.
+//
+// The switch file (~/.wakeshift/disabled, what `wakeshift disable` makes)
+// does the same, for harnesses that run hooks where the variable never
+// reaches (Codex's app-server daemon): "file" below.
 func TestLauncherDisabled(t *testing.T) {
 	name := platform(t)
 	const version = "2026.11.02.1912+abc1234"
@@ -109,9 +113,12 @@ func TestLauncherDisabled(t *testing.T) {
 		}
 		for root, hooks := range plugins {
 			for _, args := range launcherCalls(t, hooks) {
-				for _, v := range []string{"1", "true", "TRUE", "", "0", "false"} {
-					off := v == "1" || strings.EqualFold(v, "true")
+				for _, v := range []string{"1", "true", "TRUE", "", "0", "false", "file"} {
+					off := v == "1" || strings.EqualFold(v, "true") || v == "file"
 					what := filepath.Base(root) + " " + strings.Join(args, " ") + " WAKESHIFT_DISABLED=" + v
+					if v == "file" {
+						what = filepath.Base(root) + " " + strings.Join(args, " ") + " with the switch file"
+					}
 					for _, warm := range []bool{false, true} {
 						home := filepath.Join(t.TempDir(), ".wakeshift")
 						l := &lane{t: t, shell: shell, plugin: root, home: home, log: filepath.Join(t.TempDir(), "log")}
@@ -122,7 +129,16 @@ func TestLauncherDisabled(t *testing.T) {
 							}
 							os.Remove(l.log)
 						}
-						l.env = append(l.env, "WAKESHIFT_DISABLED="+v)
+						if v == "file" {
+							if err := os.MkdirAll(home, 0o700); err != nil {
+								t.Fatal(err)
+							}
+							if err := os.WriteFile(filepath.Join(home, "disabled"), nil, 0o600); err != nil {
+								t.Fatal(err)
+							}
+						} else {
+							l.env = append(l.env, "WAKESHIFT_DISABLED="+v)
+						}
 						r.hits.Store(0)
 						out, errOut := l.run(`{"hook":1}`, args...)
 						ran := l.logged() != ""
@@ -146,7 +162,11 @@ func TestLauncherDisabled(t *testing.T) {
 							t.Fatalf("%s (warm %v): ran the connector: %s", what, warm, l.logged())
 						}
 						if !warm {
-							if _, err := os.Stat(home); err == nil {
+							if v == "file" {
+								if ents, _ := os.ReadDir(home); len(ents) != 1 {
+									t.Fatalf("%s: made something in %s: %v", what, home, ents)
+								}
+							} else if _, err := os.Stat(home); err == nil {
 								t.Fatalf("%s: made %s", what, home)
 							}
 						}

@@ -263,6 +263,10 @@ type Harness struct {
 	// Run, if set, is how the agent runs the install command in this
 	// harness (Codex's sandbox blocks it unless it's escalated).
 	Run string
+	// Credit: the install offer tells the agent to say the install is
+	// Wakeshift's, not the app's (creditNote), where an agent credited the
+	// app with it.
+	Credit bool
 	// AskTool, if set, is the harness's tool for asking the user to pick
 	// an option (Claude Code's AskUserQuestion): the agent asks with it,
 	// and runs the install only if the user picks yes.
@@ -370,6 +374,9 @@ var all = []Harness{
 		ID: "codex", Name: "Codex", Claim: "codex", Aliases: []string{"codex-cli", "openai-codex"}, Clients: []string{"codex-mcp-client"}, UserAgents: []string{"codex-mcp-client"},
 		Wake: Connector, Ack: "at least once, acknowledged when the turn starts", Binding: ByConversation, Carrier: Meta,
 		ConversationMeta: "x-codex-turn-metadata.thread_id", Fingerprint: "x-codex-turn-metadata.thread_id", Installable: true,
+		// QA pass, November 9, 2026: Codex's agent told the user "The
+		// Webhooks tool requires this one-time setup".
+		Credit: true,
 		// Codex 0.164 and later ask to trust a plugin's hooks again whenever
 		// any file in it changes, so the marketplace re-pins Codex's plugin
 		// only when it must (plugins/agent-plugins).
@@ -379,11 +386,11 @@ var all = []Harness{
 			Remove:      "codex plugin remove wakeshift@wakeshift",
 			RefSep:      "@",
 			Changes:     "installs Wakeshift's plugin for Codex with Codex's own plugin command, from github.com/wakeshift/agent-plugins; its hooks run Wakeshift's connector, which the plugin downloads into ~/.wakeshift/bin and checks against the SHA-256 it carries",
-			Run:         "It writes ~/.codex/config.toml and downloads the plugin, which the sandbox blocks: run it with escalated permissions, so the user approves it.",
+			Run:         "It writes ~/.codex/config.toml and downloads the plugin, which the sandbox blocks: run it with escalated permissions, so the user approves it. If the sandbox blocks it anyway, ask to run it outside the sandbox rather than only printing the command: the user approves that, as for any escalated command.",
 			AfterUpdate: "Quit Codex (/quit) and start it again in this conversation with `codex resume --last`: Codex asks to trust the plugin's hooks again after each update, so choose \"Trust all and continue\".",
 		},
 		Changes: "adds Wakeshift's hook to ~/.codex/hooks.json, keeping a backup",
-		Run:     "It needs network access and writes ~/.wakeshift/bin and ~/.codex/hooks.json, which the sandbox blocks: run it with escalated permissions, so the user approves it.",
+		Run:     "It needs network access and writes ~/.wakeshift/bin and ~/.codex/hooks.json, which the sandbox blocks: run it with escalated permissions, so the user approves it. If the sandbox blocks it anyway, ask to run it outside the sandbox rather than only printing the command: the user approves that, as for any escalated command.",
 		Trust:   "Quit Codex (/quit), start it again in this conversation with `codex resume --last`, and trust the Wakeshift hooks when Codex asks (\"Trust all and continue\").",
 		// Codex runs its SessionStart hook when the resumed thread's first turn
 		// starts, not when the window opens (wakebench S8, October 28: the
@@ -543,7 +550,7 @@ var all = []Harness{
 		PackageChanges: "installs Wakeshift's plugin for opencode, the npm package @wakeshift/opencode, with opencode's own plugin command: opencode adds it to the plugin list in ~/.config/opencode/opencode.json, keeping their other settings, and downloads it with Wakeshift's connector for this computer (the plugin also removes ~/.config/opencode/plugins/wakeshift.ts, if an earlier install wrote it)",
 		Changes:        "writes one plugin file, ~/.config/opencode/plugins/wakeshift.ts",
 		Trust:          "Quit and restart opencode to load the Wakeshift plugin (opencode doesn't ask to approve plugins).",
-		Resume:         "Then reopen this session (opencode --continue). Once it's connected, opencode reconnects it by itself whenever it starts.",
+		Resume:         "Then reopen this session (opencode --continue) and ask me something that uses the app, such as checking for anything new. Once it's connected, opencode reconnects it by itself whenever it starts.",
 		AfterUpdate:    "Quit and restart opencode so it loads the new version.",
 		When:           "as soon as they arrive, even while the session is idle, as long as opencode is open (not in opencode run)",
 		NoteAt:         "right after this result",
@@ -583,7 +590,7 @@ var all = []Harness{
 		Trust:          "There's nothing to approve in pi: type /reload in pi (or restart it with pi --continue) so it loads Wakeshift's extension.",
 		// Its connected sessions reconnect by themselves (the extension, at
 		// session_start), so a later restart needs nothing (Restart "").
-		Resume:      "Once it has connected this conversation, it reconnects by itself whenever pi starts or reloads.",
+		Resume:      "Then ask me something that uses the app, such as checking for anything new. Once it has connected this conversation, it reconnects by itself whenever pi starts or reloads.",
 		AfterUpdate: "There's nothing to approve: type /reload in pi (or restart it with pi --continue) so it loads the new version.",
 		When:        "as soon as they arrive, even while the session is idle, or once its turn ends if it's busy, as long as pi is open (not in pi -p)",
 		NoteAt:      "right after this result",
@@ -641,12 +648,19 @@ var all = []Harness{
 		// One question, not two: a gateway in Docker usually listens beyond
 		// this computer, and the installer would otherwise stop to ask about
 		// it (wakebench, October 26, 2026: 5 of 5 asked twice; with this, 0).
-		AskAlso:     "if the OpenClaw gateway listens beyond this computer (in Docker it usually does), OpenClaw's hooks endpoint shares that listener, so it's reachable there too, guarded by the plugin's token; a firewall or proxy rule that blocks /hooks/ from other machines keeps it local.",
-		AgreeEnv:    "WAKESHIFT_OPENCLAW_NETWORK_HOOKS=1",
-		Agree:       "openclaw config set plugins.entries.wakeshift.config.allowNetworkHooks true --strict-json",
-		Run:         "Run it yourself with your exec tool, on the machine (or in the container) where the OpenClaw gateway runs.",
-		Trust:       "There's nothing to approve in OpenClaw, and no restart.",
-		Resume:      "The plugin starts with my next turn. Once it's connected, it reconnects by itself whenever the gateway starts.",
+		AskAlso:  "if the OpenClaw gateway listens beyond this computer (in Docker it usually does), OpenClaw's hooks endpoint shares that listener, so it's reachable there too, guarded by the plugin's token; a firewall or proxy rule that blocks /hooks/ from other machines keeps it local.",
+		AgreeEnv: "WAKESHIFT_OPENCLAW_NETWORK_HOOKS=1",
+		Agree:    "openclaw config set plugins.entries.wakeshift.config.allowNetworkHooks true --strict-json",
+		Run:      "Run it yourself with your exec tool, on the machine (or in the container) where the OpenClaw gateway runs.",
+		// The same whether OpenClaw runs the turns itself or in Codex's
+		// app-server: a hot-installed plugin hooks the Codex turns that
+		// follow too (OpenClaw 2026.11.2 refreshes a warm thread's native
+		// hooks; #1125). It connects only from a result of the app's tools,
+		// so the note says when, rather than "my next turn": an agent told
+		// that waited a turn with no call, saw nothing connect, and guessed
+		// at a gateway restart.
+		Trust:       "There's nothing to approve in OpenClaw, and no gateway restart, whether OpenClaw runs my turns itself or in Codex: the plugin is live as soon as the install finishes.",
+		Resume:      "It connects this conversation the next time I use this app's tools; messages that arrive before then wait, and reach me once it's connected. After that, it reconnects by itself whenever the gateway starts.",
 		AfterUpdate: "There's nothing to approve again, and no restart. The new plugin starts with your next turn, so ask them to send any reply first.",
 		When:        "as soon as they arrive, even while the session is idle, as long as the OpenClaw gateway runs",
 		NoteAt:      "right after this result (or, when OpenClaw runs the turn in Codex, with the result of your next call to this app's tools)",
@@ -685,8 +699,8 @@ var all = []Harness{
 			"To run it yourself, first check `command -v hermes`: if your terminal doesn't have it (Hermes's Docker image doesn't put it on the PATH), run each `hermes` in the command as `\"$HERMES_PYTHON\" -m hermes_cli.main` instead (Hermes sets HERMES_PYTHON for its tools). Whatever you ran, every command you give the user starts with `hermes`, so `hermes chat --continue` rather than that form. " +
 			"Hermes may hold the command for approval, and in a chat through Hermes's API server nobody can approve it. If Hermes blocks the command, running it fails, or you can't run commands, tell them so in your reply and give them the command to run there, starting with `hermes`: never end your reply without it. " +
 			"If its output warns \"custom (unreviewed) source\", tell them in one line: Wakeshift's plugin isn't in Hermes's catalog yet, so Hermes installed it from Wakeshift's public repository, github.com/wakeshift/hermes-plugin. " +
-			"If its output says \"Gateway reloaded plugins\" and that the plugin is active in the running gateway now, Hermes loaded it already: skip the restart and resume below, and just ask them to send any message.",
-		Trust:       "There's nothing to approve in Hermes after the install, but Hermes loads plugins only when a chat starts or is resumed, so Wakeshift can't wake this chat until they resume it: through Hermes's gateway or API server, restart the gateway and keep sending to this session as before; in `hermes chat`, exit and run `hermes chat --continue`, or `hermes chat --tui --continue` to resume it in Hermes's TUI, which shows each woken turn as it runs (the classic `hermes chat` runs a woken turn without showing it, until Hermes adds that). A new chat works too. If the plugin isn't enabled, first run `hermes plugins enable wakeshift` where Hermes runs.",
+			"If its output says \"Gateway reloaded plugins\" and that the plugin is active in the running gateway now, the gateway loaded it already: for a chat through the gateway (Hermes's API server, or a Telegram or Discord direct message), skip the restart and resume below, and just ask them to send any message. That reload doesn't load it into a running `hermes chat`: if this chat is in Hermes's CLI or TUI, still give them the resume below, then a message.",
+		Trust:       "There's nothing to approve in Hermes after the install, but Hermes loads plugins only when a chat starts or is resumed, so Wakeshift can't wake this chat until they resume it: through Hermes's gateway or API server, restart the gateway and keep sending to this session as before; in the classic `hermes chat`, exit and resume this chat with the command Hermes prints as it exits (`hermes --resume <session>`) or `hermes chat --continue`; in Hermes's TUI, exit and run `hermes chat --tui --continue`, since the TUI shows each woken turn as it runs (the classic `hermes chat` runs a woken turn without showing it, until Hermes adds that). A new chat works too. If the plugin isn't enabled, first run `hermes plugins enable wakeshift` where Hermes runs.",
 		Restart:     "After a later restart of hermes chat, send any message once you've resumed it, so it reconnects (conversations through Hermes's API server reconnect by themselves; after a gateway restart, a Telegram or Discord direct message reconnects with its next message).",
 		AfterUpdate: "There's nothing to approve again, but Hermes loads plugins only when a chat starts or is resumed: ask them to resume this chat (exit and run `hermes chat --continue`, or restart Hermes's gateway) or start a new one, so it loads the new plugin.",
 		When:        "as soon as they arrive, even while it's idle, as long as Hermes is running (conversations through Hermes's API server, CLI or TUI, and Telegram and Discord direct messages with its bot)",
@@ -1357,9 +1371,9 @@ func installNote(h Harness, install string) string {
 	}
 	install = agreed(h, install)
 	ask := unwoken + " Ask the user now whether to install " + Kit(h) + " (it " + changes(h) + "), so new messages reach this conversation " + h.When + ". " +
-		askAlso(h) + askShape(h, install) + " " + declined + " "
+		creditNote(h) + askAlso(h) + askShape(h, install) + " " + declined + " "
 	if h.AskTool != "" {
-		ask = unwoken + " " + Kit(h) + " " + delivers(h) + " new messages to this conversation " + h.When + ". " + askWith(h, install) + " "
+		ask = unwoken + " " + Kit(h) + " " + delivers(h) + " new messages to this conversation " + h.When + ". " + creditNote(h) + askWith(h, install) + " "
 	}
 	if h.Run != "" {
 		ask += h.Run + " "
@@ -1418,6 +1432,15 @@ func askShape(h Harness, install string) string {
 		"Only if they say yes, run exactly that command right away: it's complete as given, so don't read docs or search for it first."
 }
 
+// creditNote is who the install is from, for a harness with Credit: Wakeshift,
+// not the app that delivers through it ("" for others).
+func creditNote(h Harness) string {
+	if !h.Credit {
+		return ""
+	}
+	return "The install is Wakeshift's, not this app's: when you ask, say it's for Wakeshift, the service this app sends its notifications through, and don't call it this app's setup. "
+}
+
 // declined is what the agent tells the user after a no where nothing else
 // wakes the conversation (wakebench, November 2, 2026: opencode's agent
 // said it would "keep polling", which nothing does).
@@ -1444,6 +1467,32 @@ func CantWake(name string) string {
 	}
 	return "Wakeshift can't wake " + who + ", so nothing will notify you here when something arrives."
 }
+
+// ConnectorProxyClients are the MCP client names Anthropic's servers state
+// when they call an app the user added as a claude.ai connector, for
+// claude.ai's chats, Cowork, and Claude Code (in a terminal, or the Claude
+// desktop app's Code tab), whose claude.ai connectors go through Anthropic's
+// MCP proxy. A call that came that way isn't one Wakeshift's plugin for
+// Claude Code can connect: on November 9, 2026, a marked watch through the
+// proxy, from the desktop app's Code tab, reached its PostToolUse hook with
+// no beacon (the transcript's mcpMeta held only the server's serverInfo),
+// so the conversation was promised wakes and got none.
+var ConnectorProxyClients = []string{"claude-ai"}
+
+// ViaConnectorProxy reports whether a call's MCP client name (initialize's
+// clientInfo.name) is one Anthropic's connector proxy states
+// (ConnectorProxyClients). Like every client name it's self-asserted: it
+// only takes the plugin's path away from a call, never grants one.
+func ViaConnectorProxy(client string) bool {
+	return containsFold(ConnectorProxyClients, strings.TrimSpace(client))
+}
+
+// UnconnectableNote starts a Claude Code subscribing result whose call
+// came by a route Wakeshift's plugin can't connect (a claude.ai connector,
+// or a call that doesn't name its tool call, which the plugin's beacon is
+// bound to): the agent may have been told when the session started that the
+// plugin is installed, and would otherwise wait for it.
+const UnconnectableNote = "Subscribed. This app reaches this conversation by a route Wakeshift's plugin for Claude Code can't connect (a claude.ai connector, for one), so only the Monitor below wakes it, whether or not the plugin is installed."
 
 // RetiredNote is what an agent in a retired harness (one with ReplacedBy)
 // is told: it can't be woken, and what replaced it ("" for any other).
@@ -1530,7 +1579,7 @@ const (
 // session only, with nothing installed.
 func sessionOnly(tasks bool) string {
 	if tasks {
-		return "waits on this app's own " + WaitTool + " tool for this session only; nothing is installed"
+		return "listens for new messages through this app, for this session only; nothing is installed"
 	}
 	return "starts a background listener (the Monitor) for this session only; nothing is installed"
 }
@@ -1584,7 +1633,16 @@ func selfConnects(h Harness) string {
 	if reloads(h) {
 		when = "once it's loaded and the user has sent a message"
 	}
-	return Kit(h) + " then " + connects(h) + " this conversation by " + pick(h, "itself", "themselves") + " " + when + ", and " + pick(h, "its", "their") + " first wake starts with \"" + Connected + "\"."
+	return Kit(h) + " then " + connects(h) + " this conversation by " + pick(h, "itself", "themselves") + " " + when + ", and " + firstWake(h)
+}
+
+// firstWake is what the first wake after the install tells the agent: a
+// note for it, not the words the user sees (QA pass, November 9, 2026: the
+// agent told the user their first notification "will start with
+// 'Wakeshift: connected'", while Claude Code showed them "Woken by
+// Wakeshift").
+func firstWake(h Harness) string {
+	return pick(h, "its", "their") + " first wake confirms it to you with a note starting \"" + Connected + "\" (for you, not words the user sees: don't quote it to them)."
 }
 
 // PluginConnectingNote is what such a conversation is told on a result
@@ -1614,32 +1672,62 @@ func PluginPendingNote(h Harness, base string, tasks bool, again string) string 
 		loaded = " and the user has loaded it (/reload-plugins, or a restart)"
 		notYet = " If you installed it but they haven't loaded it yet, don't start " + w + " either: ask them again to, and to send any message after."
 	}
-	return "If you installed " + Kit(h) + " in this conversation" + loaded + ", don't start " + w + ": " + itThey(h) + " " + connects(h) + " this conversation by " + pick(h, "itself", "themselves") + ", and " + pick(h, "its", "their") + " first wake starts with \"" + Connected + "\"." +
+	return "If you installed " + Kit(h) + " in this conversation" + loaded + ", don't start " + w + ": " + itThey(h) + " " + connects(h) + " this conversation by " + pick(h, "itself", "themselves") + ", and " + firstWake(h) +
 		notYet + " If the user chose not to be notified (\"" + AskNone + "\"), start nothing. Otherwise (they chose this session only, or " + itThey(h) + " " + pick(h, "isn't", "aren't") + " installed): " + again
 }
 
 // PluginReadyNote is what subscribing tells a conversation whose call
 // Wakeshift's plugin marked (internal/pluginmark: it's installed, and trusts
 // this Wakeshift) before its hooks have connected it: they connect it from
-// this result when the turn ends (Claude Code), or right after it (Codex), so there's nothing to ask, install or
-// start (no Monitor: in manual mode it would ask the user to approve it).
+// this result when the turn ends (Claude Code), or right after it (Codex,
+// Copilot CLI), so there's nothing to ask or install, and nothing to start
+// (no Monitor: in manual mode it would ask the user to approve it) but, for
+// Copilot CLI, the plugin's own wait command, which it approves.
 // hooks: the mark is from the hooks Wakeshift's installer wrote, not the
 // plugin (pluginmark.Mark.Hooks), which connect it the same way.
 func PluginReadyNote(h Harness, app string, hooks bool) string {
-	what, it := "Wakeshift's plugin for "+h.Name+" is", "it connects"
+	it := "it connects"
 	if hooks {
-		what, it = "Wakeshift's hooks for "+h.Name+" are", "they connect"
+		it = "they connect"
+	}
+	if h.ID == "copilot" {
+		// Copilot CLI: its postToolUse hook connects the conversation from
+		// this result's beacon and, in its note right after it, gives
+		// Wakeshift's wait command (connector.NoteWaitStopped), which its
+		// permissionRequest hook approves. That command, in the
+		// background, is what wakes an idle session: no hook can.
+		return PluginReadyLead(h, hooks) + ", so " + app + "'s notifications reach this conversation by themselves, even while you're idle: " +
+			it + " this conversation from this result, and a note starting \"" + Connected + "\" follows it, with Wakeshift's wait command. " +
+			"Run that command as soon as the note gives it, " + copilotRun + ". " +
+			"It waits until messages arrive, prints them, confirms them and exits, and Copilot tells you when it has finished, which wakes you. " +
+			waitApproval(h) + " Don't wait for it or call read_bash while it runs: end your turn. " +
+			lineFormat(app) + " " +
+			`When Copilot tells you the shell finished, read its output with read_bash (shellId "` + CopilotShell + `"), act on the messages first, then run the same command again the same way. ` +
+			`If its output has a {"type":"hub.closed"} line, don't run it again: do what its note says. ` +
+			"Run nothing else to be notified: don't install anything, and don't ask the user how to be notified; just tell them you'll let them know."
 	}
 	if h.Wake == Connector {
 		// Codex: its PostToolUse hook connects the thread from this
 		// result's beacon right away, and says so in a note after it.
-		return "Subscribed. " + what + " installed here, so " + app + "'s notifications reach this conversation by themselves, even while you're idle: " +
+		return PluginReadyLead(h, hooks) + ", so " + app + "'s notifications reach this conversation by themselves, even while you're idle: " +
 			it + " this conversation from this result, and a note starting \"" + Connected + "\" follows it. " +
 			"Nothing else needs to run: don't run a background command, don't install anything, and don't ask the user how to be notified; just tell them you'll let them know."
 	}
-	return "Subscribed. " + what + " installed here, so " + app + "'s notifications reach this conversation by themselves, even while you're idle: " +
+	return PluginReadyLead(h, hooks) + ", so " + app + "'s notifications reach this conversation by themselves, even while you're idle: " +
 		it + " this conversation when this turn ends, and new messages are held for it until then. " +
 		"Nothing else needs to run: don't start a Monitor or a background command, don't install anything, and don't ask the user how to be notified; just tell them you'll let them know."
+}
+
+// PluginReadyLead is how PluginReadyNote starts, for h's plugin (hooks:
+// the installer's hooks). Wakeshift's waiter for Claude Code looks for it in
+// the conversation's record: a result that said so, in a conversation the
+// plugin never connected, promised wakes that won't come
+// (connector.NoteUnconnected).
+func PluginReadyLead(h Harness, hooks bool) string {
+	if hooks {
+		return "Subscribed. Wakeshift's hooks for " + h.Name + " are installed here"
+	}
+	return "Subscribed. Wakeshift's plugin for " + h.Name + " is installed here"
 }
 
 // reloads reports whether h's offer (Route) is a plugin the user must load

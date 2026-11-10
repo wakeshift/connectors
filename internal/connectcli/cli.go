@@ -11,7 +11,10 @@
 //	wakeshift allow --harness NAME --app ID --tools A,B | --none
 //	                                                pre-approve an app's tools the user agreed to (or not: remove them)
 //	wakeshift hook --harness NAME [--rewake]        what the harness runs (its own hook input on stdin);
-//	                                                nothing at all with WAKESHIFT_DISABLED=1 (or true)
+//	                                                nothing at all with WAKESHIFT_DISABLED=1 (or true),
+//	                                                or while `wakeshift disable` has turned them off
+//	wakeshift disable | enable                      turn every hook off (or on again) on this machine,
+//	                                                whichever process runs them (connector.DisabledFile)
 //	wakeshift wait                                  wait for this conversation's next messages (the agent runs it)
 //	wakeshift bridge --harness opencode             the opencode plugin's child (JSON lines)
 //	wakeshift bridge --harness pi                   the pi extension's child (the same lines)
@@ -88,7 +91,7 @@ func Main() {
 func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	prog := filepath.Base(args[0])
 	usage := func() int {
-		fmt.Fprintf(stderr, "usage: %s install --harness NAME --issuer URL [--yes] [--plugin] | uninstall --harness NAME | allow --harness NAME --app ID (--tools A,B | --none) | hook --harness NAME [--rewake] | wait | bridge --harness opencode|pi | grok init|prove --bot ID --issuer URL | harnesses | version\n", prog)
+		fmt.Fprintf(stderr, "usage: %s install --harness NAME --issuer URL [--yes] [--plugin] | uninstall --harness NAME | disable | enable | allow --harness NAME --app ID (--tools A,B | --none) | hook --harness NAME [--rewake] | wait | bridge --harness opencode|pi | grok init|prove --bot ID --issuer URL | harnesses | version\n", prog)
 		fmt.Fprintf(stderr, "harnesses: %s\n", strings.Join(connector.Names(), ", "))
 		return 2
 	}
@@ -103,9 +106,11 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return usage()
 	}
 	cmd, rest := args[1], args[2:]
-	if cmd == "hook" && connector.Disabled() {
-		// WAKESHIFT_DISABLED: before reading stdin, flags or settings, so
-		// the hook does nothing at all (no network, no output).
+	if (cmd == "hook" || cmd == "run") && connector.Disabled() {
+		// WAKESHIFT_DISABLED or the switch file: before reading stdin,
+		// flags or settings, so the hook does nothing at all (no network,
+		// no output). A Codex connector a hook started before the switch
+		// went on, started again, doesn't run either.
 		return 0
 	}
 	bin := self(prog)
@@ -268,6 +273,18 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		spec, _ := connector.Lookup(*harness)
 		b := &connector.Bridge{Hook: spec.NewHook(nil, nil)}
 		return fail(b.Run(ctx, stdin, stdout))
+	case "disable":
+		if err := connector.SetDisabled(true); err != nil {
+			return fail(err)
+		}
+		fmt.Fprintln(stdout, "Wakeshift is off on this computer: its hooks do nothing, and no conversation is woken, until you run `wakeshift enable`. Messages for connected conversations wait until then.")
+		return 0
+	case "enable":
+		if err := connector.SetDisabled(false); err != nil {
+			return fail(err)
+		}
+		fmt.Fprintln(stdout, "Wakeshift is on again on this computer. Connected conversations get their messages from their next wake or turn.")
+		return 0
 	case "harnesses":
 		for _, h := range harnesses.All() {
 			how := string(h.Wake)
@@ -292,7 +309,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		log.Info("connector: starting", "thread", *thread, "version", version.Version)
 		set := codexconnector.LoadSettings()
 		links := connector.LinksFor(set)
-		err := codexconnector.Run(ctx, codexconnector.Config{Stream: link, Issuers: set.Issuers, Thread: *thread, Socket: codexconnector.Socket(),
+		err := codexconnector.Run(ctx, codexconnector.Config{Disabled: connector.SwitchedOff, Stream: link, Issuers: set.Issuers, Thread: *thread, Socket: codexconnector.Socket(),
 			Lease: lease, Window: &codexconnector.Window{Thread: *thread}, Links: &links,
 			Lock: codexconnector.AppRunLock(*thread, *app), Exclusive: *rearm, StartGrace: 15 * time.Second, CodexGrace: time.Minute, Log: log})
 		log.Info("connector: stopped", "why", err)

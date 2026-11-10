@@ -31,6 +31,11 @@ import (
 //   - agentStop: if messages are waiting, {"decision":"block","reason":…}
 //     continues the session (at most 8 in a row). It waits only briefly:
 //     what the user types queues behind a waiting stop hook.
+//   - sessionStart (the plugin's, and the installer's file since this
+//     connector): adds the mark (internal/pluginmark) for the model to pass
+//     as the harness argument of an app's tools (additionalContext, which
+//     Copilot 1.0.107 adds to the model's context before its first turn),
+//     so the subscribing result offers no install and no shell loop.
 //   - permissionRequest (matcher "bash"): before Copilot asks the user to
 //     approve a shell command, {"behavior":"allow"} if it's exactly
 //     Wakeshift's wait command (Hook.approve), so the command that wakes
@@ -86,6 +91,8 @@ func (copilotFormat) ParseEvent(event string, b []byte) (Input, error) {
 	}
 	in := Input{Conversation: c.SessionID, Continued: c.StopHookActive, raw: b}
 	switch event {
+	case CopilotSessionStartEvent:
+		in.Event = SessionContext
 	case "preMcpToolCall":
 		in.Event, in.Server, in.ToolName, in.ToolCallID = PreCall, c.ServerName, c.ToolName, c.ToolCallID
 	case "postToolUse":
@@ -98,6 +105,41 @@ func (copilotFormat) ParseEvent(event string, b []byte) (Input, error) {
 	}
 	return in, nil
 }
+
+// CopilotSessionStartEvent is the --event of the sessionStart hook, which
+// adds the mark's context (SessionContext).
+const CopilotSessionStartEvent = "sessionStart"
+
+// CopilotMarkNote is the context the plugin's sessionStart hook adds, with
+// the mark (%s) to pass.
+const CopilotMarkNote = "Wakeshift's plugin is installed in this GitHub Copilot CLI session, so apps that notify through Wakeshift can wake this conversation, even while it's idle, through Wakeshift's wait command, which the plugin approves: whenever that command finishes and you've acted on what it printed, run it again the same way. " +
+	"When you call an app's tool that takes a `harness` argument, pass harness=%q (exactly this): it tells the app the plugin is here, so its result won't ask you to set notifications up."
+
+// CopilotHooksMarkNote is CopilotMarkNote for the hooks Wakeshift's
+// installer wrote (~/.copilot/hooks/wakeshift.json, no plugin).
+const CopilotHooksMarkNote = "Wakeshift's hooks are installed in this GitHub Copilot CLI session, so apps that notify through Wakeshift can wake this conversation, even while it's idle, through Wakeshift's wait command, which the hooks approve: whenever that command finishes and you've acted on what it printed, run it again the same way. " +
+	"When you call an app's tool that takes a `harness` argument, pass harness=%q (exactly this): it tells the app the hooks are here, so its result won't ask you to set notifications up."
+
+// SessionContext is sessionStart's output that adds the mark's note (the
+// hooks' wording when hooks), if there's a mark.
+func (copilotFormat) SessionContext(mark string, hooks bool) (Output, bool) {
+	if mark == "" {
+		return Output{}, false
+	}
+	note := CopilotMarkNote
+	if hooks {
+		note = CopilotHooksMarkNote
+	}
+	b, err := json.Marshal(map[string]any{"additionalContext": fmt.Sprintf(note, mark)})
+	if err != nil {
+		return Output{}, false
+	}
+	return Output{Stdout: append(b, '\n')}, true
+}
+
+// MarkNeedsWait: the marked result has the agent run the wait command the
+// connected note gives (WaitMarkFormat).
+func (copilotFormat) MarkNeedsWait() bool { return true }
 
 // Shell: Copilot's shell tool is "bash" (also on Windows, where it runs
 // PowerShell, which the wait command isn't offered for).
@@ -204,6 +246,7 @@ func (copilotInstaller) file(bin string) []byte {
 	approve := cmd("permissionRequest", 5)
 	approve[0].(map[string]any)["matcher"] = "bash"
 	b, _ := json.MarshalIndent(map[string]any{"version": 1, "hooks": map[string]any{
+		"sessionStart":      cmd(CopilotSessionStartEvent, 10),
 		"preMcpToolCall":    cmd("preMcpToolCall", 5),
 		"postToolUse":       cmd("postToolUse", 20),
 		"agentStop":         cmd("agentStop", 15),

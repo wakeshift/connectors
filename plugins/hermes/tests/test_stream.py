@@ -79,6 +79,34 @@ class Stream(unittest.TestCase):
         self.assertTrue(until(self.gone.is_set))
         self.assertEqual(self.l.state, "gone")
 
+    def test_an_ack_on_a_token_that_expired_renews_the_link(self):
+        # Wakeshift handed a delivery over a connection that outlived its
+        # link's token, and refused the ack as link_expired: the link isn't
+        # gone. Renewed (a poll's rotate), it's saved and acked with (#1124).
+        self.listen()
+        self.assertTrue(until(self.ws.connected.is_set))
+        self.ws.expired["tok1"] = "tok2"
+        self.ws.sse.put(event("d1"))
+        self.assertTrue(until(lambda: self.ws.acked_by.get("tok2") == ["d1"]))
+        self.assertFalse(self.gone.is_set())
+        self.assertNotEqual(self.l.state, "gone")
+        self.assertTrue(self.links and self.links[-1].endswith("link=tok2"))
+        self.assertEqual(self.handed, [["d1"]])
+        # It goes on: the next connection is on the new link, and wakes again.
+        self.ws.sse.put(None)
+        self.assertTrue(until(lambda: "tok2" in self.ws.connected_tokens))
+        self.ws.queue("tok2").put(event("d2"))
+        self.assertTrue(until(lambda: self.ws.acked_by.get("tok2") == ["d1", "d2"]))
+        self.assertFalse(self.gone.is_set())
+
+    def test_an_expired_token_that_cant_be_renewed_is_gone(self):
+        self.listen()
+        self.assertTrue(until(self.ws.connected.is_set))
+        self.ws.expired["tok1"] = None
+        self.ws.sse.put(event("d1"))
+        self.assertTrue(until(self.gone.is_set))
+        self.assertEqual(self.ws.acked, [])
+
     def test_requests_name_the_plugin(self):
         self.listen()
         self.assertTrue(until(self.ws.connected.is_set))

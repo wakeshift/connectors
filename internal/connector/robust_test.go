@@ -111,3 +111,28 @@ func TestKeyChangedUnderKid(t *testing.T) {
 	}
 
 }
+
+// A listener that's waiting when Wakeshift is turned off on the machine
+// (`wakeshift disable`) hands nothing over and acknowledges nothing; once
+// it's on again, the same message is handed over.
+func TestListenerSwitchedOff(t *testing.T) {
+	t.Setenv("WAKESHIFT_HOME", t.TempDir())
+	ws := newFakeWakeshift(t)
+	p := newFakePoller()
+	h := testHook(t, ws, p)
+	link := "wss://wakeshift.test/v1/stream?link=a"
+	h.Links.Save("c", link)
+	p.add(link, msg("d1", "while it was off"))
+	if err := SetDisabled(true); err != nil {
+		t.Fatal(err)
+	}
+	if out, _ := call(h, map[string]any{"event": "stop", "conversation": "c"}); out != "" || len(p.acked) != 0 {
+		t.Fatalf("%q, acked %v", out, p.acked)
+	}
+	if err := SetDisabled(false); err != nil {
+		t.Fatal(err)
+	}
+	if out, _ := call(h, map[string]any{"event": "stop", "conversation": "c"}); !strings.Contains(out, "while it was off") {
+		t.Fatalf("%q", out)
+	}
+}

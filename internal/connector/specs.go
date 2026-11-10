@@ -238,7 +238,8 @@ func (s Spec) Uninstall(bin string, out io.Writer) error {
 			return fmt.Errorf("the hooks are removed, but not %s (its trust and links): %w", dir, err)
 		}
 	}
-	return nil
+	// Its process records, and the connector once no harness uses it.
+	return removeLeftovers(s.Name, out)
 }
 
 // ownDir: dir is a registered harness's directory under Wakeshift's home

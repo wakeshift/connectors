@@ -65,6 +65,10 @@ class Wakeshift:
         self.sse_times: list = []  # when each SSE connection came (time.monotonic)
         self.requests: list = []
         self.outdated = False  # stream and poll requests answer 426 update_required
+        # Tokens that expired under a connection still open: an ack answers 401
+        # link_expired; a poll renews it once, to the token it maps to (None:
+        # it can't be, and the poll answers 401 link_expired too).
+        self.expired: dict = {}
         self.redeems: list = []
         self.redeem_answer = (200, {"url": "", "expires_at": "x", "session": "mcp#1"})
         self.connected = threading.Event()
@@ -103,6 +107,13 @@ class Wakeshift:
                     outer.refuse -= 1
                     return self._json(outer.refuse_code, {"error": {"code": "not_found"}})
                 if self.path.startswith("/v1/stream/poll"):
+                    tok = self._auth()
+                    if tok in outer.expired:
+                        nxt = outer.expired[tok]
+                        if nxt is None:
+                            return self._json(401, {"error": {"code": "link_expired"}})
+                        outer.expired[tok] = None  # single use: the renewal revokes it
+                        return self._json(200, {"deliveries": [], "acked": [], "rotate": {"link": nxt, "url": outer.link_for(nxt)}})
                     if self._auth() not in outer.tokens:
                         return self._json(401, {"error": {"code": "link_revoked"}})
                     batch = outer.poll_batches.pop(0) if outer.poll_batches else {"deliveries": []}
@@ -173,6 +184,8 @@ class Wakeshift:
                 body = json.loads(self.rfile.read(n) or b"{}")
                 outer.requests.append(("POST", self.path, dict(self.headers)))
                 if self.path == "/v1/stream/ack":
+                    if self._auth() in outer.expired:
+                        return self._json(401, {"error": {"code": "link_expired"}})
                     if self._auth() not in outer.tokens:
                         return self._json(401, {"error": {"code": "link_revoked"}})
                     if outer.ack_fail > 0:

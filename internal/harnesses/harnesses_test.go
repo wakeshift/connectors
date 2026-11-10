@@ -282,15 +282,26 @@ func TestInstallNote(t *testing.T) {
 // SessionStart hook runs when the resumed thread's first turn starts) and
 // Hermes's chat (its plugin can't tell which chat it is until a turn).
 // Claude Code's SessionStart hook, and opencode's and OpenClaw's plugins at
-// load, reconnect it.
+// load, reconnect it. opencode and pi say it too (issue #1106): the session
+// that installed them connects from the next result of the app's tools,
+// whose call their plugin names the session on, and a user who isn't told
+// to send a message waits for a turn that never starts; the message itself
+// asks for no call.
 func TestTrustNoteAsksOnlyWhereNeeded(t *testing.T) {
 	restart := map[string]bool{"codex": true, "cursor": true, "copilot": true, "antigravity": true, "hermes": true}
 	message := map[string]bool{"cursor": true, "copilot": true, "antigravity": true}
+	// opencode and pi connect the installing conversation from the next
+	// result of the app's tools, so a message alone isn't enough: the user
+	// asks for something that uses the app.
+	usesApp := map[string]bool{"opencode": true, "pi": true}
 	for _, h := range All() {
 		if !h.Installable {
 			continue
 		}
 		if strings.Contains(h.Resume, "send any") != message[h.ID] {
+			t.Errorf("%s: Resume %q", h.ID, h.Resume)
+		}
+		if strings.Contains(h.Resume, "something that uses the app") != usesApp[h.ID] {
 			t.Errorf("%s: Resume %q", h.ID, h.Resume)
 		}
 		if strings.Contains(h.Resume, "connect") && h.ZeroInstall == Background {
@@ -370,7 +381,7 @@ func TestNotesFromTheInstallLoop(t *testing.T) {
 		}
 	}
 	claude, _ := Get("claude-code")
-	if n := PluginFirstNote(claude, "https://x.test", "App", false, "FALLBACK."); strings.Contains(n, "this tool again") || !strings.Contains(n, `first wake starts with "Wakeshift: connected"`) {
+	if n := PluginFirstNote(claude, "https://x.test", "App", false, "FALLBACK."); strings.Contains(n, "this tool again") || !strings.Contains(n, `first wake confirms it to you with a note starting "Wakeshift: connected"`) {
 		t.Errorf("claude code: %s", n)
 	}
 	for _, id := range []string{"cursor", "antigravity"} {

@@ -45,7 +45,7 @@ func TestOpenClawNotes(t *testing.T) {
 	}
 	n := SubscribeNote(h, "https://x.test")
 	for _, want := range []string{"Wakeshift can't wake this conversation yet", "Ask the user now whether to install Wakeshift's plugin for OpenClaw",
-		"`curl -fsSL https://x.test/install/openclaw.sh | WAKESHIFT_OPENCLAW_NETWORK_HOOKS=1 sh`", "In the same question, tell them: if the OpenClaw gateway listens beyond this computer", "exec tool", "The plugin starts with my next turn", "Skip this if a note \"" + Connected + "\" appears right after this result"} {
+		"`curl -fsSL https://x.test/install/openclaw.sh | WAKESHIFT_OPENCLAW_NETWORK_HOOKS=1 sh`", "In the same question, tell them: if the OpenClaw gateway listens beyond this computer", "exec tool", "no gateway restart, whether OpenClaw runs my turns itself or in Codex", "the next time I use this app's tools", "Skip this if a note \"" + Connected + "\" appears right after this result"} {
 		if !strings.Contains(n, want) {
 			t.Errorf("missing %q: %s", want, n)
 		}

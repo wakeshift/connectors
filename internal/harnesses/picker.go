@@ -100,7 +100,7 @@ func Picker() []PickerAgent {
 			ID: "opencode", Name: "opencode", Group: "main",
 			Steps: []PickerStep{run("opencode mcp add {name} --url {url}")},
 			Wakes: []string{
-				"The agent offers a one-time install of Wakeshift's plugin for opencode. Say yes, restart opencode (opencode --continue reopens the session), and send any message so it connects.",
+				"The agent offers a one-time install of Wakeshift's plugin for opencode. Say yes, restart opencode (opencode --continue reopens the session), and ask the agent something that uses this app, which connects it.",
 				"After that, {each} wakes the agent, even when it's idle.",
 			},
 		},
@@ -125,7 +125,7 @@ func Picker() []PickerAgent {
 			},
 			SignIn: "If it says the server needs sign-in, type /mcp in pi, choose {name}, then Sign in (or run pi mcp login {name}).",
 			Wakes: []string{
-				"The agent offers a one-time install of Wakeshift's extension for pi. Say yes, then type /reload in pi and send any message so it connects.",
+				"The agent offers a one-time install of Wakeshift's extension for pi. Say yes, then type /reload in pi and ask the agent something that uses this app, which connects it.",
 				"After that, {each} wakes the agent within seconds, even when it's idle, as long as pi is open. While it's busy, it gets {each} once its turn ends.",
 			},
 		},
@@ -134,6 +134,19 @@ func Picker() []PickerAgent {
 			Steps: []PickerStep{run("agy mcp add {name} {url}")},
 			Wakes: []string{
 				"The agent starts a background command that waits (agy may ask you to allow it). {Each} wakes the agent within seconds, even when it's idle. Nothing to install. The agent also asks once whether to install Wakeshift's plugin for Antigravity, which is optional.",
+			},
+		},
+		{
+			ID: "grok-bot", Name: "Grok Bot", Group: "more",
+			Steps: []PickerStep{
+				{Kind: "note", Text: "Ask your bot to add an MCP server named {name} with this URL."},
+				{Kind: "url", Label: "MCP URL", Text: "{url}"},
+				{Kind: "note", Text: "Then start a new chat with the bot."},
+			},
+			Wakes: []string{
+				"The first time, the agent sets up wake-ups for the bot: it runs three commands Wakeshift gives it, which install Wakeshift's connector on the bot's computer and make the bot's signing key, then creates a routine named \"Wakeshift wake-ups\" with a webhook trigger and gives you a one-time link. On that page, paste the routine's webhook URL and key from its settings.",
+				"After that, {each} starts a run in the bot, even when it's idle. Each run counts toward your Grok usage, so Wakeshift starts at most one every 20 seconds, carrying everything waiting.",
+				"Until then, or if you'd rather not set it up, the bot waits in the foreground, and talking to it interrupts the wait.",
 			},
 		},
 		{
@@ -152,11 +165,16 @@ func Picker() []PickerAgent {
 		{
 			ID: "openclaw", Name: "OpenClaw", Group: "more",
 			Steps: []PickerStep{
-				run("openclaw mcp add {name} --url {url} --transport streamable-http"),
-				{Kind: "note", Text: "Run it where the OpenClaw gateway runs (in Docker, inside its container). New MCP servers are used from the next turn."},
+				// Not `openclaw mcp add`: since 2026.11 it refuses while the
+				// gateway runs (it needs the gateway stopped), while `config
+				// set` goes through a running gateway, which applies it
+				// without a restart, and writes the file when it's stopped
+				// (#1109).
+				run(`openclaw config set mcp.servers.{name} '{"url":"{url}","transport":"streamable-http"}' --strict-json`),
+				{Kind: "note", Text: "Run it where the OpenClaw gateway runs (in Docker, inside its container). It works with the gateway running, and new MCP servers are used from the next turn."},
 			},
 			Wakes: []string{
-				"The agent offers a one-time install of Wakeshift's plugin for OpenClaw. Say yes, then send any reply so the plugin starts. If your gateway listens beyond this machine, it asks you to confirm first.",
+				"The agent offers a one-time install of Wakeshift's plugin for OpenClaw. Say yes. The plugin connects the conversation the next time the agent uses this app, so ask it something that does. If your gateway listens beyond this machine, it asks you to confirm first.",
 				"After that, {each} wakes the agent within seconds, even when it's idle, as long as the gateway runs.",
 			},
 		},
@@ -166,6 +184,30 @@ func Picker() []PickerAgent {
 			Wakes: []string{
 				"The agent starts a background command that waits. {Each} wakes the agent within seconds, even when it's idle. Nothing to install. The agent also asks once whether to install Wakeshift's plugin for Copilot CLI, which is optional.",
 				"Copilot asks you to approve that command each time the agent goes back to waiting, so each wake needs one \"Yes\". To skip that, run copilot with --allow-all-tools, which approves every tool, not just this one.",
+			},
+		},
+		{
+			ID: "capy", Name: "Capy", Group: "more",
+			Steps: []PickerStep{
+				{Kind: "note", Text: "In Capy, open Settings, then MCP & plugins, add a server, choose Streamable HTTP, and paste this URL."},
+				{Kind: "url", Label: "Server URL", Text: "{url}"},
+				{Kind: "note", Text: "Capy detects whether it needs sign-in. Choose Connect if it asks."},
+			},
+			Wakes: []string{
+				"The first time the agent subscribes, it creates a webhook watch on its own thread and registers it with Wakeshift, with one command. Nothing to install or approve.",
+				"After that, {each} wakes the thread, even when it's idle and its machine is asleep, until the watch ends (at most 30 days). The next time the agent subscribes after that, it sets up a new one.",
+				"If it can't set up the watch, it waits on a command in the background instead, and {each} wakes it when the command finishes.",
+			},
+		},
+		{
+			ID: "muse", Name: "Muse", Group: "more",
+			Steps: []PickerStep{
+				{Kind: "note", Text: "In Muse, add a custom connector and paste this URL."},
+				{Kind: "url", Label: "Connector URL", Text: "{url}"},
+			},
+			Wakes: []string{
+				"The agent starts a command that waits as a background task in Muse. {Each} ends the task, which wakes the agent in about 15 seconds, even when it's idle; the agent acts on it, then starts the command again. Nothing to install.",
+				"What arrives while the agent is acting comes as soon as it starts the command again.",
 			},
 		},
 		{
