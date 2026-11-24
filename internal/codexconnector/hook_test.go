@@ -25,6 +25,19 @@ import (
 	"github.com/wakeshift/connectors/internal/jws"
 )
 
+func TestDialLongControlSocketAlias(t *testing.T) {
+	target := fakeAppServer(t)
+	alias := filepath.Join(t.TempDir(), strings.Repeat("s", 120))
+	if err := os.Symlink(target, alias); err != nil {
+		t.Fatal(err)
+	}
+	app, err := dialAppServer(t.Context(), alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.close()
+}
+
 // fakeAppServer answers initialize and thread/read (for known threads) on a
 // unix socket, as Codex's daemon does.
 func fakeAppServer(t *testing.T, threads ...string) string {

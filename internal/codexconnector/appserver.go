@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 
@@ -49,7 +50,13 @@ var errDisconnected = errors.New("app-server disconnected")
 
 func dialAppServer(ctx context.Context, socket string) (*appServer, error) {
 	hc := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		// Codex can expose its short control socket through a symlink under
+		// CODEX_HOME. Unix limits the address passed to connect, even for a symlink.
+		address := socket
+		if target, err := filepath.EvalSymlinks(socket); err == nil && len(target) < len(socket) {
+			address = target
+		}
+		return (&net.Dialer{}).DialContext(ctx, "unix", address)
 	}}}
 	c, _, err := websocket.Dial(ctx, "ws://localhost/", &websocket.DialOptions{HTTPClient: hc})
 	if err != nil {
