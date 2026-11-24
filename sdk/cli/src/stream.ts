@@ -6,8 +6,15 @@
 
 import { clip } from "./redact.js";
 
-/** The wait URL in the command Wakeshift's block offers (u='…/v1/stream/wait?…'). */
+/**
+ * The wait URL the command Wakeshift's block offers reads: since November
+ * 2026 the link is in the step that has the agent write it to a file
+ * ("its whole content this one line: …"), and the command adds its query
+ * (u="$b…"); before, it was in the command (u='…/v1/stream/wait?…').
+ */
 export function waitUrlOf(text: string): string | null {
+  const step = /its whole content this one line: (https?:\/\/\S+\/v1\/stream\/wait\?link=[^\s&]+) \./.exec(text);
+  if (step) return step[1] + (/u="\$b([^"]*)"/.exec(text)?.[1] ?? "");
   const m = /u='(https?:\/\/[^'\s]+\/v1\/stream\/wait\?[^'\s]+)'/.exec(text);
   return m ? m[1] : null;
 }

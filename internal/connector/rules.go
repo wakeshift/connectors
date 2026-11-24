@@ -16,8 +16,9 @@ import (
 // without an approval prompt each time:
 //
 //	Claude Code     ~/.claude/settings.json                    permissions.allow  Bash(<bin> wait)
-//	Cursor CLI      ~/.cursor/cli-config.json                  permissions.allow  Shell(<bin>:wait)
-//	Antigravity     ~/.gemini/antigravity-cli/settings.json    permissions.allow  command(<bin> wait)
+//
+// Cursor and Antigravity get none (CursorRule, AntigravityRule), and an
+// earlier install's Cursor rule is removed (retireWaitRules).
 //
 // <bin> is the binary's absolute path (rules match the command's text, so
 // the agent types the same: WaitCommand). Only that rule: never a wildcard,
@@ -80,15 +81,10 @@ func ClaudeRule(wait string) AllowRule {
 	return AllowRule{Path: filepath.Join(ClaudeConfigDir(), "settings.json"), Rule: "Bash(" + wait + ")"}
 }
 
-// CursorRule would be Cursor's: Shell(<command>:<args>) matches the
-// arguments exactly (without ":" it would be a prefix), but on the command
-// with its redirects taken off, and cursor-agent lets an allowlisted
-// command redirect into workspace and temporary files (its
-// computeRedirectAllowlistSafety, 2026.10.16). So `… wait > <workspace
-// file>` would run unasked, and the shell empties the file before the
-// command can refuse. Not installed (a security review reproduced it with
-// the real cursor-agent, October 28, 2026), as AntigravityRule isn't; an
-// earlier install's is removed when the install runs again
+// CursorRule would be Cursor's: Shell(<command>:<args>). Not installed,
+// as AntigravityRule isn't: Wakeshift installs a rule only where it matches
+// the wait command exactly, with nothing added (no argument or redirect).
+// An earlier install's is removed when the install runs again
 // (retireWaitRules). Claude Code's exact Bash rule doesn't match the
 // command with a redirect (checked with Claude Code 2.1.280: refused).
 func CursorRule(wait string) AllowRule {
@@ -98,13 +94,9 @@ func CursorRule(wait string) AllowRule {
 	return AllowRule{Path: filepath.Join(home, ".cursor", "cli-config.json"), Rule: "Shell(" + bin + ":" + args + ")", MustExist: true}
 }
 
-// AntigravityRule would be agy's: command(<prefix>) matches by whole words,
-// so it also matches the command with words or a redirect added. The
-// command refuses both (ErrWaitArgs, ErrWaitRedirected), but the shell
-// empties a redirect's target before the command runs, so with this rule
-// an agent could empty any of the user's files (`… wait > ~/.zshrc`)
-// without being asked. So it isn't installed (agy's Spec has no Rule)
-// until agy's rules match a command exactly, or stop matching redirects.
+// AntigravityRule would be agy's: command(<prefix>), a prefix rule, not an
+// exact one. So it isn't installed (agy's Spec has no Rule) until agy's
+// rules can match a command exactly.
 func AntigravityRule(wait string) AllowRule {
 	home, _ := os.UserHomeDir()
 	return AllowRule{Path: filepath.Join(home, ".gemini", "antigravity-cli", "settings.json"), Rule: "command(" + wait + ")"}
@@ -142,8 +134,7 @@ func addRule(s Settings, spec Spec, bin string, out io.Writer, fresh []string) {
 
 // retireWaitRules removes a wait-command rule an earlier install added
 // for a harness that no longer gets one (Cursor, since October 28, 2026:
-// its rule also let `… wait > file` empty a workspace file unasked), when
-// the install runs again. An app's tool rules stay.
+// its rule wasn't exact), when the install runs again. An app's tool rules stay.
 func retireWaitRules(s Settings, out io.Writer) {
 	if !slices.ContainsFunc(readRules(s), func(r addedRule) bool { return r.App == "" }) {
 		return // nothing to retire: no lock needed

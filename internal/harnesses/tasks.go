@@ -5,8 +5,7 @@ import (
 	"strings"
 )
 
-// The MCP task path (docs/harnesses.md, "Claude Code: MCP tasks as a wake
-// path"): an app's SDK lists WaitTool for a client that takes MCP tasks
+// The MCP task path: an app's SDK lists WaitTool for a client that takes MCP tasks
 // and answers its calls with a task that completes when the conversation's
 // next messages arrive. The client follows the task in the background, and
 // a completed one wakes the conversation, framed by the client as "not

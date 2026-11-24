@@ -1,6 +1,6 @@
 """Wakeshift's plugin in a real Hermes gateway, with Telegram and Discord chats.
 
-Not part of `make hermes-test`: it runs inside Hermes's own Docker image
+Not part of the plugin's unit tests (python -m unittest discover -s tests): it runs inside Hermes's own Docker image
 (0.22.5, 0.23.0), with Hermes's tests checked out at the image's tag, as one
 of Hermes's gateway tests (copied to tests/gateway/). It uses the harness of
 Hermes's own tests/gateway/test_plugin_origin_injection_authority.py: a real

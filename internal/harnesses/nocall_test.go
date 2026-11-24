@@ -72,8 +72,9 @@ func TestNoNoteAsksForAnotherCall(t *testing.T) {
 		"GrokWebhookNote":        GrokWebhookNote(app, base, "bot-1", link, 24*time.Hour, fg),
 		"GrokJoinedNote":         GrokJoinedNote(app),
 		"GrokKeyMissingNote":     GrokKeyMissingNote(app, in, "bot-1", ch, fg),
-		"GrokRekeyNote":          GrokRekeyNote(link, fg),
-		"GrokBadSignatureNote":   GrokBadSignatureNote(fg),
+		"GrokKeyMissingLiveNote": GrokKeyMissingLiveNote(app, in, "bot-1", ch),
+		"GrokRekeyNote":          GrokRekeyNote("0123456789abcdef", "fedcba9876543210", link, fg),
+		"GrokBadSignatureNote":   GrokBadSignatureNote,
 		"GrokChallengeGone":      GrokChallengeGone,
 		"GrokPrivateKeyNote":     GrokPrivateKeyNote,
 		"GrokBoundNote":          GrokBoundNote(app),
@@ -121,10 +122,10 @@ func TestNoNoteAsksForAnotherCall(t *testing.T) {
 			}
 		}
 		for name, n := range map[string]string{
-			"BackgroundNote":        BackgroundNote(h, app, url, true),
-			"BackgroundNote known":  BackgroundNote(h, app, url, false),
-			"BackgroundAgainNote":   BackgroundAgainNote(h, app, url, true, false),
-			"BackgroundRunningNote": BackgroundRunningNote(h, app, url),
+			"BackgroundNote":        BackgroundNote(h, app, url, Claim{}, true),
+			"BackgroundNote known":  BackgroundNote(h, app, url, Claim{}, false),
+			"BackgroundAgainNote":   BackgroundAgainNote(h, app, url, Claim{}, true, false),
+			"BackgroundRunningNote": BackgroundRunningNote(h, app, url, Claim{}),
 			"ForegroundNote":        ForegroundNote(h, app, url, true),
 			"WaitNote":              WaitNote(h, app, "~/.wakeshift/bin/wakeshift wait", true),
 			"WaitAgainNote":         WaitAgainNote(h, app, "~/.wakeshift/bin/wakeshift wait", true),

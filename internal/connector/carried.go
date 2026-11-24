@@ -136,8 +136,7 @@ func ToolOf(in Input, tool string) bool {
 // that text, or one further in, is the tool's words (a chat message a read
 // tool relays as its whole text), not the result's own _meta, so no beacon
 // is acted on from it: only from the line Wakeshift puts at the end of the
-// text (InText), these harnesses' carrier (security review, October 28,
-// 2026).
+// text (InText), these harnesses' carrier.
 type TextOnlyFormat interface {
 	TextOnly() bool
 }

@@ -22,8 +22,16 @@
 // It exits when its watch ends: the link is revoked (close code 4001, or a
 // refused link), another connection takes the stream (4000), the thread is
 // archived or deleted, Codex's socket goes away, the TUI showing the thread
-// closes or moves to another thread (Window, from Codex's log), or nobody but
-// the connector has used the thread for Lease. A thread that's only not
+// closes or moves to another thread (Window, from Codex's log), or the
+// thread's lease runs out: nobody used it (a turn the user started, or a
+// wake the connector delivered) for Lease while the connector couldn't hold
+// the thread's stream, or for Hold at most while it could. Wakeshift ends a
+// session's stream (4001) once it has no live subscription and nothing
+// waiting, revoking the session's connector links as it does (so the
+// thread's next beacon, redeemed without one, connects it again), and a
+// stream the connector holds is a thread still subscribed:
+// an idle thread is woken for as long as Claude Code's waiter would wait,
+// not just an hour. A thread that's only not
 // loaded is still there: Codex unloads and reloads a thread while its window
 // reconnects after the daemon restarts, so the connector waits for it to
 // load again (it can't start a turn until then). A thread on Codex's daemon
@@ -68,6 +76,8 @@ var (
 	ErrNotLoaded = errors.New("the thread isn't loaded in Codex's app-server")
 	ErrCodexGone = errors.New("Codex's app-server went away")
 	ErrLease     = errors.New("nobody used the thread for the lease")
+	// ErrHold: the thread stayed subscribed, but nobody used it for Hold.
+	ErrHold = errors.New("nobody used the thread for the longest a subscription holds it")
 	// ErrRunning: a re-arm found another connector running for the thread.
 	ErrRunning = errors.New("another connector is running for the thread")
 	// ErrDisabled: Wakeshift was turned off on this machine
@@ -88,9 +98,15 @@ type Config struct {
 	Issuers []string
 	Thread  string // the Codex thread
 	Socket  string // Codex's app-server control socket
-	// Lease: exit when the thread has had no turn but ours for this long
-	// (0: none). Turns anyone else starts (the user) renew it.
+	// Lease: exit when nobody has used the thread for this long (0: none)
+	// while the connector couldn't hold its stream. Turns anyone else starts
+	// (the user) renew it, and so does each wake the connector delivers.
 	Lease time.Duration
+	// Hold: while the connector holds the thread's stream (the session is
+	// still subscribed: Wakeshift ends the stream once it isn't), the lease
+	// is renewed, up to Hold since the thread was last used (0: not
+	// renewed; the lease alone, as before). It's never shorter than Lease.
+	Hold time.Duration
 	// Window, if set, watches Codex's log for the TUI showing the thread.
 	Window *Window
 	// Links, if set, keeps the thread's link current (a rotation saves the
@@ -119,7 +135,26 @@ type Config struct {
 	// (0: retryMax).
 	RetryAfter time.Duration
 	RetryMax   time.Duration
-	Log        *slog.Logger
+	// Desktop, if set, delivers to a thread the Codex desktop app made
+	// when it isn't on Codex's daemon (desktop.go).
+	Desktop *Desktop
+	// NoteDir, if set, is where a desktop connector that gives up leaves
+	// its note for the thread's next hook (NotePath).
+	NoteDir string
+	Log     *slog.Logger
+}
+
+// desktopThread says whether cfg's thread is the desktop app's, to deliver
+// through it (Desktop).
+func (cfg Config) desktopThread() bool {
+	if cfg.Desktop == nil {
+		return false
+	}
+	path := cfg.Desktop.Rollout
+	if path == "" {
+		path = findRollout(cfg.Thread)
+	}
+	return path != "" && isDesktopThread(path)
 }
 
 // Run delivers until the watch ends, and says why.
@@ -141,13 +176,18 @@ func Run(ctx context.Context, cfg Config) error {
 			held.Close()
 		}
 	}
+	c := &conn{cfg: cfg, cancel: cancel, arrived: make(chan struct{}, 1),
+		seen: map[string]uint64{}, unconfirmed: map[string]bool{}, changed: make(chan struct{}, 1), rebound: make(chan struct{}, 1), lastUsed: time.Now()}
+	desktop := sync.OnceValue(cfg.desktopThread)
 	app, err := dialAppServer(ctx, cfg.Socket)
 	if err != nil {
+		if desktop() { // no daemon: the desktop app has its own
+			return runDesktop(ctx, c, held)
+		}
 		release()
 		return fmt.Errorf("%w: %v", ErrCodexGone, err)
 	}
-	c := &conn{cfg: cfg, app: app, cancel: cancel, arrived: make(chan struct{}, 1),
-		seen: map[string]uint64{}, unconfirmed: map[string]bool{}, changed: make(chan struct{}, 1), rebound: make(chan struct{}, 1), lastUsed: time.Now()}
+	c.app = app
 	defer func() { c.appNow().close() }() // the one it ends with (redial replaces it)
 	// It starts only on a loaded thread: one that doesn't load here is an
 	// in-process session's (or isn't open), and the thread falls back to pull.
@@ -156,6 +196,9 @@ func Run(ctx context.Context, cfg Config) error {
 		if err == nil && status != "notLoaded" {
 			c.setStatus(status)
 			break
+		}
+		if !errors.Is(err, ErrThreadEnded) && !errors.Is(err, errDisconnected) && ctx.Err() == nil && desktop() {
+			return runDesktop(ctx, c, held)
 		}
 		switch {
 		case errors.Is(err, ErrThreadEnded), ctx.Err() != nil:
@@ -228,7 +271,8 @@ type conn struct {
 	ended       string
 	failures    int       // our turns that failed in a row
 	retryAt     time.Time // when to try again after the last of them
-	lastUsed    time.Time
+	lastUsed    time.Time // a turn not ours started, or a wake of ours was delivered
+	heldAt      time.Time // when the stream was last connected (ws is set while it is)
 	changed     chan struct{}
 	ws          *websocket.Conn
 	queue       []delivery        // received, waiting for the thread to be idle
@@ -238,6 +282,7 @@ type conn struct {
 	redialing   bool              // Codex's app-server dropped us; redial is reconnecting
 	dropped     time.Time         // when it last did
 	rebound     chan struct{}     // redial reconnected: find the window again
+	link        string            // the stream link in use (rotations follow)
 }
 
 func (c *conn) setStatus(s string) {
@@ -354,9 +399,8 @@ func (c *conn) watchCodex(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-app.done:
-			// Codex's daemon can drop its clients and come back (on October
-			// 27 one did mid-game, with the window still open): reconnect
-			// while the thread is still there.
+			// Codex's daemon can drop its clients and come back, with the
+			// window still open: reconnect while the thread is still there.
 			next, err := c.redial(ctx)
 			if errors.Is(err, ErrThreadEnded) {
 				c.cancel(err)
@@ -368,11 +412,8 @@ func (c *conn) watchCodex(ctx context.Context) {
 			}
 			app = next
 		case <-lease:
-			c.mu.Lock()
-			idleFor := time.Since(c.lastUsed)
-			c.mu.Unlock()
-			if idleFor > c.cfg.Lease {
-				c.cancel(ErrLease)
+			if err := c.leaseOver(time.Now()); err != nil {
+				c.cancel(err)
 				return
 			}
 		case n := <-app.notes:
@@ -385,9 +426,10 @@ func (c *conn) watchCodex(ctx context.Context) {
 			}
 			switch n.Method {
 			case "thread/status/changed":
-				// notLoaded isn't the end: on October 29 the TUI's resume
-				// after the daemon restarted went idle, notLoaded, idle in
-				// 20ms, and stopping there lost the rest of a conversation.
+				// notLoaded isn't the end: the TUI's resume after the
+				// daemon restarts can go idle, notLoaded, idle within
+				// milliseconds, and stopping there lost the rest of a
+				// conversation.
 				// Archive says notLoaded too, then thread/archived.
 				c.cfg.Log.Debug("codex: thread status", "status", p.Status.Type)
 				c.setStatus(p.Status.Type)
@@ -400,6 +442,45 @@ func (c *conn) watchCodex(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// leaseOver says why the thread's lease has run out at now (nil: it
+// hasn't). Nobody used the thread for Lease, unless the connector held the
+// thread's stream meanwhile (Hold: the session is still subscribed), and
+// then until Hold since it was last used: a connector can't outlive Hold
+// on a thread nobody uses, whatever the stream says.
+func (c *conn) leaseOver(now time.Time) error {
+	lease, hold := c.cfg.Lease, c.cfg.Hold
+	if lease <= 0 {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	renewed := c.lastUsed
+	if hold > 0 {
+		hold = max(hold, lease)
+		if now.Sub(c.lastUsed) > hold {
+			return ErrHold
+		}
+		held := c.heldAt
+		if c.ws != nil {
+			held = now
+		}
+		if held.After(renewed) {
+			renewed = held
+		}
+	}
+	if now.Sub(renewed) > lease {
+		return ErrLease
+	}
+	return nil
+}
+
+// used renews the lease: the thread was used (a wake of ours delivered).
+func (c *conn) used() {
+	c.mu.Lock()
+	c.lastUsed = time.Now()
+	c.mu.Unlock()
 }
 
 // pause waits a second (for watchCodex to reconnect), false if the
@@ -482,7 +563,7 @@ func (c *conn) windowOpen(ctx context.Context, closed <-chan string) bool {
 // redial reconnects to Codex's app-server after it dropped the connection,
 // trying for CodexGrace, and takes the new connection once the thread reads
 // there, loaded or not: the TUI resumes it when it reconnects, which can
-// take longer than the daemon (41s on October 29). Otherwise Codex really
+// take longer than the daemon. Otherwise Codex really
 // went away, or the thread stayed unreadable (deleted: ErrThreadEnded), and
 // the connector stops. The new connection becomes the one the rest use only
 // once checked, so nothing else reads the thread there before then.
@@ -549,6 +630,9 @@ func (c *conn) redial(ctx context.Context) (*appServer, error) {
 func (c *conn) stream(ctx context.Context) {
 	link, wait := c.cfg.Stream, time.Second
 	for ctx.Err() == nil {
+		c.mu.Lock()
+		c.link = link
+		c.mu.Unlock()
 		next, err := c.streamOnce(ctx, link)
 		var off *connector.ErrOffOrigin
 		switch {
@@ -576,10 +660,12 @@ func (c *conn) stream(ctx context.Context) {
 		case err != nil && ctx.Err() == nil:
 			c.cfg.Log.Warn("stream: disconnected", "err", redact(err))
 		}
-		pause := wait
+		// With jitter, so connectors that dropped together (a deploy, a
+		// database failover) don't reconnect in step.
+		pause := connector.Backoff(wait)
 		var busy *connector.Busy
 		if errors.As(err, &busy) {
-			pause = max(pause, busy.After) // at capacity: come back when it says
+			pause = max(pause, connector.JitterUp(busy.After)) // at capacity: come back when it says, or a little later
 		}
 		select {
 		case <-ctx.Done():
@@ -588,6 +674,16 @@ func (c *conn) stream(ctx context.Context) {
 		}
 		wait = min(wait*2, time.Minute)
 	}
+}
+
+// currentLink is the stream link in use.
+func (c *conn) currentLink() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.link == "" {
+		return c.cfg.Stream
+	}
+	return c.link
 }
 
 // forget drops the kept link if it's still link (a newer one, from a
@@ -619,13 +715,13 @@ func (c *conn) streamOnce(ctx context.Context, link string) (next string, err er
 	defer ws.CloseNow()
 	ws.SetReadLimit(1 << 20)
 	c.mu.Lock()
-	c.ws = ws
+	c.ws, c.heldAt = ws, time.Now()
 	resend := make([]string, 0, len(c.unconfirmed))
 	for id := range c.unconfirmed {
 		resend = append(resend, id)
 	}
 	c.mu.Unlock()
-	defer func() { c.mu.Lock(); c.ws = nil; c.mu.Unlock() }()
+	defer func() { c.mu.Lock(); c.ws, c.heldAt = nil, time.Now(); c.mu.Unlock() }()
 	for _, id := range resend {
 		c.ack(ctx, id) // idempotent; the receipt was lost with the old connection
 	}
@@ -873,15 +969,20 @@ func (c *conn) startTurn(ctx context.Context, batch []delivery) bool {
 }
 
 // confirm acknowledges what in batch isn't yet, and isn't another's now
-// (an app's wait took it during the turn: "taken").
+// (an app's wait took it during the turn: "taken"). A wake delivered
+// renews the lease: the thread is in use.
 func (c *conn) confirm(ctx context.Context, batch []delivery) {
+	delivered := false
 	for i := range batch {
 		if batch[i].acked || !c.held(batch[i]) {
 			continue
 		}
-		batch[i].acked = true
+		batch[i].acked, delivered = true, true
 		c.cfg.Log.Info("codex: delivered", "delivery", batch[i].ID, "batch", len(batch))
 		c.ack(ctx, batch[i].ID)
+	}
+	if delivered {
+		c.used()
 	}
 }
 

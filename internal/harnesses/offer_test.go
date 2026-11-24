@@ -8,7 +8,7 @@ import (
 // Every install offer asks a real yes/no question with the exact command in
 // it, presents its options neutrally, names what it installs as it is (a
 // plugin, Cursor's package, or hooks), and on a yes runs the command as
-// given (wakebench, November 2, 2026: Codex's question left the command
+// given (in testing, without this, Codex's question left the command
 // out, OpenClaw's described it, Copilot's only offered to give it, two
 // models marked "No" as recommended, and every offer said "hooks" for a
 // plugin).
@@ -79,8 +79,8 @@ func TestOfferAsksWithTheCommand(t *testing.T) {
 }
 
 // Where nothing else wakes the conversation, a "no" is relayed as it is:
-// messages wait for the agent's next call to the app (wakebench, November
-// 2, 2026: opencode's agent said it would "keep polling").
+// messages wait for the agent's next call to the app (in testing,
+// opencode's agent otherwise said it would "keep polling").
 func TestOfferDeclined(t *testing.T) {
 	for _, id := range []string{"opencode", "openclaw", "hermes", "codex"} {
 		h, _ := Get(id)
@@ -110,8 +110,8 @@ func TestHermesText(t *testing.T) {
 		"custom (unreviewed) source", "in one line",
 		"Gateway reloaded plugins", "skip the restart and resume below",
 		// The gateway's reload doesn't reach a running hermes chat, so a
-		// CLI or TUI chat still resumes first (QA pass, November 9, 2026:
-		// a classic chat was told only to send a message).
+		// CLI or TUI chat still resumes first (in testing, a classic chat
+		// was otherwise told only to send a message).
 		"for a chat through the gateway (Hermes's API server, or a Telegram or Discord direct message)",
 		"if this chat is in Hermes's CLI or TUI, still give them the resume below, then a message",
 		"in the classic `hermes chat`, exit and resume this chat with the command Hermes prints as it exits (`hermes --resume <session>`)", "in Hermes's TUI, exit and run `hermes chat --tui --continue`",
@@ -128,7 +128,7 @@ func TestHermesText(t *testing.T) {
 
 // Codex: the offer says the install is Wakeshift's, not the app's, and that
 // a blocked command is asked to run outside the sandbox, never only printed
-// (QA pass, November 9, 2026: the agent said "The Webhooks tool requires
+// (in testing, the agent otherwise said "The Webhooks tool requires
 // this one-time setup", and printed the command when the sandbox blocked
 // it). Other harnesses' offers don't change.
 func TestCodexOfferCreditsWakeshiftAndEscalates(t *testing.T) {
@@ -153,7 +153,7 @@ func TestCodexOfferCreditsWakeshiftAndEscalates(t *testing.T) {
 }
 
 // Claude Code: the session-only answer is described in the user's terms,
-// without the wait tool's name (QA pass, November 9, 2026), and the first
+// without the wait tool's name, and the first
 // wake's note isn't given as words the user will see.
 func TestClaudeCodeOfferInUserTerms(t *testing.T) {
 	claude, _ := Get("claude-code")

@@ -114,9 +114,9 @@ func ackedOnce(t *testing.T, acks <-chan string, want ...string) {
 	}
 }
 
-// S12 on October 29: the model was at capacity (503), Codex's thread went
-// to systemError and stayed there, and the connector, waiting for idle,
-// held 8 mentions and a DM until the user's next turn. Now a thread in
+// When the model was at capacity (503), Codex's thread went to
+// systemError and stayed there, and the connector, waiting for idle, held
+// every event until the user's next turn. Now a thread in
 // systemError takes a turn, acknowledged only once it succeeds: a turn
 // that fails keeps its events, tried again after a backoff that doubles,
 // and the turn that succeeds acknowledges each once.

@@ -107,7 +107,7 @@ function showLink(ctx: Ctx, out: Out, link: string, key: AppKey, noBrowser: bool
   out.line("");
   out.line(`Ask your user to open this link and ${what} (only they can sign in and confirm):`);
   out.line(`  ${link}`);
-  out.line(`Key code: ${key.keyCode} (the page shows the same code)`);
+  out.line(`Key code: ${key.keyCode} (the page asks for it)`);
   if (openBrowser(ctx, link, noBrowser) === "opened") out.line("Opened it in the browser.");
   out.line("");
 }

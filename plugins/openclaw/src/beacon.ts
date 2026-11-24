@@ -167,9 +167,23 @@ function metaIn(result: unknown, depth: number): string {
  */
 export function mcpServer(tool: unknown): string {
   if (typeof tool !== "string") return "";
+  const dotted = codexItemName(tool);
+  if (dotted) return dotted[0];
   const rest = tool.startsWith("mcp__") ? tool.slice(5) : tool;
   const i = rest.indexOf("__");
   return i > 0 && i + 2 < rest.length ? rest.slice(0, i) : "";
+}
+
+/**
+ * [server, tool] for the name OpenClaw's Codex event projector gives an MCP
+ * call's after_tool_call (`<server>.<tool>`, extensions/codex itemName):
+ * the install turn's results arrive so after a mid-turn install, before
+ * Codex's PostToolUse is relayed (`mcp__<server>__<tool>`). Only with
+ * exactly one dot, so a server named with a dot can't pass for another.
+ */
+function codexItemName(tool: string): [string, string] | undefined {
+  const m = /^([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/.exec(tool);
+  return m && !tool.includes("__") ? [m[1], m[2]] : undefined;
 }
 
 /**
@@ -180,6 +194,8 @@ export function mcpTool(tool: unknown): string {
   const server = mcpServer(tool);
   if (!server) return "";
   const name = tool as string;
+  const dotted = codexItemName(name);
+  if (dotted) return dotted[1];
   const rest = name.startsWith("mcp__") ? name.slice(5) : name;
   return rest.slice(server.length + 2);
 }
@@ -234,6 +250,21 @@ export function resultText(result: unknown, depth = 0): string {
   return "";
 }
 
+/**
+ * The MCP result's own _meta where OpenClaw hands after_tool_call a Codex
+ * mcpToolCall item's result as {status, durationMs, error?, result: <the
+ * MCP CallToolResult>} (extensions/codex, event-projector-tool-items.ts
+ * itemToolResult: the event projector's path, taken when Codex's
+ * PostToolUse isn't relayed for the turn, as after a plugin is installed
+ * mid-thread). That result is the server's own, not text a tool returned:
+ * only an object whose result has the CallToolResult's content array.
+ */
+function codexItemMeta(v: Record<string, unknown>): string {
+  const r = v.result;
+  if (typeof v.status !== "string" || !r || typeof r !== "object" || !Array.isArray((r as Record<string, unknown>).content)) return "";
+  return ownMeta(r);
+}
+
 function ownMeta(v: unknown): string {
   if (!v || typeof v !== "object") return "";
   const meta = (v as Record<string, unknown>)._meta;
@@ -266,7 +297,7 @@ export function findBeacon(result: unknown): { token: string; carried: Carried }
     const t = trailer(resultText(result));
     return t ? { token: t, carried: "text" } : { token: "", carried: "" };
   }
-  const own = ownMeta(v) || (v && typeof v === "object" ? ownMeta((v as Record<string, unknown>).details) : "");
+  const own = ownMeta(v) || (v && typeof v === "object" ? ownMeta((v as Record<string, unknown>).details) || codexItemMeta(v as Record<string, unknown>) : "");
   if (own) return { token: own, carried: "meta" };
   // The text's last line before a _meta further in: a document a tool
   // returned can hold one, and mustn't hide the result's own beacon.

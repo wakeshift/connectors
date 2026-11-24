@@ -11,14 +11,10 @@ import (
 	"strings"
 )
 
-// Copilot CLI's deny rules, which its permissionRequest hook must respect.
-//
-// Copilot (1.0.105) runs permissionRequest hooks before its own permission
-// rules, and a hook's {"behavior":"allow"} wins over them: with
-// `--deny-tool shell` or `--deny-tool 'shell(<wait command>)'`, an
-// approving hook still let the command run (checked in a temp HOME with
-// `copilot -p`). The hook's input doesn't carry the rules, so before
-// approving the wait command, the hook reads them where they are:
+// Copilot CLI's deny rules, which Wakeshift's permissionRequest hook
+// respects: it never approves what the user denied. The hook's input
+// doesn't carry the rules, so before approving the wait command, the hook
+// reads them where they are:
 //
 //   - `--deny-tool` on the command line of the Copilot process the hook
 //     runs under (its nearest ancestor named copilot). `--deny-tool shell`, `--deny-tool 'shell(...)'` naming the

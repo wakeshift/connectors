@@ -61,6 +61,96 @@ func TestClaudeFormat(t *testing.T) {
 	}
 }
 
+// Claude Code 2.1.321 writes the result's line once the model's next
+// request is under way, after a copy of the request ("api-request-blob",
+// with the result but no mcpMeta): usually 1-2.5s after the hook starts,
+// and 4.5s and more at times. The hook waited only 3s until November 11,
+// 2026, so it never redeemed such a result's beacon and the conversation
+// was never woken.
+// A subagent's call (the Agent tool): the hook's input has the session's
+// session_id and transcript_path, plus agent_id, and the result's line is
+// in <session>/subagents/agent-<agent_id>.jsonl beside the session's
+// transcript (2.1.280 and 2.1.321). Until November 11, 2026 the hook read
+// only transcript_path, so a subscribe from a subagent never connected.
+func TestClaudeFormatSubagent(t *testing.T) {
+	const session = "c95dca59-8b63-4ebb-a70e-8d69fde72b92"
+	dir := t.TempDir()
+	tr := filepath.Join(dir, session+".jsonl")
+	os.WriteFile(tr, []byte(`{"type":"summary"}`+"\n"), 0o600)
+	sub := filepath.Join(dir, session, "subagents", "agent-a5998067ef883574a.jsonl")
+	if got := claudeSubagentTranscript(tr, session, "a5998067ef883574a"); got != sub {
+		t.Fatalf("path %q", got)
+	}
+	os.MkdirAll(filepath.Dir(sub), 0o700)
+	os.WriteFile(sub, nil, 0o600)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		f, _ := os.OpenFile(sub, os.O_APPEND|os.O_WRONLY, 0o600)
+		f.WriteString(strings.Replace(claudeTranscriptLine, `"isSidechain":false`, `"isSidechain":true,"agentId":"a5998067ef883574a"`, 1) + "\n")
+		f.Close()
+	}()
+	input := func(agent string) []byte {
+		var m map[string]any
+		json.Unmarshal([]byte(strings.Replace(claudePostToolUse, "TRANSCRIPT", tr, 1)), &m)
+		m["agent_id"], m["agent_type"] = agent, "general-purpose"
+		b, _ := json.Marshal(m)
+		return b
+	}
+	in, err := claudeFormat{}.Parse(input("a5998067ef883574a"))
+	if err != nil || BeaconIn(in.ToolResult) != "BEACON" || in.Conversation != session {
+		t.Fatalf("beacon %q from %s (%v)", BeaconIn(in.ToolResult), in.ToolResult, err)
+	}
+
+	// An agent_id that isn't one names no file: only the session's
+	// transcript is read.
+	for _, bad := range []string{"../../x", "a/b", strings.Repeat("a", 65)} {
+		if p := claudeSubagentTranscript(tr, session, bad); p != "" {
+			t.Fatalf("%q: %q", bad, p)
+		}
+	}
+	old := claudeMetaWait
+	claudeMetaWait = 200 * time.Millisecond
+	defer func() { claudeMetaWait = old }()
+	if in, _ := (claudeFormat{}).Parse(input("../" + session + "/subagents/agent-a5998067ef883574a")); BeaconIn(in.ToolResult) != "" {
+		t.Fatal("read a file an agent_id named with ..")
+	}
+}
+
+func TestClaudeFormatLateLine(t *testing.T) {
+	tr := filepath.Join(t.TempDir(), "s.jsonl")
+	blob := `{"type":"api-request-blob","sessionId":"c95dca59-8b63-4ebb-a70e-8d69fde72b92","hash":"h","message":{"role":"user","content":[{"tool_use_id":"toolu_bdcfcf09e3814e0591d5","type":"tool_result","content":"{\"ok\":true}"}]}}`
+	os.WriteFile(tr, []byte(`{"type":"summary"}`+"\n"+blob+"\n"), 0o600)
+	go func() {
+		// In two writes, so a scan can find half a line.
+		half := len(claudeTranscriptLine) / 2
+		time.Sleep(3500 * time.Millisecond)
+		f, _ := os.OpenFile(tr, os.O_APPEND|os.O_WRONLY, 0o600)
+		f.WriteString(claudeTranscriptLine[:half])
+		f.Sync()
+		time.Sleep(300 * time.Millisecond)
+		f.WriteString(claudeTranscriptLine[half:] + "\n")
+		f.Close()
+	}()
+	in, err := claudeFormat{}.Parse([]byte(strings.Replace(claudePostToolUse, "TRANSCRIPT", tr, 1)))
+	if err != nil || BeaconIn(in.ToolResult) != "BEACON" {
+		t.Fatalf("beacon %q from %s (%v)", BeaconIn(in.ToolResult), in.ToolResult, err)
+	}
+
+	// A result whose line has no mcpMeta (no _meta, no structured content)
+	// ends the wait as soon as it's there.
+	tr2 := filepath.Join(t.TempDir(), "s.jsonl")
+	var plain map[string]any
+	json.Unmarshal([]byte(claudeTranscriptLine), &plain)
+	delete(plain, "mcpMeta")
+	line, _ := json.Marshal(plain)
+	os.WriteFile(tr2, []byte(blob+"\n"+string(line)+"\n"), 0o600)
+	start := time.Now()
+	in, _ = claudeFormat{}.Parse([]byte(strings.Replace(claudePostToolUse, "TRANSCRIPT", tr2, 1)))
+	if BeaconIn(in.ToolResult) != "" || time.Since(start) > 2*time.Second {
+		t.Fatalf("no _meta: %s after %v", in.ToolResult, time.Since(start))
+	}
+}
+
 const claudeSettings = `{
   "model": "opus",
   "hooks": {
@@ -188,6 +278,7 @@ func TestClaudeSessionContext(t *testing.T) {
 		t.Error("context with no mark")
 	}
 	t.Setenv("CLAUDE_CODE_SESSION_ATTENDED", "0")
+	t.Setenv("CLAUDE_PID", "") // nothing to read: as claude -p with text input
 	if _, ok := (claudeFormat{}).SessionContext(mark, false); ok {
 		t.Error("context under claude -p")
 	}

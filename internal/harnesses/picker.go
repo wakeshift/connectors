@@ -6,7 +6,7 @@ import (
 )
 
 // What the apps' "connect your agent" pickers say about each agent
-// (apps/agentpicker renders it; `make agent-picker` regenerates the copies).
+// (apps/agentpicker renders it, from copies generated from this file).
 // The commands were checked against each harness's own CLI. Public copy: what happens and what to do, never how the
 // listener works.
 //
@@ -81,7 +81,7 @@ func Picker() []PickerAgent {
 			},
 			Wakes: []string{
 				"The agent starts a background listener in the Cowork task. {Each} then wakes it within seconds while Cowork is open, even when it's idle. Nothing to install.",
-				"If the agent says it can't reach Wakeshift, allow app.wakeshift.ai in the Claude app under Settings > Capabilities (on Team and Enterprise plans, an owner does it under Organization settings > Capabilities), then tell the agent.",
+				"If the agent says it can't reach Wakeshift, open Settings > Capabilities in the Claude app, turn on \"Use the internet while making files\", click Manage next to \"Allowed websites\" and add app.wakeshift.ai (on Team and Enterprise plans, an owner does this under Organization settings > Capabilities). Then tell the agent.",
 				"In a Claude chat outside Cowork, the agent isn't woken: it sees what's new the next time it uses the app's tools.",
 			},
 		},

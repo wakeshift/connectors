@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"os"
@@ -35,9 +36,9 @@ import (
 //     a harness's allowlist can match it (rules.go), and the link never
 //     sits in the transcript or an approval dialog.
 //   - It takes no arguments and won't write to a file a command line
-//     redirected it to (CheckWaitOutput): a prefix rule (Antigravity's)
-//     also matches the command with arguments or a redirect added, and
-//     neither may turn it into something else.
+//     redirected it to (CheckWaitOutput): a prefix rule would also match
+//     the command with arguments or a redirect added, and neither may turn
+//     it into something else.
 //   - It prints what the shell loops printed: each message's line (the
 //     server's own, marked as outside data) and a last hub.closed line, or
 //     for Cursor a hub.restart line after WaitMax messages. It confirms
@@ -249,6 +250,16 @@ type round struct {
 	next   string   // the hub.next url
 	closed string   // the hub.closed line
 	status int
+	after  time.Duration // the answer's Retry-After (RetryAfter; 0: none)
+}
+
+// retryWait is how long a command waits before trying again after a round
+// that was cut short or refused: retry, or the server's Retry-After if
+// longer, spread up to half again at random, so commands refused together
+// (an instance at capacity, one restarting) don't all come back at once.
+func retryWait(retry, after time.Duration) time.Duration {
+	d := max(retry, after)
+	return d + rand.N(d/2+1)
 }
 
 // Run waits and prints until the command should end, and returns the
@@ -296,7 +307,7 @@ func (w *Waiter) Run(ctx context.Context) int {
 			if ctx.Err() != nil {
 				return 0
 			}
-			if !sleepCtx(ctx, retry) {
+			if !sleepCtx(ctx, retryWait(retry, 0)) {
 				return 0
 			}
 			continue
@@ -349,8 +360,9 @@ func (w *Waiter) Run(ctx context.Context) int {
 				link = n
 			}
 		} else if r.status != http.StatusOK || r.next == "" {
-			// Cut short, or Wakeshift busy: wait a little, then the same again.
-			if !sleepCtx(ctx, retry) {
+			// Cut short, or Wakeshift busy: wait a little (as long as it
+			// asked, if it did), then the same again.
+			if !sleepAtLeast(ctx, retryWait(retry, r.after), r.after) {
 				return 0
 			}
 		}
@@ -397,7 +409,7 @@ func (w *Waiter) runMany(ctx context.Context, links []string) int {
 					return
 				}
 				if err != nil {
-					if !sleepCtx(ctx, retry) {
+					if !sleepCtx(ctx, retryWait(retry, 0)) {
 						stop()
 						return
 					}
@@ -460,7 +472,7 @@ func (w *Waiter) runMany(ctx context.Context, links []string) int {
 						link = n
 					}
 				} else if r.status != http.StatusOK || r.next == "" {
-					if !sleepCtx(ctx, retry) {
+					if !sleepAtLeast(ctx, retryWait(retry, r.after), r.after) {
 						stop()
 						return
 					}
@@ -528,7 +540,7 @@ func (w *Waiter) round(ctx context.Context, link, after string) (round, error) {
 		return round{}, errors.New("Wakeshift couldn't be reached") // its error carries the URL
 	}
 	defer resp.Body.Close()
-	r := round{status: resp.StatusCode}
+	r := round{status: resp.StatusCode, after: RetryAfter(resp.Header)}
 	if resp.StatusCode == http.StatusUpgradeRequired {
 		// Older than Wakeshift serves: its message says to ask the user to
 		// update (the link is kept: the updated command uses it).
@@ -611,11 +623,24 @@ func nextLink(link, next string) string {
 	return candidate
 }
 
+// sleepCtx waits about d (Jitter, so waiters that failed together don't
+// retry in step), or until ctx ends.
 func sleepCtx(ctx context.Context, d time.Duration) bool {
 	select {
 	case <-ctx.Done():
 		return false
-	case <-time.After(d):
+	case <-time.After(Jitter(d)):
+		return true
+	}
+}
+
+// sleepAtLeast is sleepCtx, never shorter than floor: a wait the server
+// asked for (Retry-After) is spread up, never cut short by the jitter.
+func sleepAtLeast(ctx context.Context, d, floor time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(max(Jitter(d), floor)):
 		return true
 	}
 }

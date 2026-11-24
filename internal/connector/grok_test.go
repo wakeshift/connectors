@@ -169,18 +169,18 @@ func TestGrokProve(t *testing.T) {
 	g := newGrokCore(t)
 	ctx := context.Background()
 	GrokInit(grokTestBot, g.srv.URL)
-	if r := GrokProve(ctx, grokTestBot, "https://other.example", ""); r.Code != GrokExitRefused || len(g.fetches) != 0 {
+	if r := GrokProve(ctx, grokTestBot, "https://other.example", "", ""); r.Code != GrokExitRefused || len(g.fetches) != 0 {
 		t.Fatalf("another issuer: %+v, %d fetches", r, len(g.fetches))
 	}
 	keyDir := filepath.Join(home, ".local/share/wakeshift", grokTestBot)
 	os.Rename(filepath.Join(keyDir, "issuer"), filepath.Join(keyDir, "issuer.bak"))
-	if r := GrokProve(ctx, grokTestBot, g.srv.URL, ""); r.Code != GrokExitRefused || len(g.fetches) != 0 {
+	if r := GrokProve(ctx, grokTestBot, g.srv.URL, "", ""); r.Code != GrokExitRefused || len(g.fetches) != 0 {
 		t.Fatalf("a key with no issuer: %+v, %d fetches", r, len(g.fetches))
 	}
 	os.Rename(filepath.Join(keyDir, "issuer.bak"), filepath.Join(keyDir, "issuer"))
 
 	// Nothing waiting.
-	if r := GrokProve(ctx, grokTestBot, g.srv.URL, ""); r.Code != GrokExitNothing || len(g.proofs) != 0 {
+	if r := GrokProve(ctx, grokTestBot, g.srv.URL, "", ""); r.Code != GrokExitNothing || len(g.proofs) != 0 {
 		t.Fatalf("nothing waiting: %+v", r)
 	}
 	// Hostile answers: refused, nothing signed or sent.
@@ -191,7 +191,7 @@ func TestGrokProve(t *testing.T) {
 		g.mu.Lock()
 		g.challenge = hostile
 		g.mu.Unlock()
-		if r := GrokProve(ctx, grokTestBot, g.srv.URL, ""); r.Code != GrokExitRefused || len(g.proofs) != 0 {
+		if r := GrokProve(ctx, grokTestBot, g.srv.URL, "", ""); r.Code != GrokExitRefused || len(g.proofs) != 0 {
 			t.Fatalf("%q: %+v, %d proofs", hostile, r, len(g.proofs))
 		}
 		if _, err := os.Stat(canary); err == nil {
@@ -202,21 +202,21 @@ func TestGrokProve(t *testing.T) {
 	g.mu.Lock()
 	g.challenge = grokSetupCh + strings.Repeat(" ", 5<<10)
 	g.mu.Unlock()
-	if r := GrokProve(ctx, grokTestBot, g.srv.URL, ""); r.Code == GrokExitOK || len(g.proofs) != 0 {
+	if r := GrokProve(ctx, grokTestBot, g.srv.URL, "", ""); r.Code == GrokExitOK || len(g.proofs) != 0 {
 		t.Fatalf("an oversized answer: %+v", r)
 	}
 	// Wakeshift's own trouble: an error to retry, not a refusal.
 	g.mu.Lock()
 	g.challenge, g.status = grokSetupCh, http.StatusServiceUnavailable
 	g.mu.Unlock()
-	if r := GrokProve(ctx, grokTestBot, g.srv.URL, ""); r.Code != GrokExitError || !strings.Contains(r.Out, "again in a minute") || len(g.proofs) != 0 {
+	if r := GrokProve(ctx, grokTestBot, g.srv.URL, "", ""); r.Code != GrokExitError || !strings.Contains(r.Out, "again in a minute") || len(g.proofs) != 0 {
 		t.Fatalf("a 503 fetching: %+v", r)
 	}
 	// A redirect isn't followed.
 	g.mu.Lock()
 	g.challenge, g.status = grokSetupCh, http.StatusFound
 	g.mu.Unlock()
-	if r := GrokProve(ctx, grokTestBot, g.srv.URL, ""); r.Code == GrokExitOK || len(g.proofs) != 0 {
+	if r := GrokProve(ctx, grokTestBot, g.srv.URL, "", ""); r.Code == GrokExitOK || len(g.proofs) != 0 {
 		t.Fatalf("a redirect: %+v", r)
 	}
 	g.mu.Lock()
@@ -224,7 +224,7 @@ func TestGrokProve(t *testing.T) {
 	g.mu.Unlock()
 
 	// A real one: signed over the bot's ID, verifiable with the key sent.
-	r := GrokProve(ctx, grokTestBot, g.srv.URL, "")
+	r := GrokProve(ctx, grokTestBot, g.srv.URL, "", "")
 	if r.Code != GrokExitOK || r.Out != "WAKESHIFT ANSWER" || len(g.proofs) != 1 {
 		t.Fatalf("a real challenge: %+v", r)
 	}
@@ -256,10 +256,10 @@ func TestGrokProve(t *testing.T) {
 	g.mu.Lock()
 	g.challenge = strings.Replace(grokSetupCh, "setup", "register", 1)
 	g.mu.Unlock()
-	if r := GrokProve(ctx, grokTestBot, g.srv.URL, id); r.Code != GrokExitOK || g.fetches[len(g.fetches)-1]["challenge"] != id {
+	if r := GrokProve(ctx, grokTestBot, g.srv.URL, id, ""); r.Code != GrokExitOK || g.fetches[len(g.fetches)-1]["challenge"] != id {
 		t.Fatalf("a register challenge: %+v", r)
 	}
-	if r := GrokProve(ctx, grokTestBot, g.srv.URL, "not-an-id'"); r.Code != GrokExitUsage {
+	if r := GrokProve(ctx, grokTestBot, g.srv.URL, "not-an-id'", ""); r.Code != GrokExitUsage {
 		t.Fatalf("a malformed challenge ID: %+v", r)
 	}
 
@@ -271,14 +271,14 @@ func TestGrokProve(t *testing.T) {
 	g.challenge = grokSetupCh
 	g.mu.Unlock()
 	sent := len(g.proofs)
-	if r := GrokProve(ctx, grokTestBot, g.srv.URL, ""); r.Code != GrokExitError || len(g.proofs) != sent {
+	if r := GrokProve(ctx, grokTestBot, g.srv.URL, "", ""); r.Code != GrokExitError || len(g.proofs) != sent {
 		t.Fatalf("a corrupt key: %+v, %d proofs", r, len(g.proofs)-sent)
 	}
 	os.WriteFile(keyPath, good, 0o600)
 	// A key readable by others, or a symlink to a key elsewhere: refused,
 	// not reported missing.
 	os.Chmod(keyPath, 0o644)
-	if r := GrokProve(ctx, grokTestBot, g.srv.URL, ""); r.Code != GrokExitError || len(g.proofs) != sent {
+	if r := GrokProve(ctx, grokTestBot, g.srv.URL, "", ""); r.Code != GrokExitError || len(g.proofs) != sent {
 		t.Fatalf("a key readable by others: %+v", r)
 	}
 	os.Chmod(keyPath, 0o600)
@@ -286,7 +286,7 @@ func TestGrokProve(t *testing.T) {
 	os.WriteFile(elsewhere, good, 0o600)
 	os.Rename(keyPath, keyPath+".real")
 	os.Symlink(elsewhere, keyPath)
-	if r := GrokProve(ctx, grokTestBot, g.srv.URL, ""); r.Code != GrokExitError || len(g.proofs) != sent {
+	if r := GrokProve(ctx, grokTestBot, g.srv.URL, "", ""); r.Code != GrokExitError || len(g.proofs) != sent {
 		t.Fatalf("a symlinked key: %+v", r)
 	}
 	if r := GrokInit(grokTestBot, g.srv.URL); r.Code != GrokExitError {
@@ -297,7 +297,7 @@ func TestGrokProve(t *testing.T) {
 
 	// A key folder open to others: prove refuses it; init closes it.
 	os.Chmod(filepath.Dir(keyPath), 0o755)
-	if r := GrokProve(ctx, grokTestBot, g.srv.URL, ""); r.Code != GrokExitError || len(g.proofs) != sent {
+	if r := GrokProve(ctx, grokTestBot, g.srv.URL, "", ""); r.Code != GrokExitError || len(g.proofs) != sent {
 		t.Fatalf("an open key folder: %+v", r)
 	}
 	if r := GrokInit(grokTestBot, g.srv.URL); r.Code != GrokExitOK {
@@ -310,7 +310,7 @@ func TestGrokProve(t *testing.T) {
 	realDir := filepath.Join(home, "realdir")
 	os.Rename(filepath.Dir(keyPath), realDir)
 	os.Symlink(realDir, filepath.Dir(keyPath))
-	if r := GrokProve(ctx, grokTestBot, g.srv.URL, ""); r.Code != GrokExitError || len(g.proofs) != sent {
+	if r := GrokProve(ctx, grokTestBot, g.srv.URL, "", ""); r.Code != GrokExitError || len(g.proofs) != sent {
 		t.Fatalf("a symlinked key folder: %+v", r)
 	}
 	if r := GrokInit(grokTestBot, g.srv.URL); r.Code != GrokExitError {
@@ -326,7 +326,7 @@ func TestGrokProve(t *testing.T) {
 	g.challenge = grokSetupCh
 	g.mu.Unlock()
 	before, fetched := len(g.proofs), len(g.fetches)
-	r = GrokProve(ctx, grokTestBot, g.srv.URL, "")
+	r = GrokProve(ctx, grokTestBot, g.srv.URL, "", "")
 	if r.Code != GrokExitKeyMissing || !strings.HasPrefix(r.Out, "Wakeshift key missing: ") || len(g.proofs) != before || len(g.fetches) != fetched {
 		t.Fatalf("key missing in a routine's run: %+v", r)
 	}
@@ -336,13 +336,13 @@ func TestGrokProve(t *testing.T) {
 	// In a chat (--challenge): the register challenge it names is fetched
 	// and Wakeshift told, with the challenge only; a setup challenge the
 	// route returned instead is refused, unreported.
-	if r := GrokProve(ctx, grokTestBot, g.srv.URL, id); r.Code != GrokExitRefused || len(g.proofs) != before {
+	if r := GrokProve(ctx, grokTestBot, g.srv.URL, id, ""); r.Code != GrokExitRefused || len(g.proofs) != before {
 		t.Fatalf("a setup challenge for --challenge: %+v", r)
 	}
 	g.mu.Lock()
 	g.challenge = strings.Replace(grokSetupCh, "setup", "register", 1)
 	g.mu.Unlock()
-	r = GrokProve(ctx, grokTestBot, g.srv.URL, id)
+	r = GrokProve(ctx, grokTestBot, g.srv.URL, id, "")
 	if r.Code != GrokExitKeyMissing || len(g.proofs) != before+1 {
 		t.Fatalf("a missing report on the register challenge: %+v", r)
 	}
@@ -351,24 +351,24 @@ func TestGrokProve(t *testing.T) {
 	}
 	// The whole folder gone (a reset VM): missing too.
 	os.Remove(filepath.Dir(keyPath))
-	if r := GrokProve(ctx, grokTestBot, g.srv.URL, ""); r.Code != GrokExitKeyMissing {
+	if r := GrokProve(ctx, grokTestBot, g.srv.URL, "", ""); r.Code != GrokExitKeyMissing {
 		t.Fatalf("the key folder gone: %+v", r)
 	}
-	if r := GrokProve(ctx, grokTestBot, g.srv.URL, id); r.Code != GrokExitKeyMissing {
+	if r := GrokProve(ctx, grokTestBot, g.srv.URL, id, ""); r.Code != GrokExitKeyMissing {
 		t.Fatalf("the key folder gone, in a chat: %+v", r)
 	}
 	// A missing report Wakeshift couldn't take (5xx): an error to retry.
 	g.mu.Lock()
 	g.proofCode = http.StatusBadGateway
 	g.mu.Unlock()
-	if r := GrokProve(ctx, grokTestBot, g.srv.URL, id); r.Code != GrokExitError || !strings.HasPrefix(r.Out, "Wakeshift key missing: ") || !strings.Contains(r.Out, "again in a minute") {
+	if r := GrokProve(ctx, grokTestBot, g.srv.URL, id, ""); r.Code != GrokExitError || !strings.HasPrefix(r.Out, "Wakeshift key missing: ") || !strings.Contains(r.Out, "again in a minute") {
 		t.Fatalf("a 502 on the missing report: %+v", r)
 	}
 	// A missing report Wakeshift refuses doesn't read as taken.
 	g.mu.Lock()
 	g.proofCode = http.StatusUnauthorized
 	g.mu.Unlock()
-	if r := GrokProve(ctx, grokTestBot, g.srv.URL, id); r.Code != GrokExitKeyMissing || !strings.Contains(r.Out, "didn't take the report (401)") {
+	if r := GrokProve(ctx, grokTestBot, g.srv.URL, id, ""); r.Code != GrokExitKeyMissing || !strings.Contains(r.Out, "didn't take the report (401)") {
 		t.Fatalf("a refused missing report: %+v", r)
 	}
 	// A proof Wakeshift couldn't take (5xx): an error to retry.
@@ -376,7 +376,7 @@ func TestGrokProve(t *testing.T) {
 	g.mu.Lock()
 	g.proofCode = http.StatusBadGateway
 	g.mu.Unlock()
-	if r := GrokProve(ctx, grokTestBot, g.srv.URL, id); r.Code != GrokExitError || !strings.Contains(r.Out, "again in a minute") {
+	if r := GrokProve(ctx, grokTestBot, g.srv.URL, id, ""); r.Code != GrokExitError || !strings.Contains(r.Out, "again in a minute") {
 		t.Fatalf("a 502 on the proof: %+v", r)
 	}
 }
@@ -405,5 +405,85 @@ func TestGrokInitConcurrent(t *testing.T) {
 	got, _ := os.ReadFile(filepath.Join(home, ".local/share/wakeshift", grokTestBot, "issuer"))
 	if strings.TrimSpace(string(got)) != issuers[made] {
 		t.Fatalf("pinned %q, made by %s", got, issuers[made])
+	}
+}
+
+// A register challenge comes with the app and workspace it's for: prove
+// prints them and the key's fingerprint, refuses one for another app than
+// --app, refuses an answer whose lines aren't Wakeshift's, and signs the
+// workspace and app into the proof (v=2). A Wakeshift that sends no such
+// lines gets the old proof, unless the command pins an app.
+func TestGrokProveRegisterAbout(t *testing.T) {
+	grokHome(t)
+	g := newGrokCore(t)
+	ctx := context.Background()
+	GrokInit(grokTestBot, g.srv.URL)
+	const id = "0b8f3c1e-2d4a-4b6c-8e0f-1a2b3c4d5e6f"
+	const ws = "9c1d2e3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f"
+	reg := strings.Replace(grokSetupCh, "setup", "register", 1)
+	set := func(body string) {
+		g.mu.Lock()
+		g.challenge = body
+		g.mu.Unlock()
+	}
+	about := "\napp_id=ci\napp=Ci\nworkspace_id=" + ws + "\nworkspace=Gina"
+	set(reg + about)
+	r := GrokProve(ctx, grokTestBot, g.srv.URL, id, "ci")
+	if r.Code != GrokExitOK || len(g.proofs) != 1 || g.fetches[len(g.fetches)-1]["v"] != "2" {
+		t.Fatalf("a register challenge for ci: %+v", r)
+	}
+	p := g.proofs[0]
+	blk, _ := pem.Decode([]byte(p["public_key"]))
+	k, _ := x509.ParsePKIXPublicKey(blk.Bytes)
+	pub := k.(ed25519.PublicKey)
+	sig, _ := base64.StdEncoding.DecodeString(p["signature"])
+	if p["v"] != "2" || !ed25519.Verify(pub, GrokRegisterMessage(grokTestBot, reg, ws, "ci"), sig) {
+		t.Fatalf("the v2 proof: %v", p)
+	}
+	want := "Wakeshift: proving this bot's key (fingerprint " + GrokFingerprint(pub) + ") to the app Ci (ci), in workspace “Gina” (" + ws + ").\nWAKESHIFT ANSWER"
+	if r.Out != want {
+		t.Fatalf("what prove printed:\n%s\nwant:\n%s", r.Out, want)
+	}
+	// Another app than the command pins: refused, nothing signed.
+	if r := GrokProve(ctx, grokTestBot, g.srv.URL, id, "cd"); r.Code != GrokExitRefused || !strings.Contains(r.Out, "for the app Ci (ci), not cd") || len(g.proofs) != 1 {
+		t.Fatalf("another app: %+v", r)
+	}
+	// Lines that aren't Wakeshift's: refused.
+	for _, bad := range []string{reg + about + "\nextra=1", reg + about + "\napp=Ci", reg + "\napp_id=CI\napp=Ci\nworkspace_id=" + ws + "\nworkspace=Gina",
+		reg + "\napp_id=ci\napp=Ci\nworkspace_id=" + ws, reg + "\napp_id=ci\napp=C<i>\nworkspace_id=" + ws + "\nworkspace=Gina",
+		reg + about + "\nworkspace_app=$(id)", reg + about + "\ntouch /tmp/x"} {
+		set(bad)
+		if r := GrokProve(ctx, grokTestBot, g.srv.URL, id, ""); r.Code != GrokExitRefused || len(g.proofs) != 1 {
+			t.Fatalf("%q: %+v", bad, r)
+		}
+	}
+	// A workspace an app owns says so.
+	set(reg + about + "\nworkspace_app=cd")
+	if r := GrokProve(ctx, grokTestBot, g.srv.URL, id, ""); r.Code != GrokExitOK || !strings.Contains(r.Out, ", a workspace the app cd owns.") {
+		t.Fatalf("an app's workspace: %+v", r)
+	}
+	// No lines (an older Wakeshift): the old proof, unless an app is pinned.
+	set(reg)
+	before := len(g.proofs)
+	if r := GrokProve(ctx, grokTestBot, g.srv.URL, id, "ci"); r.Code != GrokExitRefused || len(g.proofs) != before {
+		t.Fatalf("no lines, an app pinned: %+v", r)
+	}
+	if r := GrokProve(ctx, grokTestBot, g.srv.URL, id, ""); r.Code != GrokExitOK || r.Out != "WAKESHIFT ANSWER" || len(g.proofs) != before+1 {
+		t.Fatalf("no lines: %+v", r)
+	}
+	p = g.proofs[before]
+	sig, _ = base64.StdEncoding.DecodeString(p["signature"])
+	if p["v"] != "" || !ed25519.Verify(pub, GrokMessage(grokTestBot, reg), sig) {
+		t.Fatalf("the old proof: %v", p)
+	}
+	// --app needs --challenge, and an app ID as Wakeshift writes them.
+	for _, c := range [][2]string{{"", "ci"}, {id, "'; id"}} {
+		if r := GrokProve(ctx, grokTestBot, g.srv.URL, c[0], c[1]); r.Code != GrokExitUsage {
+			t.Fatalf("--app %q with --challenge %q: %+v", c[1], c[0], r)
+		}
+	}
+	// init prints the same fingerprint.
+	if r := GrokInit(grokTestBot, g.srv.URL); !strings.HasSuffix(r.Out, "Its fingerprint: "+GrokFingerprint(pub)+".") {
+		t.Fatalf("init: %+v", r)
 	}
 }

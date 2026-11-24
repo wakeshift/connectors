@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -33,7 +34,7 @@ func (p *takenPoller) Poll(ctx context.Context, link string, wait time.Duration,
 	return p.fakePoller.Poll(ctx, link, wait, patient)
 }
 
-// The bench's S8 (Claude Code): after each wake, the next waiter exited
+// Claude Code: after each wake, the next waiter used to exit
 // within a second or two because a tool hook's poll took the stream ("a
 // newer hook"), and nothing listened. The newest waiter now takes the
 // stream back and keeps listening; only a waiter that a newer one
@@ -77,7 +78,7 @@ func TestNewestWaiterKeepsListening(t *testing.T) {
 
 // Claude Code shows a PostToolUse hook's context only at the next user
 // prompt, so that hook mustn't take messages (they'd be confirmed and not
-// reach the model: S8's acked_unseen), nor poll the stream (it would take
+// reach the model), nor poll the stream (it would take
 // it from the waiter). The waiter delivers them.
 func TestClaudeToolHookLeavesMessagesForTheWaiter(t *testing.T) {
 	ws := newFakeWakeshift(t)
@@ -88,7 +89,10 @@ func TestClaudeToolHookLeavesMessagesForTheWaiter(t *testing.T) {
 	const session = "c95dca59-8b63-4ebb-a70e-8d69fde72b92"
 	h.Links.Save(session, link)
 	p.add(link, msg("d1", "mid-turn"))
-	in := strings.Replace(claudePostToolUse, "TRANSCRIPT", filepath.Join(t.TempDir(), "none.jsonl"), 1)
+	// The result's line is there, without _meta.
+	tr := filepath.Join(t.TempDir(), "s.jsonl")
+	os.WriteFile(tr, []byte(strings.Replace(claudeTranscriptLine, `"mcpMeta"`, `"noMeta"`, 1)+"\n"), 0o600)
+	in := strings.Replace(claudePostToolUse, "TRANSCRIPT", tr, 1)
 	var out, errb bytes.Buffer
 	h.Run(context.Background(), strings.NewReader(in), &out, &errb)
 	if strings.Contains(out.String(), "mid-turn") || len(p.acked) != 0 || len(p.polls) != 0 {

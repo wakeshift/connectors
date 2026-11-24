@@ -85,6 +85,13 @@ type SessionContextFormat interface {
 	SessionContext(mark string, hooks bool) (Output, bool)
 }
 
+// ContextForFormat is a SessionContextFormat that adds the mark's context
+// for other hook events than the session's start (Claude Code's
+// SubagentStart: Input.contextEvent).
+type ContextForFormat interface {
+	ContextFor(event, mark string, hooks bool) (Output, bool)
+}
+
 // WaitMarkFormat is a SessionContextFormat whose marked result tells the
 // agent to run Wakeshift's wait command (Copilot CLI's): without one here
 // (WaitCommand "": a path no rule can hold), no mark, so the result is the
@@ -144,9 +151,20 @@ type Input struct {
 
 	raw      []byte // the input as the harness sent it, for its format
 	deferred []byte // for a ToolResult that can't be read yet (DeferredFormat)
+	// lateMeta (redeem by call, callredeem.go): reads the result's _meta
+	// later, for a ToolResult whose hook first redeems by call; nil
+	// otherwise.
+	lateMeta func() json.RawMessage
+	// contextEvent: the hook event a SessionContext is for, if not the
+	// session's start ("SubagentStart").
+	contextEvent string
 	// transcript: the conversation's own record, for a waiter whose
 	// conversation has no link (HistoryFormat).
 	transcript string
+	// turnEnded: the waiter runs because a turn ended (Claude Code's
+	// Stop, not SessionStart): what it handed over before has reached a
+	// turn (ConfirmAtTurnEnd).
+	turnEnded bool
 }
 
 // Output is what the hook hands back, in the harness's own format.
@@ -181,7 +199,20 @@ const (
 	// NoteTaken: Wakeshift refused to move the conversation to another
 	// workspace's session (ErrTaken); its link stays.
 	NoteTaken = "Wakeshift: this conversation stays connected where it was: a result asked to connect it to a session of another account or workspace, and Wakeshift doesn't move a connected conversation. To connect it there, stop it being woken where it is first (the app's unwatch tool), or start a new conversation."
+	// NoteLinkNotHeld: Wakeshift refused the redeem because the result's
+	// own session is connected to hooks that hold its link, which these
+	// hooks didn't send (ErrLinkNotHeld): nothing about another account.
+	NoteLinkNotHeld = "Wakeshift: this conversation's session is already connected to hooks that hold its link, and Wakeshift's hooks here don't have that link, so it stays connected as it is. If the hooks here lost it (a reinstall, say), the app's next result connects the conversation again once that link has gone unused for 25 minutes."
 )
+
+// TakenNote is the note for a redeem refused as conversation_taken (err:
+// ErrTaken, or ErrLinkNotHeld where Wakeshift said why).
+func TakenNote(err error) string {
+	if errors.Is(err, ErrLinkNotHeld) {
+		return NoteLinkNotHeld
+	}
+	return NoteTaken
+}
 
 // Hook is one harness's hook entry point.
 type Hook struct {
@@ -224,6 +255,24 @@ type Hook struct {
 	// Alive, if set, says whether the harness still runs (HarnessWatch):
 	// a listener stops when it doesn't, and hands nothing over.
 	Alive func() bool
+	// Parent, for a waiter, is the harness's process (Claude Code's
+	// CLAUDE_PID), watched while it waits (every ParentEvery): once it's
+	// gone the waiter stops at once, taking and handing over nothing, so
+	// it can't hold the stream for a process that has exited.
+	Parent int
+	// ConfirmAtTurnEnd, for a waiter: what it hands over is confirmed
+	// only once a turn has run with it, at the next waiter a turn's end
+	// starts in the same process (Claude Code's Stop), not as it's
+	// handed over. For sessions that may be one query whose process exits
+	// with no new turn (ClaudeStreaming): what it was handed comes again.
+	ConfirmAtTurnEnd bool
+	// InputClosed, for a waiter, says whether the harness's input has
+	// ended (Claude Code's stdin, ClaudeInputClosed): checked as it starts,
+	// every InputEvery while it waits, and before a handover. Once true the
+	// waiter stops, taking and handing over nothing: the session can't run
+	// another turn, and Claude Code holds its exit for the waiter (up to
+	// 30 s) otherwise.
+	InputClosed func() bool
 	// Pins: which app's beacons each MCP server carries (default: in the
 	// harness's settings directory).
 	Pins Pins
@@ -261,6 +310,8 @@ type Hook struct {
 	// once the output is written (at least once: what the harness wasn't
 	// handed comes again).
 	handed func()
+	// takenIDs are the deliveries the last take returned.
+	takenIDs []string
 }
 
 func (h *Hook) pins() Pins {
@@ -275,6 +326,16 @@ func (h *Hook) pins() Pins {
 func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) int {
 	b, err := io.ReadAll(io.LimitReader(stdin, 16<<20))
 	if err != nil {
+		return 0
+	}
+	if h.EventName == ClaudeClaimSendEvent && h.Harness == claudeName {
+		h.sendClaimDetached(ctx, b) // detached: nothing waits on it
+		return 0
+	}
+	if h.EventName == ClaudeClaimEvent && h.Harness == claudeName {
+		// Redeem by call (callredeem.go): PreToolUse's claim. It prints nothing and
+		// exits 0 whatever happens, so the call goes on.
+		h.claimCall(ctx, b)
 		return 0
 	}
 	var in Input
@@ -353,16 +414,52 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout, stderr io.Write
 			if hooks {
 				mark = pluginmark.HooksValue(h.Harness, version.Version, set.Issuers)
 			}
-			out, ok = sf.SessionContext(mark, hooks)
+			if cf, is := h.Format.(ContextForFormat); is && in.contextEvent != "" {
+				out, ok = cf.ContextFor(in.contextEvent, mark, hooks)
+			} else {
+				out, ok = sf.SessionContext(mark, hooks)
+			}
 		}
 	case Resolve:
 		h.resolveSoon(ctx, in)
 	case Stop, Rewake:
 		if h.Rewake || in.Event == Rewake {
 			started := time.Now()
+			inputEnded := func() bool { return false }
+			if h.Parent > 0 || h.InputClosed != nil {
+				var stop func()
+				ctx, stop, inputEnded = h.watchParent(ctx)
+				defer stop()
+			}
+			if h.inputClosed() {
+				// A one-shot query (or a host closing the session) that
+				// ended before this waiter started: nothing to wait for.
+				if h.ConfirmAtTurnEnd && in.turnEnded {
+					h.confirmHanded(ctx, in.Conversation)
+				}
+				h.why = "Claude's input has closed"
+				h.logExit(in.Conversation, started)
+				return 0
+			}
 			h.claimWaiter()
 			h.patient = true
+			if h.ConfirmAtTurnEnd && in.turnEnded {
+				// A turn ran since this process's last handover: confirm it
+				// before polling, or the poll hands it out again.
+				h.confirmHanded(ctx, in.Conversation)
+			}
+			if RedeemByCallEnabled() && h.Harness == claudeName {
+				// Redeem by call's old session keys, at most once a day:
+				// a waiter runs in the background, unlike the claim.
+				SweepSessionKeys(h.Verifier.Settings.Dir, time.Now())
+			}
+			// The claim relay, while this waiter listens (claimd.go).
+			stopClaims := h.serveClaims(ctx, in.Conversation, in.transcript)
 			out, ok = h.listen(ctx, in, h.RewakeWait)
+			stopClaims()
+			if inputEnded() {
+				h.why = "Claude's input has closed"
+			}
 			h.logExit(in.Conversation, started)
 		} else {
 			out, ok = h.listen(ctx, in, h.StopWait)
@@ -424,9 +521,38 @@ func (h *Hook) toolResult(ctx context.Context, in Input) (Output, bool) {
 	}
 	var notes []string
 	token, carried := FindBeacon(in.ToolResult)
+	if in.lateMeta != nil && token == "" {
+		// Redeem by call (callredeem.go): a claimed call by its ID, else
+		// the result's _meta from the transcript, as before. Only when the
+		// input has no beacon: one in the input is redeemed at once, with
+		// no wait for the transcript, so there's nothing to bypass.
+		r := h.callFirst(ctx, in)
+		if r.done {
+			if r.note != "" {
+				notes = append(notes, r.note)
+			}
+			return h.resultNotes(ctx, in, "", notes)
+		}
+		ctx, in = r.ctx, r.in
+		token, carried = FindBeacon(in.ToolResult)
+		started := time.Now()
+		n := h.connect(ctx, in, token, carried)
+		h.logBeacon(ctx, in.Conversation, token, n, started)
+		if n != "" {
+			notes = append(notes, n)
+		}
+		return h.resultNotes(ctx, in, token, notes)
+	}
 	if n := h.connect(ctx, in, token, carried); n != "" {
 		notes = append(notes, n)
 	}
+	return h.resultNotes(ctx, in, token, notes)
+}
+
+// resultNotes is the rest of toolResult, once the conversation's beacon
+// (or call) was acted on: the wait command's note, then what's waiting or
+// the notes, as the harness's context.
+func (h *Hook) resultNotes(ctx context.Context, in Input, token string, notes []string) (Output, bool) {
 	if n := h.waitNotRunning(in, token); n != "" {
 		notes = append(notes, n)
 	}
@@ -510,15 +636,31 @@ func (h *Hook) notePath(conversation string) string {
 	return filepath.Join(h.Verifier.Settings.Dir, "notes", filepath.Base(h.Links.path(conversation)))
 }
 
+// saveNote adds note to the conversation's note for later: to what's
+// there, so a note saved earlier (a claim taken at PreToolUse) isn't lost
+// to the result's own, and once.
 func (h *Hook) saveNote(conversation, note string) {
 	p := h.notePath(conversation)
-	if os.MkdirAll(filepath.Dir(p), 0o700) == nil {
-		os.WriteFile(p, []byte(note), 0o600)
+	if os.MkdirAll(filepath.Dir(p), 0o700) != nil {
+		return
 	}
+	if unlock, err := lockFile(filepath.Join(filepath.Dir(p), ".lock")); err == nil {
+		defer unlock() // two hooks adding at once both keep theirs
+	}
+	if b, err := os.ReadFile(p); err == nil && len(b) > 0 {
+		if strings.Contains(string(b), note) {
+			return
+		}
+		note = string(b) + "\n\n" + note
+	}
+	os.WriteFile(p, []byte(note), 0o600)
 }
 
 func (h *Hook) takeNote(conversation string) string {
 	p := h.notePath(conversation)
+	if unlock, err := lockFile(filepath.Join(filepath.Dir(p), ".lock")); err == nil {
+		defer unlock()
+	}
 	b, err := os.ReadFile(p)
 	if err != nil {
 		return ""
@@ -544,15 +686,29 @@ func (h *Hook) listen(ctx context.Context, in Input, wait time.Duration) (Output
 		if !h.Rewake && in.Event != Rewake {
 			return Output{}, false
 		}
-		if !h.installedSince(ctx, in) && !h.waitForLink(ctx, in.Conversation) {
+		// Still none after LinkGrace: the result's hook may have missed
+		// its beacon (missedRedeem).
+		if !h.installedSince(ctx, in) && !h.waitForLink(ctx, in.Conversation) && !h.missedRedeem(ctx, in) {
 			// Still none: if a result promised the plugin connects this
 			// conversation, say it isn't connected (unconnected).
 			return h.unconnected(ctx, in)
 		}
 	}
+	if h.ConfirmAtTurnEnd && !in.turnEnded && !h.awaitTurnEnd(ctx, in.Conversation) {
+		return Output{}, false
+	}
 	text, ack := h.take(ctx, in.Conversation, wait, false)
 	if text == "" {
 		return Output{}, false
+	}
+	ids := h.takenIDs
+	if h.inputClosed() {
+		h.why = "Claude's input closed before the messages could be handed over"
+		return Output{}, false // not acknowledged: Wakeshift hands it out again
+	}
+	if h.Parent > 0 && !alive(h.Parent) {
+		h.why = "the harness quit before the messages could be handed over"
+		return Output{}, false // not acknowledged: Wakeshift hands it out again
 	}
 	if h.Alive != nil && !h.Alive() {
 		h.why = "the harness quit before the messages could be handed over"
@@ -574,9 +730,14 @@ func (h *Hook) listen(ctx context.Context, in Input, wait time.Duration) (Output
 		}
 	}
 	out, ok := h.Format.Continue(in, text)
-	if ok {
+	switch {
+	case ok && h.ConfirmAtTurnEnd && h.handedPath(in.Conversation) != "":
+		// Kept for the woken turn's end to confirm (confirmHanded): this
+		// process may be one query that exits without that turn.
+		h.handed = func() { h.saveHanded(in.Conversation, ids) }
+	case ok:
 		h.handed = ack // once it's written (Run)
-	} else {
+	default:
 		h.why = "the harness's format can't continue the session"
 		if note != "" {
 			h.saveNote(in.Conversation, note)
@@ -592,17 +753,19 @@ func (h *Hook) listen(ctx context.Context, in Input, wait time.Duration) (Output
 // every one is polled at once, and the first to hand out messages ends the
 // others' waits (each acknowledged on its own link).
 func (h *Hook) take(ctx context.Context, conversation string, wait time.Duration, immediate bool) (string, func()) {
+	h.takenIDs = nil
 	links := h.Links.All(conversation)
 	if len(links) == 0 {
 		h.why = "no link for the conversation"
 		return "", nil
 	}
 	if len(links) == 1 {
-		ds, ack, why := h.takeOne(ctx, conversation, links[0].Link, wait, immediate)
+		ds, ack, why := h.takeOne(ctx, conversation, links[0], wait, immediate)
 		h.why = why
 		if len(ds) == 0 {
 			return "", nil
 		}
+		h.takenIDs = deliveryIDs(ds)
 		return h.prompt(ds), ack
 	}
 	type got struct {
@@ -618,7 +781,7 @@ func (h *Hook) take(ctx context.Context, conversation string, wait time.Duration
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ds, ack, why := h.takeOne(cctx, conversation, k.Link, wait, immediate)
+			ds, ack, why := h.takeOne(cctx, conversation, k, wait, immediate)
 			out[i] = got{ds, ack, why}
 			if len(ds) > 0 && !immediate {
 				cancel() // the others stop waiting: these are handed over now
@@ -639,6 +802,7 @@ func (h *Hook) take(ctx context.Context, conversation string, wait time.Duration
 	if len(ds) == 0 {
 		return "", nil
 	}
+	h.takenIDs = deliveryIDs(ds)
 	return h.prompt(ds), func() {
 		for _, a := range acks {
 			a()
@@ -649,8 +813,9 @@ func (h *Hook) take(ctx context.Context, conversation string, wait time.Duration
 // takeOne is take on one of the conversation's links: its deliveries (none
 // if it stopped first), the func that acknowledges them, and why it
 // stopped listening otherwise (the waiter's log).
-func (h *Hook) takeOne(ctx context.Context, conversation, link string, wait time.Duration, immediate bool) ([]Delivery, func(), string) {
+func (h *Hook) takeOne(ctx context.Context, conversation string, held Link, wait time.Duration, immediate bool) ([]Delivery, func(), string) {
 	var why string
+	link := held.Link
 	deadline := time.Time{}
 	if wait > 0 {
 		deadline = time.Now().Add(wait)
@@ -701,8 +866,17 @@ func (h *Hook) takeOne(ctx context.Context, conversation, link string, wait time
 		}
 		switch err {
 		case ErrLinkGone:
-			h.Links.ForgetLink(conversation, link)
+			if next := h.forgetRevoked(conversation, held.App, link); next != "" {
+				// A redeem replaced it (a resumed conversation that
+				// watches again): listen on the new one.
+				link = next
+				why = "the link was revoked; listening on its successor"
+				continue
+			}
 			why = "the link was revoked"
+			if h.stale != nil && h.stale() {
+				why = "the link was revoked; a newer waiter took over"
+			}
 			return nil, nil, why
 		case ErrLinkExpired:
 			// Wakeshift renews a link that expired while nothing polled it
@@ -806,6 +980,41 @@ const minPoll = 100 * time.Millisecond
 // answerReserve is the most of a hook's time left for a poll's answer to
 // arrive after the server stops waiting (a fifth of it, for a short one).
 const answerReserve = 2 * time.Second
+
+// forgetRevoked forgets the conversation's revoked link and returns the
+// link that replaced it, the conversation's link for app, if a redeem on
+// this machine replaced it; "" otherwise (an unwatch, or a revocation from
+// elsewhere). A redeem revokes the link it supersedes (the conversation's
+// earlier session: a resumed conversation that calls watch again) before
+// its hook saves the new one, all while the hook holds LockRedeems, so a
+// waiter told its link was revoked takes that lock before it forgets and
+// reads: the new link is saved by then, and no redeem starts in between
+// (one would hand back no link, as the conversation's). A conversation keeps one
+// link per app (Links), and only a redeem or a rotation for that app
+// replaces it, so a different one there is the revoked link's replacement:
+// the link a waiter started now would listen on. Only a link on the same
+// server as the revoked one, and only for a link that names its app: one
+// that names none can't be told from another app's. Not for a waiter a
+// newer one replaced (claimWaiter), which listens on that link itself; and
+// should two listeners still meet on it, the stream takes the newer poll
+// and the other stops (ErrReplaced), as for any two.
+func (h *Hook) forgetRevoked(conversation, app, revoked string) string {
+	if app == "" || h.stale != nil && h.stale() {
+		h.Links.ForgetLink(conversation, revoked)
+		return ""
+	}
+	unlock := h.Links.LockRedeems()
+	defer unlock()
+	h.Links.ForgetLink(conversation, revoked)
+	if h.stale != nil && h.stale() {
+		return ""
+	}
+	next := h.Links.LoadFor(conversation, app)
+	if next == revoked || !SameOrigin(next, revoked) {
+		return ""
+	}
+	return next
+}
 
 // SameOrigin says whether two links are on the same server (scheme and
 // host): a link is only ever swapped for another on its own server.

@@ -417,3 +417,39 @@ func TestWaitStopsOnceUninstalled(t *testing.T) {
 		}
 	}
 }
+
+// A refusal with Retry-After (an instance at capacity or restarting, with
+// nothing else to say) is waited out, spread up to half again, before the
+// same round runs again; without one, the command's own short pause.
+func TestWaitHonorsRetryAfter(t *testing.T) {
+	s := newWaitServer(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusServiceUnavailable)
+		},
+		lines(ev1, `{"type":"cursor","after":"00112233aabbccdd"}`, `{"type":"hub.next","url":"x","note":"Run the command again"}`),
+	)
+	var out bytes.Buffer
+	w := newTestWaiter(t, s, "antigravity", &out)
+	start := time.Now()
+	if code := w.Run(context.Background()); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if took := time.Since(start); took < time.Second || took > 3*time.Second {
+		t.Fatalf("came back after %v, Retry-After 1", took)
+	}
+	if out.String() != ev1+"\n" {
+		t.Fatalf("printed %q", out.String())
+	}
+}
+
+func TestRetryWait(t *testing.T) {
+	for range 100 {
+		if d := retryWait(5*time.Second, 0); d < 5*time.Second || d > 7500*time.Millisecond {
+			t.Fatalf("no Retry-After: %v", d)
+		}
+		if d := retryWait(5*time.Second, 60*time.Second); d < 60*time.Second || d > 90*time.Second {
+			t.Fatalf("Retry-After 60: %v", d)
+		}
+	}
+}

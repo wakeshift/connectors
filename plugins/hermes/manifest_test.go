@@ -10,7 +10,7 @@ var manifestVersion = regexp.MustCompile(`(?m)^version: "([^"]*)"$`)
 
 // plugin.yaml is stamped with a build's version, the same one _version.py
 // gives the plugin's requests; a local build's is 0.0.0+dev. Here it's
-// unstamped, on the line Manifest and opensource/export.sh replace.
+// unstamped, on the line Manifest (and publishing) replace.
 func TestManifestVersion(t *testing.T) {
 	src, _ := Files.ReadFile("wakeshift/" + ManifestName)
 	if strings.Count(string(src), unstamped+"\n") != 1 {

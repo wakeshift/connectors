@@ -124,8 +124,8 @@ func TestHeadline(t *testing.T) {
 var tagRE = regexp.MustCompile(`<wakeshift_message [^>]*>`)
 
 // No human-facing text of a wake (its headline, its preface, and the frame
-// outside the tags' attributes) names an app by its ID (QA pass, November
-// 9, 2026: agents answered "From Webhooks (app/try)", and pi's reasoning
+// outside the tags' attributes) names an app by its ID (in testing, agents
+// answered "From Webhooks (app/try)", and pi's reasoning
 // shows the wake text had them phrase it that way). The preface asks for
 // the app's name instead.
 func TestNoAppIDsInHumanText(t *testing.T) {

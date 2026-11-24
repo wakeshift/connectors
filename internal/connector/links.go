@@ -19,8 +19,7 @@ import (
 
 // Links keeps each conversation's stream links (secrets: 0600 files in
 // 0700 directories), one per app the conversation is connected to, so
-// every app it watches wakes it (docs/harnesses.md, "Several apps in one
-// conversation"). Named by hashes of the conversation ID and the app, so
+// every app it watches wakes it. Named by hashes of the conversation ID and the app, so
 // odd IDs can't escape the directory:
 //
 //	links/<hash(conversation)>/<hash(app)>.json   a link per app

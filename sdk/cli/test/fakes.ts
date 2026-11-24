@@ -311,7 +311,7 @@ export class FakeMcp {
         // for a program it doesn't recognize only that it can't wake it.
         const block =
           args.harness === "claude-code" && !this.o.dropHarness
-            ? `To be woken when Shipyard sends something, start the Monitor tool now (timeout_ms 1800000) with this command: u='${this.core.waitUrl(sub)}&until=hooks&timeout=50s'; c=; p=$PPID; while :; do …; done . ${key}`
+            ? `If you haven't written this conversation's link to the file ~/.wakeshift/links/0123456789abcdef yet, first write it with your file-writing tool (by its full path in your home directory, not in a folder named ~), its whole content this one line: ${this.core.waitUrl(sub)} . Never write it with a shell command or put the link in one: it's this conversation's private link, and a command would show it in approvals and logs. To be woken when Shipyard sends something, start the Monitor tool now (timeout_ms 1800000) with this command: f=$HOME/.wakeshift/links/0123456789abcdef; u="$b&until=hooks&timeout=50s"; c=; p=$PPID; while :; do …; done; fi . ${key}`
             : `Wakeshift can't wake this agent, so nothing will notify you here when something arrives. ${key}`;
         if (this.o.json) {
           const own = { number: n, pipeline: this.pipeline, run: `run-${n}` };

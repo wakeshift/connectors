@@ -211,7 +211,7 @@ func TestSemver(t *testing.T) {
 }
 
 // Claude Code's plugin as rendered meets the rules of Anthropic's plugin
-// directory that a file check can see (docs/claude-plugin-submission.md):
+// directory that a file check can see:
 // every hook runs a file in the plugin, through ${CLAUDE_PLUGIN_ROOT} and no
 // other variable, with no shell, substitution, wildcard or path out of the
 // plugin; no symlinks or .DS_Store; nothing over 5 MiB, and nothing but
@@ -257,7 +257,7 @@ func TestClaudeCodePluginForDirectory(t *testing.T) {
 			}
 		}
 	}
-	if n != 4 {
+	if n != 6 {
 		t.Fatalf("%d hooks", n)
 	}
 	filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
@@ -508,7 +508,8 @@ func TestClaudeCodePlugin(t *testing.T) {
 	if err := json.Unmarshal([]byte(read(t, dir, "plugins/claude-code/hooks/hooks.json")), &hooks); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{"PostToolUse": "hook --harness claude-code", "SessionStart": "hook --harness claude-code --rewake", "Stop": "hook --harness claude-code --rewake"}
+	want := map[string]string{"PreToolUse": "hook --harness claude-code --event " + connector.ClaudeClaimEvent,
+		"SubagentStart": "hook --harness claude-code --event " + connector.ClaudeSubagentContextEvent, "PostToolUse": "hook --harness claude-code", "SessionStart": "hook --harness claude-code --rewake", "Stop": "hook --harness claude-code --rewake"}
 	if len(hooks.Hooks) != len(want) {
 		t.Fatalf("events: %v", hooks.Hooks)
 	}
@@ -536,13 +537,24 @@ func TestClaudeCodePlugin(t *testing.T) {
 			if g[0].Matcher != "mcp__.*" || !h.Async || h.Timeout != 30 {
 				t.Fatalf("%s: %+v", ev, g[0])
 			}
+		case "PreToolUse":
+			// Redeem by call: the claim, synchronous and short; it never
+			// fails the call.
+			if g[0].Matcher != "mcp__.*" || h.Async || h.AsyncRewake || h.Timeout != 5 {
+				t.Fatalf("%s: %+v", ev, g[0])
+			}
+		case "SubagentStart":
+			// Redeem by call: the mark for a subagent's context.
+			if g[0].Matcher != "" || h.Async || h.AsyncRewake || h.Timeout != 10 {
+				t.Fatalf("%s: %+v", ev, g[0])
+			}
 		default:
 			if !h.AsyncRewake || h.Timeout != 86400 {
 				t.Fatalf("%s: %+v", ev, g[0])
 			}
 		}
 		// The waiters' wakes are presented as the installer's are.
-		if ev != "PostToolUse" && (h.RewakeSummary != connector.ClaudeRewakeSummary || h.RewakeMessage != connector.ClaudeRewakeMessage) {
+		if ev != "PostToolUse" && ev != "PreToolUse" && ev != "SubagentStart" && (h.RewakeSummary != connector.ClaudeRewakeSummary || h.RewakeMessage != connector.ClaudeRewakeMessage) {
 			t.Fatalf("%s: %+v", ev, g[0])
 		}
 	}

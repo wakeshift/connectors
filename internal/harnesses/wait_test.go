@@ -13,7 +13,7 @@ const testWait = "/Users/ada/.wakeshift/bin/wakeshift wait"
 func TestWaitCommandOK(t *testing.T) {
 	for _, ok := range []string{testWait, "/home/ada/.wakeshift/bin/wakeshift wait", "/Users/x_y-1.2@3+4/.wakeshift/bin/wakeshift wait",
 		"/root/.wakeshift/bin/wakeshift wait", "/var/folders/ab/xyz123/T/wb/homes/x/.wakeshift/bin/wakeshift wait",
-		"/private/var/folders/_x/3rrg5c_95sn39rlrjbc7jv0m0000gn/T/wb/homes/x/.wakeshift/bin/wakeshift wait"} {
+		"/private/var/folders/_x/7k2m4p_q8wz61xdfn0bv3c0000gn/T/wb/homes/x/.wakeshift/bin/wakeshift wait"} {
 		if !WaitCommandOK(ok) {
 			t.Errorf("refused %q", ok)
 		}
@@ -26,7 +26,7 @@ func TestWaitCommandOK(t *testing.T) {
 		"/opt/wakeshift wait", "/Users/ada/bin/wakeshift wait", "/tmp/evil/.wakeshift/bin/wakeshift wait", "/private/tmp/x/.wakeshift/bin/wakeshift wait",
 		"/var/tmp/.wakeshift/bin/wakeshift wait", "/dev/shm/.wakeshift/bin/wakeshift wait",
 		// Directories any local user can write to on macOS, or that aren't
-		// a user's own (security review, October 28).
+		// a user's own.
 		"/Users/Shared/.wakeshift/bin/wakeshift wait", "/Users/shared/x/.wakeshift/bin/wakeshift wait", "/Library/Caches/x/.wakeshift/bin/wakeshift wait",
 		"/opt/x/.wakeshift/bin/wakeshift wait", "/usr/local/.wakeshift/bin/wakeshift wait", "/Users/.hidden/.wakeshift/bin/wakeshift wait",
 		"/var/folders/.wakeshift/bin/wakeshift wait", "/home/.wakeshift/bin/wakeshift wait", "/rootx/.wakeshift/bin/wakeshift wait"} {

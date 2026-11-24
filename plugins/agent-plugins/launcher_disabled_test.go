@@ -122,7 +122,10 @@ func TestLauncherDisabled(t *testing.T) {
 					for _, warm := range []bool{false, true} {
 						home := filepath.Join(t.TempDir(), ".wakeshift")
 						l := &lane{t: t, shell: shell, plugin: root, home: home, log: filepath.Join(t.TempDir(), "log")}
-						l.env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + filepath.Dir(home), "WAKESHIFT_HOME=" + home, "LOG=" + l.log}
+						// Redeem by call's hooks run only with its flag on
+						// (the launcher's own gate): on, so the control
+						// below has them do their work.
+						l.env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + filepath.Dir(home), "WAKESHIFT_HOME=" + home, "LOG=" + l.log, "WAKESHIFT_REDEEM_BY_TOOL_CALL=1"}
 						if warm {
 							if out, errOut := l.run("", "prepare"); out != "" || errOut != "" {
 								t.Fatalf("%s: setting up: %q %q", what, out, errOut)
@@ -149,6 +152,16 @@ func TestLauncherDisabled(t *testing.T) {
 								t.Fatalf("%s: a first run fetched nothing: the test proves nothing", what)
 							case warm && args[0] != "prepare" && !ran:
 								t.Fatalf("%s: a warm run ran no connector: the test proves nothing", what)
+							}
+							if gated := strings.Contains(" "+strings.Join(args, " ")+" ", " --event claim ") ||
+								strings.Contains(" "+strings.Join(args, " ")+" ", " --event subagent-context "); gated && !warm && v == "" {
+								// Without the flag, redeem by call's hooks do nothing.
+								l2 := &lane{t: t, shell: shell, plugin: root, home: filepath.Join(t.TempDir(), ".wakeshift"), log: filepath.Join(t.TempDir(), "log")}
+								l2.env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + filepath.Dir(l2.home), "WAKESHIFT_HOME=" + l2.home, "LOG=" + l2.log}
+								r.hits.Store(0)
+								if out, errOut := l2.run(`{"hook":1}`, args...); out != "" || errOut != "" || r.hits.Load() != 0 || l2.logged() != "" {
+									t.Fatalf("%s without the flag: %q %q, %d requests", what, out, errOut, r.hits.Load())
+								}
 							}
 							continue
 						}

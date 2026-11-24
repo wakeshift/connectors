@@ -10,6 +10,7 @@
 //	wakeshift bridge --harness pi                   the pi extension's child
 //	wakeshift run --thread ID | status ID           Codex's per-thread connector
 //	wakeshift grok init|prove --bot ID --issuer URL Grok Bot's key and proofs
+//	wakeshift doctor [--harness NAME]               what support asks for (no secrets)
 //	wakeshift harnesses | version
 //
 // See internal/connectcli, internal/connector and internal/codexconnector.

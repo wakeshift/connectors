@@ -30,7 +30,7 @@ func TestPiPackage(t *testing.T) {
 		t.Errorf("%s isn't PiPackage(): run go test ./internal/connector -run TestPiPackage -update", piPackageFile)
 	}
 	if strings.Count(want, PiDefaultIssuers) != 1 {
-		t.Error("plugins/pack-npm.mjs replaces the default issuers' line: it must be there once")
+		t.Error("the packing script replaces the default issuers' line: it must be there once")
 	}
 	if strings.Contains(want, "__WAKESHIFT_BIN__") || strings.Contains(want, "const ready = () => true") {
 		t.Error("the package has the installer's head")

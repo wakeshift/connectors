@@ -78,8 +78,8 @@ func TestUninstallRemovesWhatInstallCreated(t *testing.T) {
 	}
 }
 
-// Uninstall leaves nothing of the harness in Wakeshift's home (S6 found
-// .wakeshift/claude-code left, in auto and manual mode): its logs and the
+// Uninstall leaves nothing of the harness in Wakeshift's home (it once
+// left .wakeshift/claude-code, in auto and manual mode): its logs and the
 // files hooks write there go too, other harnesses' directories and the
 // binary stay, and a waiter that exits afterwards, or a hook the session
 // still runs, doesn't make it again.
@@ -136,6 +136,7 @@ func TestOwnDir(t *testing.T) {
 		t.Fatal("ownDir")
 	}
 	t.Setenv("WAKESHIFT_HOME", ".wakeshift")
+	t.Setenv("HOME", "")
 	if ownDir(".wakeshift/codex", "codex") {
 		t.Fatal("a relative home")
 	}

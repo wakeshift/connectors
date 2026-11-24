@@ -149,8 +149,7 @@ func TestPiBridge(t *testing.T) {
 	}
 }
 
-// Beacons the extension must never act on (docs/harnesses.md, "Beacon
-// binding"): each leaves the session unconnected, with nothing redeemed.
+// Beacons the extension must never act on: each leaves the session unconnected, with nothing redeemed.
 func TestPiBeaconRefusals(t *testing.T) {
 	ws := newFakeWakeshift(t)
 	_, otherKey, _ := ed25519.GenerateKey(rand.Reader)

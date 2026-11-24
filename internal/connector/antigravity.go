@@ -21,9 +21,9 @@ import (
 // beacon in the result's text, naming the conversation, reaches the hook.
 //
 //   - PostToolUse (call_mcp_tool): its model sees the result's text, beacon
-//     and all: no hook output changes it (agy 1.4.12 ignores PostToolUse's
-//     output, overwrite_result included), and agy drops a result's _meta
-//     and structured content. agy 1.4.12 writes the step's output file
+//     and all: no hook output changes it (agy 1.4.12 was observed to
+//     ignore PostToolUse's output, overwrite_result included), and agy
+//     drops a result's _meta and structured content. agy 1.4.12 writes the step's output file
 //     before the hook runs, so the hook redeems the beacon from it then,
 //     before the model sees the result. Without that file (older agy), the
 //     step reaches the transcript only after the hook returns, so the hook

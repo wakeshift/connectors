@@ -1,0 +1,11 @@
+Wakeshift connectors
+Copyright 2026 Clawvisor Inc.
+
+This product is licensed under the Apache License, Version 2.0 (LICENSE).
+
+The Codex desktop IPC client (internal/codexconnector/desktopipc.go) follows the
+client in OpenAI Codex (https://github.com/openai/codex,
+codex-rs/tui/src/ide_context/ipc.rs), licensed under the Apache License,
+Version 2.0.
+OpenAI Codex
+Copyright 2025 OpenAI

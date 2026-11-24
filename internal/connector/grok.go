@@ -1,16 +1,21 @@
 package connector
 
-// Grok Bot's key and proofs (docs/grok-webhooks.md, section 7): what a Grok
-// Bot runs, in a chat or in its routine's run, instead of shell and openssl
-// steps a model would copy and adapt. Both commands take only the bot's ID
-// and the issuer, which Wakeshift writes into the command; nothing comes
-// from a webhook's body or the model's own text. The challenge is fetched
-// from the issuer (POST /v1/stream/proof/challenge) and checked as data
-// before it's signed; the signature covers the bot's ID from the command
-// line.
+// Grok Bot's key and proofs: what a Grok Bot runs, in a chat or in its
+// routine's run, instead of shell and openssl steps a model would copy and
+// adapt. Both commands take only the bot's ID and the issuer, which
+// Wakeshift writes into the command; nothing comes from a webhook's body or
+// the model's own text. The challenge is fetched from the issuer (POST
+// /v1/stream/proof/challenge) and checked as data before it's signed; the
+// signature covers the bot's ID from the command line.
 //
 //	wakeshift grok init  --bot ID --issuer URL                 make the bot's key if it has none
-//	wakeshift grok prove --bot ID --issuer URL [--challenge ID]  prove the key on the open challenge
+//	wakeshift grok prove --bot ID --issuer URL [--challenge ID [--app ID]]  prove the key on the open challenge
+//
+// A register challenge (--challenge) comes with the app and the workspace
+// it's for: prove prints them, and the key's fingerprint, before anything
+// else, refuses a challenge for another app than --app names, and signs
+// the workspace and app into the proof, so the bot proves its key only to
+// the app it was told, and Wakeshift can check that it did.
 //
 // The issuer is pinned at init, beside the key (<key folder>/issuer): prove
 // uses the key only with that issuer, and init with an existing key
@@ -24,8 +29,10 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -55,7 +62,95 @@ const (
 var (
 	grokChallengeRE = regexp.MustCompile(`^wakeshift:v1:(register|setup):[A-Za-z0-9_-]{43}:[A-Za-z0-9_-]{22}$`)
 	grokUUIDRE      = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	grokAppRE       = regexp.MustCompile(`^[a-z][a-z0-9-]{1,39}$`)
 )
+
+// grokAbout is what Wakeshift says a register challenge is for: the app
+// (its ID and name) and the workspace (its ID, its name and, for one an
+// app owns, that app's ID).
+type grokAbout struct {
+	AppID, App, WorkspaceID, Workspace, WorkspaceApp string
+}
+
+// grokName is a name as Wakeshift sends it: one line of printable text, at
+// most 100 characters.
+func grokName(s string) bool {
+	if s == "" || len([]rune(s)) > 100 {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) || strings.ContainsRune("<>\"`", r) {
+			return false
+		}
+	}
+	return true
+}
+
+// grokParseChallenge reads the challenge route's answer: the challenge on
+// its first line, then, for a register challenge, "key=value" lines saying
+// what it's for (none from a Wakeshift that doesn't send them). Anything
+// else in it, or a value that isn't one Wakeshift sends, refuses it.
+func grokParseChallenge(body string) (string, *grokAbout, bool) {
+	lines := strings.Split(strings.TrimSpace(body), "\n")
+	ch := strings.TrimSpace(lines[0])
+	if len(lines) == 1 {
+		return ch, nil, true
+	}
+	var a grokAbout
+	seen := map[string]bool{}
+	for _, l := range lines[1:] {
+		k, v, ok := strings.Cut(strings.TrimRight(l, "\r"), "=")
+		if !ok || seen[k] {
+			return "", nil, false
+		}
+		seen[k] = true
+		switch k {
+		case "app_id":
+			a.AppID = v
+		case "app":
+			a.App = v
+		case "workspace_id":
+			a.WorkspaceID = v
+		case "workspace":
+			a.Workspace = v
+		case "workspace_app":
+			a.WorkspaceApp = v
+		default:
+			return "", nil, false
+		}
+	}
+	if !grokAppRE.MatchString(a.AppID) || !grokName(a.App) || !grokUUIDRE.MatchString(a.WorkspaceID) || !grokName(a.Workspace) ||
+		(seen["workspace_app"] && !grokAppRE.MatchString(a.WorkspaceApp)) {
+		return "", nil, false
+	}
+	return ch, &a, true
+}
+
+// grokShown is the line prove prints before it sends anything for a
+// register challenge: which app, in which workspace, it proves the key
+// (fp) to.
+func grokShown(a *grokAbout, fp string) string {
+	if a == nil {
+		return ""
+	}
+	ws := "workspace \u201c" + a.Workspace + "\u201d (" + a.WorkspaceID + ")"
+	if a.WorkspaceApp != "" {
+		ws += ", a workspace the app " + a.WorkspaceApp + " owns"
+	}
+	key := ""
+	if fp != "" {
+		key = " (fingerprint " + fp + ")"
+	}
+	return "Wakeshift: proving this bot's key" + key + " to the app " + a.App + " (" + a.AppID + "), in " + ws + ".\n"
+}
+
+// GrokFingerprint is a public key's fingerprint as Wakeshift shows it
+// (botkeys.Short of botkeys.Fingerprint): the first 16 hex characters of
+// its SHA-256.
+func GrokFingerprint(pub ed25519.PublicKey) string {
+	sum := sha256.Sum256(pub)
+	return hex.EncodeToString(sum[:])[:16]
+}
 
 // GrokBotOK reports whether a bot ID is one the commands accept: the
 // rule Wakeshift writes them by (harnesses.GrokBotIDOK).
@@ -115,8 +210,9 @@ func GrokInit(bot, issuer string) GrokResult {
 	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 		return GrokResult{GrokExitError, "Wakeshift: couldn't check this bot's key file: " + statErr.Error()}
 	}
+	var have ed25519.PrivateKey
 	if statErr == nil {
-		if _, err := grokReadKey(path); err != nil {
+		if have, err = grokReadKey(path); err != nil {
 			return GrokResult{GrokExitError, "Wakeshift: this bot's key file isn't readable as a key; nothing was changed."}
 		}
 	}
@@ -131,7 +227,7 @@ func GrokInit(bot, issuer string) GrokResult {
 				return r
 			}
 		}
-		return GrokResult{GrokExitOK, "Wakeshift key ready for this bot (it had one already)."}
+		return GrokResult{GrokExitOK, "Wakeshift key ready for this bot (it had one already). Its fingerprint: " + GrokFingerprint(have.Public().(ed25519.PublicKey)) + "."}
 	}
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -159,7 +255,7 @@ func GrokInit(bot, issuer string) GrokResult {
 		os.Remove(path)
 		return r
 	}
-	return GrokResult{GrokExitOK, "Wakeshift key ready for this bot (made now)."}
+	return GrokResult{GrokExitOK, "Wakeshift key ready for this bot (made now). Its fingerprint: " + GrokFingerprint(priv.Public().(ed25519.PublicKey)) + "."}
 }
 
 // grokPin records the issuer the bot's key is for, beside the key: prove
@@ -282,12 +378,19 @@ func grokClient() *http.Client {
 // checks it as data, signs it over bot with the bot's key and sends the
 // proof, returning Wakeshift's answer. With the key gone it tells
 // Wakeshift so (missing=1) and returns Wakeshift's answer for that.
-func GrokProve(ctx context.Context, bot, issuer, challengeID string) GrokResult {
+//
+// For a register challenge it first prints the app and workspace
+// Wakeshift says it's for (grokShown), refuses one for another app than
+// app (--app, when given), and signs both into the proof (v=2).
+func GrokProve(ctx context.Context, bot, issuer, challengeID, app string) GrokResult {
 	if !GrokBotOK(bot) {
 		return GrokResult{GrokExitUsage, "Wakeshift: --bot isn't a bot ID Wakeshift writes."}
 	}
 	if challengeID != "" && !grokUUIDRE.MatchString(challengeID) {
 		return GrokResult{GrokExitUsage, "Wakeshift: --challenge isn't a challenge ID Wakeshift writes."}
+	}
+	if app != "" && (challengeID == "" || !grokAppRE.MatchString(app)) {
+		return GrokResult{GrokExitUsage, "Wakeshift: --app isn't an app ID Wakeshift writes, with --challenge."}
 	}
 	iss, err := CheckIssuer(issuer)
 	if err != nil {
@@ -322,6 +425,7 @@ func GrokProve(ctx context.Context, bot, issuer, challengeID string) GrokResult 
 	fields := map[string]string{"bot": bot}
 	if challengeID != "" {
 		fields["challenge"] = challengeID
+		fields["v"] = "2"
 	} else {
 		// The setup challenge goes only to the key its setup was minted
 		// for: the fetch is signed. With the key gone there's nothing to
@@ -349,13 +453,21 @@ func GrokProve(ctx context.Context, bot, issuer, challengeID string) GrokResult 
 	if status >= 500 {
 		return GrokResult{GrokExitError, fmt.Sprintf("Wakeshift couldn't answer just now (%d), so nothing was signed. Run the command again in a minute.", status)}
 	}
-	ch := strings.TrimSpace(body)
+	ch, about := strings.TrimSpace(body), (*grokAbout)(nil)
 	want := "setup"
+	parsed := true
 	if challengeID != "" {
 		want = "register"
+		ch, about, parsed = grokParseChallenge(body)
 	}
-	if status != http.StatusOK || !grokChallengeRE.MatchString(ch) || !strings.HasPrefix(ch, "wakeshift:v1:"+want+":") {
+	if status != http.StatusOK || !parsed || !grokChallengeRE.MatchString(ch) || !strings.HasPrefix(ch, "wakeshift:v1:"+want+":") {
 		return grokRefused("what came back isn't a Wakeshift " + want + " challenge")
+	}
+	if app != "" && about == nil {
+		return grokRefused("Wakeshift didn't say which app this check is for, and this command is for " + app)
+	}
+	if app != "" && about.AppID != app {
+		return grokRefused("this check is for the app " + about.App + " (" + about.AppID + "), not " + app + ", the app this command is for; nothing was signed")
 	}
 	// ch is the challenge this command was given to answer, of the
 	// purpose checked above: the bot's setup challenge without
@@ -363,6 +475,7 @@ func GrokProve(ctx context.Context, bot, issuer, challengeID string) GrokResult 
 	// no other). A missing key is reported only on the register challenge
 	// the command names.
 	if keyGone {
+		shown := grokShown(about, "")
 		code, answer, err := grokPost(ctx, c, iss+"/v1/stream/proof", map[string]string{"challenge": ch, "missing": "1"}, 64<<10)
 		if err != nil || code >= 500 {
 			// Not told: the challenge is still open, so the same command
@@ -373,27 +486,35 @@ func GrokProve(ctx context.Context, bot, issuer, challengeID string) GrokResult 
 		if code != http.StatusOK {
 			// Still exit 4 (the key is gone either way), but don't let the
 			// line read as if Wakeshift took the report.
-			return GrokResult{GrokExitKeyMissing, fmt.Sprintf("Wakeshift key missing: this bot's key file is gone, and Wakeshift didn't take the report (%d):\n%s", code, strings.TrimSpace(answer))}
+			return GrokResult{GrokExitKeyMissing, fmt.Sprintf("Wakeshift key missing: this bot's key file is gone, and Wakeshift didn't take the report (%d):\n%s%s", code, shown, strings.TrimSpace(answer))}
 		}
-		return GrokResult{GrokExitKeyMissing, "Wakeshift key missing: this bot's key file is gone.\n" + strings.TrimSpace(answer)}
+		return GrokResult{GrokExitKeyMissing, "Wakeshift key missing: this bot's key file is gone.\n" + shown + strings.TrimSpace(answer)}
 	}
 	pub, err := grokPublicPEM(priv)
 	if err != nil {
 		return GrokResult{GrokExitError, "Wakeshift: couldn't read this bot's public key: " + err.Error()}
 	}
-	sig := base64.StdEncoding.EncodeToString(ed25519.Sign(priv, GrokMessage(bot, ch)))
-	code, answer, err := grokPost(ctx, c, iss+"/v1/stream/proof", map[string]string{"challenge": ch, "public_key": pub, "signature": sig}, 64<<10)
+	proof := map[string]string{"challenge": ch, "public_key": pub}
+	shown := ""
+	if about != nil {
+		shown = grokShown(about, GrokFingerprint(priv.Public().(ed25519.PublicKey)))
+		proof["v"] = "2"
+		proof["signature"] = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, GrokRegisterMessage(bot, ch, about.WorkspaceID, about.AppID)))
+	} else {
+		proof["signature"] = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, GrokMessage(bot, ch)))
+	}
+	code, answer, err := grokPost(ctx, c, iss+"/v1/stream/proof", proof, 64<<10)
 	if err != nil {
 		return GrokResult{GrokExitError, "Wakeshift: couldn't send the proof to " + iss + ": " + err.Error()}
 	}
 	if code >= 500 {
 		// Wakeshift's trouble, not a refusal: the challenge is still open.
-		return GrokResult{GrokExitError, fmt.Sprintf("Wakeshift couldn't take the proof just now (%d). Run the command again in a minute.", code)}
+		return GrokResult{GrokExitError, shown + fmt.Sprintf("Wakeshift couldn't take the proof just now (%d). Run the command again in a minute.", code)}
 	}
 	if code != http.StatusOK {
-		return GrokResult{GrokExitRefused, strings.TrimSpace(answer)}
+		return GrokResult{GrokExitRefused, shown + strings.TrimSpace(answer)}
 	}
-	return GrokResult{GrokExitOK, strings.TrimSpace(answer)}
+	return GrokResult{GrokExitOK, shown + strings.TrimSpace(answer)}
 }
 
 // grokPublicPEM is the key's public half, as Wakeshift reads it.
@@ -405,17 +526,20 @@ func grokPublicPEM(priv ed25519.PrivateKey) (string, error) {
 	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})), nil
 }
 
-// GrokFetchMessage is what a setup challenge's fetch signs
-// (botkeys.FetchMessage): the bot's ID and the time, so only the bot's key
-// can read its setup check.
-func GrokFetchMessage(bot, ts string) []byte {
-	return []byte("wakeshift-fetch\n" + bot + "\n" + ts)
-}
+// GrokFetchMessage is what a setup challenge's fetch signs: the bot's ID
+// and the time, so only the bot's key can read its setup check. The one
+// definition the core verifies too (harnesses.GrokFetchMessage).
+func GrokFetchMessage(bot, ts string) []byte { return harnesses.GrokFetchMessage(bot, ts) }
 
-// GrokMessage is what a proof signs (botkeys.Message): the bot's ID from
-// the command line, never anything fetched, and the challenge.
-func GrokMessage(bot, challenge string) []byte {
-	return []byte("wakeshift-proof\n" + bot + "\n" + challenge)
+// GrokMessage is what a proof signs: the bot's ID from the command line,
+// never anything fetched, and the challenge (harnesses.GrokProofMessage).
+func GrokMessage(bot, challenge string) []byte { return harnesses.GrokProofMessage(bot, challenge) }
+
+// GrokRegisterMessage is what a register proof signs when Wakeshift said
+// which workspace and app the challenge is for
+// (harnesses.GrokRegisterMessage).
+func GrokRegisterMessage(bot, challenge, workspace, app string) []byte {
+	return harnesses.GrokRegisterMessage(bot, challenge, workspace, app)
 }
 
 // grokPost posts a multipart form and reads at most limit bytes of the
@@ -423,7 +547,7 @@ func GrokMessage(bot, challenge string) []byte {
 func grokPost(ctx context.Context, c *http.Client, url string, fields map[string]string, limit int64) (int, string, error) {
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
-	for _, k := range []string{"bot", "challenge", "missing", "public_key", "time", "signature"} {
+	for _, k := range []string{"bot", "challenge", "v", "missing", "public_key", "time", "signature"} {
 		if v, ok := fields[k]; ok {
 			if err := w.WriteField(k, v); err != nil {
 				return 0, "", err

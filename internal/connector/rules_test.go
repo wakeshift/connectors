@@ -71,9 +71,7 @@ func TestAllowRules(t *testing.T) {
 		}
 	}
 	// Nothing for the harnesses that can't take one, or don't prompt, or
-	// whose rule would also let the command run with a redirect added (agy,
-	// and Cursor, which lets an allowlisted command redirect into workspace
-	// files: the shell empties the file before the command can refuse).
+	// whose rule wouldn't match the command exactly (agy and Cursor).
 	for _, name := range []string{"copilot", "codex", "opencode", "hermes", "antigravity", "cursor"} {
 		if spec, ok := Lookup(name); ok && spec.Rule != nil {
 			t.Errorf("%s has a rule", name)
@@ -205,8 +203,8 @@ func TestRuleFileMadeAndRemoved(t *testing.T) {
 }
 
 // Cursor's wait rule, from an install before October 28, 2026, is removed
-// when the install runs again: cursor-agent let it run with a redirect
-// into a workspace file. The user's own rules and an app's tool rules stay.
+// when the install runs again (CursorRule). The user's own rules and an
+// app's tool rules stay.
 func TestCursorWaitRuleRetired(t *testing.T) {
 	home := setHome(t)
 	bin := realBin(t)

@@ -108,8 +108,8 @@ func TestOpencodeBridge(t *testing.T) {
 
 // A message waiting when the bridge connects goes in the tool result's note
 // and is acknowledged once the plugin says it added the note: it doesn't
-// come again as a wake (wakebench S8, October 26: after a restart the held
-// message came in the watch result and as a wake, "GOT … (duplicate)").
+// come again as a wake (after a restart, a held message could come in the
+// watch result and again as a wake).
 // Without the plugin's ack (a plugin from before note_id), it comes again
 // as a wake: at least once.
 func TestOpencodeBridgeNoteDeliversOnce(t *testing.T) {

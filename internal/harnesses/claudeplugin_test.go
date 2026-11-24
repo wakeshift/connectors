@@ -43,7 +43,7 @@ func TestClaudeCodeMarketplace(t *testing.T) {
 // Claude Code asks about its plugin before it starts the Monitor or the
 // MCP-tasks wait: on a yes it installs, relays /reload-plugins and the
 // message to send, and connects without starting either (the Monitor's
-// approval in manual mode is the scariest screen in any flow); only on a
+// approval in manual mode is the longest in any flow); only on a
 // no, or an install that didn't happen, does it start the fallback.
 // Messages are held meanwhile. The app's tools aren't in the question: the
 // plugin's install can't carry the yes.

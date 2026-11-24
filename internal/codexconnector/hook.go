@@ -45,6 +45,12 @@ const (
 	NoteFailed = "Wakeshift: couldn't connect this thread (%s), so new messages won't wake it yet. It tries again from the next result of the app's tools."
 	// NoteOutdated: Wakeshift refused this version (426 update_required); its message follows.
 	NoteOutdated = "Wakeshift: couldn't connect this thread. %s"
+	// NoteDisconnected: a connector that couldn't reach a desktop thread
+	// gave up (why: %s). It says what an earlier note promised no longer
+	// holds, so the agent doesn't keep telling the user they'll hear.
+	NoteDisconnected = "Wakeshift: this thread isn't connected any more (%s), so new messages won't wake it. " +
+		"If you told the user you'd let them know when something arrives, tell them now that you won't be notified here. " +
+		"It connects again from the next result of the app's tools that says so."
 )
 
 // HookInput is what Codex sends a PostToolUse hook (the fields used here).
@@ -80,6 +86,9 @@ type Hook struct {
 	Pins connector.Pins
 	// Links: each thread's stream link (default: in the settings directory).
 	Links connector.Links
+	// Desktop: the Codex desktop app is installed, so a thread it made can
+	// be woken without Codex's daemon (desktop.go).
+	Desktop bool
 }
 
 // Codex's hook events the hook re-arms on (no tool call, no beacon).
@@ -97,14 +106,20 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 	if json.NewDecoder(io.LimitReader(stdin, 8<<20)).Decode(&in) != nil || in.SessionID == "" {
 		return
 	}
+	// A connector that gave up on the thread left a note (NoteDisconnected):
+	// it goes with whatever this hook says.
+	pending := TakeNote(h.Settings.Dir, in.SessionID)
 	if in.HookEventName == EventSessionStart || in.HookEventName == EventUserPromptSubmit {
 		var notes []string
+		if pending != "" {
+			notes = append(notes, pending)
+		}
 		// The daemon is asked at most once in this run (the mark, the
 		// late redeem).
 		var daemon *bool
 		onDaemon := func() bool {
 			if daemon == nil {
-				ok := h.onDaemon(ctx, in.SessionID)
+				ok := h.reachable(ctx, in)
 				daemon = &ok
 			}
 			return *daemon
@@ -130,6 +145,19 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 		}
 		return
 	}
+	// One note at most, after the pending one, which a fresh connection
+	// supersedes.
+	var said string
+	defer func() {
+		text := said
+		if pending != "" && said != NoteConnected {
+			text = strings.TrimSpace(pending + "\n\n" + said)
+		}
+		if text != "" {
+			json.NewEncoder(stdout).Encode(map[string]any{"hookSpecificOutput": map[string]any{
+				"hookEventName": "PostToolUse", "additionalContext": text}})
+		}
+	}()
 	// Only from the result's own _meta (tool_response._meta): Wakeshift
 	// always puts Codex's beacons there (harnesses.Meta). A beacon line in
 	// the result's text, or a _meta in JSON inside it, can be anyone's words
@@ -146,15 +174,16 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 		// nothing (its text can't be trusted to repeat).
 		return
 	}
-	// And from the tool it names (mcp__<server>__<tool>), where it names
-	// one (apps on SDKs from before beacons did name none).
-	if claims.Tool != "" && !connector.ToolOf(connector.Input{MCPTool: connector.MCPToolOf(in.ToolName)}, claims.Tool) {
+	// And from the tool it names (mcp__<server>__<tool>, as Codex renames
+	// it: codexToolMatches), where it names one (apps on SDKs from before
+	// beacons did name none). A beacon relayed into another tool's result
+	// is ignored, so the model hears nothing; the log says so, in case the
+	// name was the app's own tool's under a name Codex made up.
+	if claims.Tool != "" && !codexToolMatches(claims.Tool, in.ToolName) {
+		logToolMismatch(h.Settings.Dir, in.SessionID, "beacon", claims.Tool, connector.MCPToolOf(in.ToolName))
 		return
 	}
-	note := func(s string) {
-		json.NewEncoder(stdout).Encode(map[string]any{"hookSpecificOutput": map[string]any{
-			"hookEventName": "PostToolUse", "additionalContext": s}})
-	}
+	note := func(s string) { said = s }
 	// Signed by Wakeshift and for this thread, but any MCP server's result
 	// could carry a beacon an attacker minted for this thread through some
 	// app: only the server pinned to the beacon's app may (connector.Pins).
@@ -170,7 +199,7 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 		note(fmt.Sprintf(NoteFailed, "its server couldn't be recorded"))
 		return
 	}
-	if !h.onDaemon(ctx, in.SessionID) {
+	if !h.reachable(ctx, in) {
 		note(NoteInProcess)
 		return
 	}
@@ -190,7 +219,7 @@ func (h *Hook) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) {
 	}
 	if errors.Is(err, connector.ErrTaken) {
 		unlock()
-		note(connector.NoteTaken)
+		note(connector.TakenNote(err))
 		return
 	}
 	if err != nil {
@@ -278,6 +307,25 @@ func (h *Hook) links() connector.Links {
 		return h.Links
 	}
 	return connector.LinksFor(h.Settings)
+}
+
+// reachable: a connector can reach the thread, on Codex's daemon or, for
+// a thread the desktop app made (with the app installed), through the app.
+func (h *Hook) reachable(ctx context.Context, in HookInput) bool {
+	return h.desktopThread(in) || h.onDaemon(ctx, in.SessionID)
+}
+
+// desktopThread: the desktop app is installed and made the thread (its
+// rollout, which Codex passes as transcript_path, says so).
+func (h *Hook) desktopThread(in HookInput) bool {
+	if !h.Desktop || !uuidRE.MatchString(in.SessionID) {
+		return false
+	}
+	path := in.TranscriptPath
+	if !strings.HasSuffix(filepath.Base(path), "-"+in.SessionID+".jsonl") {
+		path = findRollout(in.SessionID)
+	}
+	return path != "" && isDesktopThread(path)
 }
 
 // onDaemon: the thread is on Codex's shared daemon (the connector can reach

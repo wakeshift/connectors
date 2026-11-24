@@ -75,8 +75,7 @@ test("the headline's text can't open or close a tag, break the line, or run on",
 
 // What the TUI shows a person (the headline and the framing line, and the
 // framing outside the tag) never names an app by its ID; the tag keeps
-// from="app/…" for machines (QA pass, November 9, 2026: "From Webhooks
-// (app/try)").
+// from="app/…" for machines (for example "From Webhooks", not "app/try").
 test("no app ID in a wake's human-facing text, only in the tag's from", () => {
   const webhook = (id: string, subject: string) => ({
     event: { id, subject, from: { kind: "app", id: "try" }, attrs: { app: "try", topic: "ev/webhook.received/abc" } },

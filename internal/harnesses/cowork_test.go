@@ -83,7 +83,7 @@ func TestCoworkNotes(t *testing.T) {
 		for _, want := range []string{
 			"If you have a Monitor tool (Claude Cowork has one, which you may need to load before use; claude.ai chat doesn't): ",
 			"`" + check + "`", "prints 200", MonitorWith + " with this command: " + MonitorLoop(wait) + " .",
-			"allow app.wakeshift.ai in the Claude app under Settings > Capabilities (on a Team or Enterprise plan, an owner does it under Organization settings > Capabilities)",
+			`turn on "Use the internet while making files" in the Claude app's Settings > Capabilities, then click Manage next to "Allowed websites" and add app.wakeshift.ai (on a Team or Enterprise plan, an owner does this under Organization settings > Capabilities)`,
 			"If you have no Monitor tool (as in claude.ai chat), don't run anything: Wakeshift can't wake this conversation, so nothing will notify you here when something arrives.",
 			"check with this app's tools as you would without Wakeshift",
 			"held for",
@@ -107,7 +107,7 @@ func TestCoworkNotes(t *testing.T) {
 			t.Errorf("full: missing %q", want)
 		}
 	}
-	if !strings.HasPrefix(again, "Your Wakeshift Monitor isn't running, so CI can't wake you yet") || !strings.Contains(again, MonitorRulesBrief) || len(again) >= len(full)*3/4 {
+	if !strings.HasPrefix(again, "Your Wakeshift Monitor isn't running, so CI can't wake you yet") || !strings.Contains(again, MonitorRulesBrief) || len(words(again)) >= len(words(full))*3/4 {
 		t.Errorf("again: %s", again)
 	}
 	// Its install note: the Monitor if there's one, and otherwise nothing.
@@ -115,4 +115,10 @@ func TestCoworkNotes(t *testing.T) {
 	if n := InstallNote(h, ProductionIssuer); n != "If "+coworkMonitor+": You can be woken now, within seconds even while idle, by a Monitor you start (subscribing gives its command). If not: "+CantWake("") {
 		t.Errorf("install note: %s", n)
 	}
+}
+
+// words is a Cowork note without its command and link step.
+func words(n string) string {
+	const wait = "https://app.wakeshift.ai/v1/stream/wait?link=abc"
+	return strings.ReplaceAll(strings.ReplaceAll(n, MonitorLoop(wait), ""), LinkStep(wait), "")
 }

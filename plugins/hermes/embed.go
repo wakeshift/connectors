@@ -2,8 +2,8 @@
 // Python: the files in wakeshift/ are what `wakeshift install --harness
 // hermes` writes to $HERMES_HOME/plugins/wakeshift (internal/connector), what
 // /install/hermes.sh unpacks there (internal/downloads), and what
-// github.com/wakeshift/hermes-plugin publishes for `hermes plugins install`
-// (opensource/export.sh). Each stamps the version into plugin.yaml
+// github.com/wakeshift/hermes-plugin publishes for `hermes plugins install`.
+// Each stamps the version into plugin.yaml
 // (Manifest) and _version.py (VersionFile).
 package hermes
 
@@ -32,7 +32,7 @@ func VersionFile(v string) []byte {
 	if !versionRE.MatchString(v) {
 		v = "0"
 	}
-	// opensource/export.sh writes the same for the published plugin.
+	// The published plugin gets the same file.
 	return []byte("# The plugin's version, written when it was packed.\nVERSION = \"" + v + "\"\n")
 }
 
@@ -40,7 +40,7 @@ func VersionFile(v string) []byte {
 const ManifestName = "plugin.yaml"
 
 // unstamped is plugin.yaml's version line here, which Manifest replaces
-// (opensource/export.sh replaces the same line).
+// (the published plugin's has the same line replaced).
 const unstamped = `version: "0.0.0+dev"`
 
 var releaseRE = regexp.MustCompile(`^[0-9]+(\.[0-9]+)*(\+[0-9A-Za-z.]+)?$`)

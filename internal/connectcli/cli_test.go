@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -170,15 +172,73 @@ func TestHookAfterUninstall(t *testing.T) {
 	}
 }
 
-// Claude Code's waiter does nothing in claude -p, where it can't wake.
-func TestClaudeWaiterUnattended(t *testing.T) {
-	homes(t)
+// Under claude -p with a text prompt (unattended, no streaming input on
+// Claude's command line), where Claude Code would run the waiters as
+// blocking hooks, every hook of Wakeshift's does nothing (#1272): no mark,
+// no redeem or link, no note, no claim, no waiter. The session behaves as
+// one without the plugin. Claude's process here is this test's parent,
+// read for real (CLAUDE_PID): its command line has no streaming input.
+func TestClaudeHooksDoNothingUnderPrintMode(t *testing.T) {
+	home := homes(t)
+	if out, code := run("wakeshift", "install", "--harness", "claude-code", "--issuer", "https://app.wakeshift.ai", "--yes"); code != 0 {
+		t.Fatalf("install: %d %s", code, out)
+	}
+	dir := filepath.Join(home, ".wakeshift", "claude-code")
+	tree := func() string {
+		var l []string
+		filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+			if err == nil {
+				l = append(l, fmt.Sprintf("%s %d", p, info.Size()))
+			}
+			return nil
+		})
+		return strings.Join(l, "\n")
+	}
+	const session = "5e551011-0000-4000-8000-0000000012f3"
+	start := `{"session_id":"` + session + `","transcript_path":"/x.jsonl","hook_event_name":"SessionStart","source":"startup"}`
+	hook := func(in string, extra ...string) (string, int, time.Duration) {
+		var out bytes.Buffer
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		began := time.Now()
+		code := Run(ctx, append([]string{"wakeshift", "hook", "--harness", "claude-code"}, extra...), strings.NewReader(in), &out, &out)
+		return out.String(), code, time.Since(began)
+	}
+	// Attended, the session-context hook gives the mark.
+	t.Setenv("CLAUDE_CODE_SESSION_ATTENDED", "")
+	if out, _, _ := hook(start, "--event", connector.ClaudeSessionContextEvent); !strings.Contains(out, "pass harness=") {
+		t.Fatalf("attended: no mark: %q", out)
+	}
+	before := tree()
+
 	t.Setenv("CLAUDE_CODE_SESSION_ATTENDED", "0")
-	var out bytes.Buffer
-	code := Run(context.Background(), []string{"wakeshift", "hook", "--harness", "claude-code", "--rewake"},
-		strings.NewReader(`{"session_id":"s","hook_event_name":"Stop"}`), &out, &out)
-	if code != 0 || out.Len() != 0 {
-		t.Fatalf("%d %q", code, out.String())
+	t.Setenv("CLAUDE_PID", strconv.Itoa(os.Getppid()))
+	if mode := connector.ClaudeSessionMode(); mode != connector.ClaudeOff {
+		t.Fatalf("this test's parent read as %v", mode)
+	}
+	post := `{"session_id":"` + session + `","transcript_path":"/x.jsonl","hook_event_name":"PostToolUse","tool_name":"mcp__ci__watch","tool_use_id":"toolu_1",` +
+		`"tool_response":{"content":[{"type":"text","text":"ok"}],"_meta":{"wakeshift/connector":"eyJhbGciOiJFZERTQSJ9.e30.c2ln"}}}`
+	pre := `{"session_id":"` + session + `","transcript_path":"/x.jsonl","hook_event_name":"PreToolUse","tool_name":"mcp__ci__watch","tool_use_id":"toolu_1","tool_input":{}}`
+	sub := `{"session_id":"` + session + `","transcript_path":"/x.jsonl","hook_event_name":"SubagentStart","agent_id":"a1"}`
+	stop := `{"session_id":"` + session + `","transcript_path":"/x.jsonl","hook_event_name":"Stop"}`
+	for name, tc := range map[string]struct {
+		in    string
+		extra []string
+	}{
+		"session-context":     {start, []string{"--event", connector.ClaudeSessionContextEvent}},
+		"PostToolUse":         {post, nil},
+		"PreToolUse claim":    {pre, []string{"--event", connector.ClaudeClaimEvent}},
+		"SubagentStart":       {sub, []string{"--event", connector.ClaudeSubagentContextEvent}},
+		"SessionStart waiter": {start, []string{"--rewake"}},
+		"Stop waiter":         {stop, []string{"--rewake"}},
+	} {
+		out, code, took := hook(tc.in, tc.extra...)
+		if code != 0 || out != "" || took > 3*time.Second {
+			t.Fatalf("%s: exit %d %q after %v", name, code, out, took)
+		}
+	}
+	if after := tree(); after != before {
+		t.Fatalf("a hook under claude -p wrote to Wakeshift's directory:\nbefore\n%s\nafter\n%s", before, after)
 	}
 }
 

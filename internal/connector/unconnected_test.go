@@ -18,7 +18,7 @@ import (
 // promiseTranscript writes a transcript in which the agent called tool
 // (call toolu_w1) at at, and its result said text, with a _meta holding
 // only the server's serverInfo: what the Claude desktop app's Code tab
-// wrote on November 9, 2026 for a watch through a claude.ai connector.
+// was observed to write for a watch through a claude.ai connector.
 func promiseTranscript(t *testing.T, tool, text string, at time.Time) string {
 	t.Helper()
 	use := fmt.Sprintf(`{"type":"assistant","timestamp":%q,"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_w1","name":%q,"input":{"harness":"claude-code+x"}}]},"sessionId":%q}`,

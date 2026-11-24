@@ -61,16 +61,53 @@
 # disable` makes it, `wakeshift enable` removes it), the launcher exits 0
 # just the same. A switch it can't see (an unreadable ~/.wakeshift) doesn't
 # stop it, but the connector it runs counts one it can't check as on.
+#
+# Wakeshift's directory is always ~/.wakeshift here: the connector it runs
+# and the issuer stamp are there. WAKESHIFT_HOME (which moves it for the
+# connector run directly, in tests) is ignored, since a project's settings
+# can set a hook's environment and no check tells a directory of the
+# user's from one in a repository they cloned. It's unset for the
+# connector too, so both use ~/.wakeshift, and the launcher says so on
+# stderr when it named another directory (unless a switch above has turned
+# Wakeshift off).
 set -u
 
 case "${WAKESHIFT_DISABLED:-}" in
 1 | [Tt][Rr][Uu][Ee]) exit 0 ;;
 esac
-if [ -n "${WAKESHIFT_HOME:-}${HOME:-}" ] && [ -e "${WAKESHIFT_HOME:-${HOME:-}/.wakeshift}/disabled" ]; then
+
+ignored_home=
+if [ -n "${WAKESHIFT_HOME:-}" ]; then
+	# Quiet when it's ~/.wakeshift anyway (trailing slashes aside).
+	d=$WAKESHIFT_HOME
+	while :; do
+		case "$d" in
+		*/) d=${d%/} ;;
+		*) break ;;
+		esac
+	done
+	[ -n "${HOME:-}" ] && [ "$d" = "${HOME%/}/.wakeshift" ] || ignored_home=$WAKESHIFT_HOME
+	unset WAKESHIFT_HOME
+fi
+if [ -n "${HOME:-}" ] && [ -e "$HOME/.wakeshift/disabled" ]; then
 	exit 0
 fi
 
+# Redeem by call's hooks (Claude Code's PreToolUse claim and SubagentStart
+# mark) do nothing unless WAKESHIFT_REDEEM_BY_TOOL_CALL=1: exit before
+# anything else, as above, so with the flag off they cost the harness only
+# this shell's start.
+case " $* " in
+*" --event claim "* | *" --event subagent-context "*)
+	[ "${WAKESHIFT_REDEEM_BY_TOOL_CALL:-}" = 1 ] || exit 0
+	;;
+esac
+
 say() { printf 'wakeshift: %s\n' "$*" >&2; }
+
+if [ -n "$ignored_home" ]; then
+	say "ignoring WAKESHIFT_HOME=$ignored_home: the plugin always keeps Wakeshift in ~/.wakeshift"
+fi
 
 case "$0" in
 */*) root=${0%/*}/.. ;;
@@ -129,11 +166,11 @@ Darwin | Linux) ;;
 	;;
 esac
 
-if [ -z "${WAKESHIFT_HOME:-}" ] && [ -z "${HOME:-}" ]; then
+if [ -z "${HOME:-}" ]; then
 	say "HOME isn't set, so there's nowhere to keep the connector"
 	exit 0
 fi
-home=${WAKESHIFT_HOME:-$HOME/.wakeshift}
+home=$HOME/.wakeshift
 bin=$home/bin/wakeshift
 stamp=$home/$harness/plugin-issuer
 

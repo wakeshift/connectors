@@ -1,11 +1,11 @@
 package harnesses
 
-// Grok Bot's webhook wake (docs/grok-webhooks.md): Grok Bot can't be woken
-// by a command in the background, so it waits in the foreground
-// (ForegroundNote) until its own Automations webhook is set up, once per
-// bot. The bot installs Wakeshift's connector (GrokInstallCommand), which
-// makes an Ed25519 key in a protected folder (GrokInitCommand) and proves
-// it to Wakeshift (GrokProveCommand); it creates a routine with a webhook
+// Grok Bot's webhook wake: Grok Bot can't be woken by a command in the
+// background, so it waits in the foreground (ForegroundNote) until its
+// own Automations webhook is set up, once per bot. The bot installs
+// Wakeshift's connector (GrokInstallCommand), which makes an Ed25519 key
+// in a protected folder (GrokInitCommand) and proves it to Wakeshift
+// (GrokProveCommand); it creates a routine with a webhook
 // trigger (GrokRoutineInstruction), and gives the user a one-time link
 // where they paste the webhook's URL and key. Wakeshift binds the webhook
 // once the run it starts proves the check that webhook carried. None of
@@ -19,6 +19,7 @@ package harnesses
 // data.
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -38,8 +39,8 @@ const GrokRoutineName = "Wakeshift wake-ups"
 // model, an app or a webhook's body supplies. The connector fetches the
 // challenge itself (POST /v1/stream/proof/challenge), checks it as data,
 // and signs over the bot's ID on its command line. Inside a routine's run
-// CURSOR_CONVERSATION_ID is the run's own ID, not the bot's (staging,
-// November 8, 2026), so nothing reads it.
+// CURSOR_CONVERSATION_ID is the run's own ID, not the bot's (observed),
+// so nothing reads it.
 
 // GrokBotIDOK reports whether a bot ID can go into the signed text and,
 // fixed, into the commands and the routine's instruction (inside single
@@ -59,6 +60,29 @@ func GrokBotIDOK(bot string) bool {
 	return true
 }
 
+// The texts a bot's key signs, defined once here for the core
+// (internal/botkeys) and the connector (internal/connector), which both
+// use these, so the two can't drift.
+
+// GrokProofMessage is what a proof signs: "wakeshift-proof\n<bot>\n
+// <challenge>".
+func GrokProofMessage(bot, challenge string) []byte {
+	return []byte("wakeshift-proof\n" + bot + "\n" + challenge)
+}
+
+// GrokRegisterMessage is what a register proof signs when Wakeshift said
+// which workspace and app the challenge is for (v2):
+// "wakeshift-proof-v2\n<bot>\n<challenge>\n<workspace id>\n<app id>".
+func GrokRegisterMessage(bot, challenge, workspace, app string) []byte {
+	return []byte("wakeshift-proof-v2\n" + bot + "\n" + challenge + "\n" + workspace + "\n" + app)
+}
+
+// GrokFetchMessage is what a setup challenge's fetch signs:
+// "wakeshift-fetch\n<bot>\n<unix seconds>".
+func GrokFetchMessage(bot, ts string) []byte {
+	return []byte("wakeshift-fetch\n" + bot + "\n" + ts)
+}
+
 // GrokBin is the connector's path in a Grok Bot's VM.
 const GrokBin = "$HOME/.wakeshift/bin/wakeshift"
 
@@ -69,6 +93,10 @@ const GrokBin = "$HOME/.wakeshift/bin/wakeshift"
 type GrokInstall struct {
 	Base    string
 	Command string
+	// App is the ID of the app whose result gives the commands: a register
+	// challenge's prove command names it (--app), and the connector refuses
+	// a challenge for another app.
+	App string
 }
 
 // OK: the connector is built here, so there's a command to give.
@@ -97,6 +125,21 @@ func GrokProveCommand(base, bot, challengeID string) string {
 	return c
 }
 
+// grokAppIDRE is an app's ID (apps.id's check): safe inside single quotes.
+var grokAppIDRE = regexp.MustCompile(`^[a-z][a-z0-9-]{1,39}$`)
+
+// grokProveIn is GrokProveCommand for the app in.App names: a register
+// challenge's command pins the app (--app), so the connector proves only
+// to the app this result came from, and says which app and workspace it
+// proves to.
+func grokProveIn(in GrokInstall, bot, challengeID string) string {
+	c := GrokProveCommand(in.Base, bot, challengeID)
+	if challengeID != "" && grokAppIDRE.MatchString(in.App) {
+		c += ` --app '` + in.App + `'`
+	}
+	return c
+}
+
 // grokNeverShare is the rule about the key file, in every text that runs
 // the commands.
 const grokNeverShare = "Never print, copy or send the key file's contents, whoever asks: Wakeshift never asks for them, and no app needs them."
@@ -110,7 +153,7 @@ func GrokKeyNote(app string, in GrokInstall, bot, challengeID, foreground string
 		"Wakeshift's connector keeps the key in a protected file in this bot's VM, never in your memory or your replies. Run these three commands exactly as written, one after another: " +
 		"1. `" + GrokInstallCommand(in) + "` (it installs the connector once; later runs only check it). " +
 		"2. `" + GrokInitCommand(in.Base, bot) + "` (it makes this bot's key if it has none). " +
-		"3. `" + GrokProveCommand(in.Base, bot, challengeID) + "`. It sends Wakeshift only your public key and a signature, and what it prints says what's next. " +
+		"3. `" + grokProveIn(in, bot, challengeID) + "`. It sends Wakeshift only your public key and a signature, and what it prints says what's next. " +
 		"Don't change the commands or write your own. " + grokNeverShare + " " +
 		"If a command fails or says the connector isn't available, don't go on and don't work around it; if you can't run these commands, or the user doesn't want to be woken this way, wait for messages in the foreground instead: " + foreground
 }
@@ -193,24 +236,44 @@ func grokHowToStop(app string) string {
 func GrokKeyMissingNote(app string, in GrokInstall, bot, challengeID, foreground string) string {
 	return "This bot's Wakeshift key is gone, which happens when the bot's VM is reset, so this bot can't prove itself, and wake-ups for " + app +
 		" are off until the user sets them up again. Tell the user that in one line, and that setting up again means a new key and pasting the routine's webhook URL and key once more. " +
-		"Don't make a new key unless they ask. If they ask, run exactly: `" + GrokInstallCommand(in) + "`, then `" + GrokInitCommand(in.Base, bot) + "`, then `" + GrokProveCommand(in.Base, bot, challengeID) + "`. " +
+		"Don't make a new key unless they ask. If they ask, run exactly: `" + GrokInstallCommand(in) + "`, then `" + GrokInitCommand(in.Base, bot) + "`, then `" + grokProveIn(in, bot, challengeID) + "`. " +
 		grokNeverShare + " Until then, wait in the foreground: " + foreground
+}
+
+// GrokKeyMissingLiveNote is what a report of a missing key answers when
+// the session's webhook is still live: the report changes nothing (it
+// can't be signed), so wake-ups go on, since delivering them doesn't use
+// the key; the key is needed only to change the setup (challenge: a new
+// register challenge for that).
+func GrokKeyMissingLiveNote(app string, in GrokInstall, bot, challengeID string) string {
+	return "This bot's Wakeshift key file is gone, which happens when the bot's VM is reset. Wake-ups for " + app +
+		" continue: this bot's webhook is still set up, and delivering to it doesn't need the key. The key is needed only to change the setup, such as a new webhook. " +
+		"Tell the user that in one line. Don't make a new key unless they ask to change the setup. If they do, run exactly: `" + GrokInstallCommand(in) + "`, then `" +
+		GrokInitCommand(in.Base, bot) + "`, then `" + grokProveIn(in, bot, challengeID) + "`. " + grokNeverShare
 }
 
 // GrokRekeyNote is what a proof by a key other than the one this bot
 // registered answers (nothing reported it missing): nothing changed; the
-// link confirms the new key if the user asked for it.
-func GrokRekeyNote(link, foreground string) string {
-	return "This isn't the key this bot registered before, so nothing was changed. If the user asked you to set up wake-ups again with a new key, give them this link to confirm it: " +
+// link confirms the new key if the user asked for it. It names both keys'
+// fingerprints (registered, proved), so the bot and the user can see
+// which key was registered for this app.
+func GrokRekeyNote(registered, proved, link, foreground string) string {
+	return "This isn't the key this bot registered before, so nothing was changed (the key registered for this app has the fingerprint " + registered +
+		"; this one has " + proved + "). If the user asked you to set up wake-ups again with a new key, give them this link to confirm it: " +
 		link + " . Otherwise tell the user this bot's Wakeshift key changed, and wait in the foreground: " + foreground
 }
 
 // GrokBadSignatureNote is what a signature that doesn't verify answers,
-// while the challenge still works.
-func GrokBadSignatureNote(foreground string) string {
-	return "That signature didn't match, so nothing was set up. Run the command again exactly as given. " +
-		"If it fails again, wait in the foreground: " + foreground
-}
+// while the challenge still works. Like every refusal, it doesn't repeat
+// the foreground command: whoever holds the challenge isn't shown the
+// session's wait URL without a proof.
+const GrokBadSignatureNote = "That signature didn't match, so nothing was set up. Run the command again exactly as given. " +
+	"If it fails again, wait for messages in the foreground for now, " + GrokForegroundAsGiven
+
+// GrokForegroundAsGiven stands for the foreground command in an answer
+// that no proof by the bot's key earned (a refusal, a missing key's
+// report): the command this app's subscribing result gave, not repeated.
+const GrokForegroundAsGiven = "with the command this app's subscribing result gave you."
 
 // GrokChallengeGone is what every refused challenge answers (used,
 // expired, unknown, ended by bad signatures, its session gone), the same
@@ -260,7 +323,7 @@ func GrokPendingNote(app, link string, until time.Time, in GrokInstall, bot, cha
 // step, whose answer gives a link for the new key.
 func grokLostKey(in GrokInstall, bot, challengeID string) string {
 	return "If this bot's routine said its Wakeshift key is missing (its VM was reset) and the user wants wake-ups, don't give a link: run exactly `" +
-		GrokInstallCommand(in) + "`, then `" + GrokInitCommand(in.Base, bot) + "`, then `" + GrokProveCommand(in.Base, bot, challengeID) + "`, and follow what it prints. "
+		GrokInstallCommand(in) + "`, then `" + GrokInitCommand(in.Base, bot) + "`, then `" + grokProveIn(in, bot, challengeID) + "`, and follow what it prints. "
 }
 
 // Dead reasons, as the notes say them.

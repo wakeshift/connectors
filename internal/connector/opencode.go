@@ -139,10 +139,9 @@ func (b *Bridge) Run(ctx context.Context, stdin io.Reader, stdout io.Writer) err
 	}
 	// The note can hand over messages that were waiting when it connected.
 	// The plugin acks them by note_id once it has added the note to the
-	// tool result, and only then are they acknowledged to Wakeshift: before
-	// October 28 they never were, so the link's next poll handed them out
-	// again and the plugin woke the session with them a second time
-	// (wakebench S8: "GOT … (duplicate)").
+	// tool result, and only then are they acknowledged to Wakeshift:
+	// unacknowledged, the link's next poll would hand them out again and
+	// the plugin would wake the session with them a second time.
 	noteID := ""
 	if run.handed != nil && keep {
 		noteID = newID()

@@ -33,9 +33,9 @@ func capyTrust(app string) string {
 // it.
 func capyFallback(app, url string, running bool) string {
 	if running {
-		return "Until it's registered, your Wakeshift background command keeps waiting for them as before: if it has finished, act on what it printed, then start it again " + capyRun + ": " + CapyLoop(url) + " . Don't start a second copy while one runs."
+		return "Until it's registered, your Wakeshift background command keeps waiting for them as before: if it has finished, act on what it printed, then start it again " + capyRun + " (" + LinkStep(url) + "): " + CapyLoop(url) + " . Don't start a second copy while one runs."
 	}
-	return "If you can't create the watch or register it, start this command instead " + capyRun + ": " + CapyLoop(url) + " . " +
+	return "If you can't create the watch or register it, start this command instead " + capyRun + " (" + LinkStep(url) + "): " + CapyLoop(url) + " . " +
 		"It waits until messages arrive, prints them and finishes. " + capyWoken + `If it printed a {"type":"hub.closed"} line, don't start it again.`
 }
 

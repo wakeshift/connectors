@@ -213,6 +213,13 @@ func TestRedeemSaysWhatItHolds(t *testing.T) {
 	if ws.held[1] != link || !strings.Contains(out, "stays connected where it was") || h.Links.Load(conv) != link {
 		t.Fatalf("taken: held %v, out %s", ws.held, out)
 	}
+	// Refused because the session's own link wasn't sent (link_not_held):
+	// said as that, not as another account's or workspace's session.
+	ws.reason = "link_not_held"
+	out = runAs(h, "", cursorResultOf("probe", "ok\n\n"+BeaconText(minted(t, ws, conv, "probe", "wst_3"))))
+	if !strings.Contains(out, "already connected to hooks that hold its link") || strings.Contains(out, "another account") || h.Links.Load(conv) != link {
+		t.Fatalf("link not held: out %s", out)
+	}
 	// A link on another host than the redeem's is never sent.
 	if linkOnOrigin("wss://elsewhere.test/v1/stream?link=x", ws.URL+"/v1/connector/redeem") ||
 		!linkOnOrigin(strings.Replace(ws.URL, "http", "ws", 1)+"/v1/stream?link=x", ws.URL+"/v1/connector/redeem") {

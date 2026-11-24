@@ -108,6 +108,7 @@ func (s Spec) Install(bin, issuer string, out io.Writer) error {
 	}
 	fmt.Fprintf(out, "Wakeshift's hooks for %s run %s and trust beacons from %s.\n", s.Name, bin, issuer)
 	addRule(set, s, bin, out, was)
+	ScrubLinks(s.Name, out)
 	// If Wakeshift's plugin for the harness is installed too (Cursor's from
 	// its Marketplace, with this install from npx), its launcher runs
 	// InstallPlugin again on its next hook, which takes these hooks out, so
@@ -151,6 +152,7 @@ func (s Spec) InstallPlugin(bin, issuer string, out io.Writer) error {
 	}
 	fmt.Fprintf(out, "Wakeshift's plugin for %s runs %s and trusts beacons from %s.\n", s.Name, bin, issuer)
 	addRule(set, s, bin, out, nil)
+	ScrubLinks(s.Name, out)
 	// Last, so a failure above runs the whole install again next time.
 	return os.WriteFile(filepath.Join(set.Dir, PluginIssuerFile), []byte(issuer+"\n"), 0o600)
 }
@@ -191,6 +193,7 @@ func (s Spec) removeUserHooks(set Settings, bin string, out io.Writer) {
 // conversations' links, so nothing here listens for it any more.
 func (s Spec) Uninstall(bin string, out io.Writer) error {
 	set := LoadSettings(s.Name)
+	ScrubLinks(s.Name, out)
 	var before []string
 	f, filed := s.Installer.(hookFiler)
 	if filed {
@@ -230,7 +233,7 @@ func (s Spec) Uninstall(bin string, out io.Writer) error {
 	// logs), so nothing of it is left. It's this harness's alone, whichever
 	// apps and Wakeshifts it connected: the hooks it served are gone for all
 	// of them. A list of what to remove fell behind what hooks write there
-	// (S6 found it left on October 28), so the whole directory goes, and a
+	// (it once left files behind), so the whole directory goes, and a
 	// hook that still runs in an open session doesn't make it again
 	// (Settings.Installed).
 	if dir := set.Dir; ownDir(dir, s.Name) {

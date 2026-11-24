@@ -36,7 +36,7 @@ func TestOpencodePackage(t *testing.T) {
 		t.Error("the package's server line wasn't replaced")
 	}
 	if strings.Count(want, OpencodeDefaultIssuers) != 1 {
-		t.Error("plugins/pack-npm.mjs replaces the default issuers' line: it must be there once")
+		t.Error("the packing script replaces the default issuers' line: it must be there once")
 	}
 	if strings.Contains(want, "__WAKESHIFT_BIN__") {
 		t.Error("the package has the installer's placeholder for the binary")
@@ -156,6 +156,82 @@ process.exit(0)
 	json.Unmarshal(b, &s)
 	if strings.Join(s.Issuers, ",") != "http://localhost:8370" {
 		t.Errorf("issuers %v, want only http://localhost:8370", s.Issuers)
+	}
+}
+
+// The "issuers" option is checked as CheckIssuer checks an issuer (plain
+// http only on this machine), and what it adds is the plugin's: when the
+// option changes, the issuers it added before go. Issuers trusted another
+// way (`wakeshift install`, an earlier release of the package that didn't
+// record its own) stay.
+func TestOpencodePackageIssuersOptionIsThePlugins(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
+	dir := packageDir(t)
+	home := filepath.Join(dir, "home")
+	cfgFile := filepath.Join(home, "opencode", "config.json")
+	os.MkdirAll(filepath.Dir(cfgFile), 0o700)
+	os.WriteFile(cfgFile, []byte(`{"issuers":["https://mine.example"],"installed_at":"2026-11-01T00:00:00Z"}`), 0o600)
+	load := func(issuers string) Settings {
+		t.Helper()
+		driver := `import plugin from "./wakeshift.mjs"
+await plugin.server({ client: { session: {} }, directory: "/tmp" }, { issuers: ` + issuers + ` })
+process.exit(0)
+`
+		os.WriteFile(filepath.Join(dir, "issuers.mjs"), []byte(driver), 0o600)
+		cmd := exec.Command(node, "issuers.mjs")
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "WAKESHIFT_HOME="+home, "XDG_CONFIG_HOME="+filepath.Join(dir, "xdg"))
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+		var s Settings
+		b, _ := os.ReadFile(cfgFile)
+		if err := json.Unmarshal(b, &s); err != nil {
+			t.Fatalf("%v: %s", err, b)
+		}
+		return s
+	}
+	s := load(`["http://evil.example", "http://localhost.evil.example:8370", "http://127.0.0.1.evil.example", "http://10.0.0.1:8370", "http://127.999.1.1", "http://127.1", "http://LOCALHOST", "ftp://x.example",
+		"http://[::2]:8370", "http://[::1].evil.example", "http://[::1]:8370/x",
+		"https://evil.example/", "http://127.0.0.1:8370", "http://localhost:8371", "http://[::1]:8373/", "https://mine.example"]`)
+	if strings.Join(s.Issuers, ",") != "https://mine.example,https://evil.example,http://127.0.0.1:8370,http://localhost:8371,http://[::1]:8373" ||
+		strings.Join(s.PluginIssuers, ",") != "https://evil.example,http://127.0.0.1:8370,http://localhost:8371,http://[::1]:8373" {
+		t.Fatalf("first load: issuers %v, the plugin's %v", s.Issuers, s.PluginIssuers)
+	}
+	// Whatever the plugin takes, the connector takes too.
+	for _, i := range s.Issuers {
+		if got, err := CheckIssuer(i); err != nil || got != i {
+			t.Errorf("CheckIssuer(%s): %q %v", i, got, err)
+		}
+	}
+	// The option changed: what the plugin alone added goes.
+	s = load(`["http://localhost:8371"]`)
+	if strings.Join(s.Issuers, ",") != "https://mine.example,http://localhost:8371" || strings.Join(s.PluginIssuers, ",") != "http://localhost:8371" {
+		t.Fatalf("changed option: issuers %v, the plugin's %v", s.Issuers, s.PluginIssuers)
+	}
+	// No option: the default, and nothing the option added.
+	s = load(`[]`)
+	if strings.Join(s.Issuers, ",") != "https://mine.example,https://app.wakeshift.ai" || strings.Join(s.PluginIssuers, ",") != "https://app.wakeshift.ai" {
+		t.Fatalf("no option: issuers %v, the plugin's %v", s.Issuers, s.PluginIssuers)
+	}
+	// An issuer the option added, then trusted another way too (`wakeshift
+	// install --harness opencode --issuer`, Settings.Trust): it isn't the
+	// plugin's alone any more, so a change of option leaves it.
+	s = load(`["http://localhost:8372"]`)
+	if strings.Join(s.PluginIssuers, ",") != "http://localhost:8372" {
+		t.Fatalf("option added: the plugin's %v", s.PluginIssuers)
+	}
+	t.Setenv("WAKESHIFT_HOME", home)
+	own := LoadSettings(opencodeName)
+	if err := own.Trust("http://localhost:8372"); err != nil {
+		t.Fatal(err)
+	}
+	s = load(`[]`)
+	if strings.Join(s.Issuers, ",") != "https://mine.example,http://localhost:8372,https://app.wakeshift.ai" || strings.Join(s.PluginIssuers, ",") != "https://app.wakeshift.ai" {
+		t.Fatalf("trusted another way too: issuers %v, the plugin's %v", s.Issuers, s.PluginIssuers)
 	}
 }
 

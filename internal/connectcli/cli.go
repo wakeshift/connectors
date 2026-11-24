@@ -38,6 +38,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -75,9 +76,16 @@ var Confirm = func(question string) (bool, error) {
 const AfterInstall = "In the conversation that asked for this install: tell the user the step above, if there is one. " +
 	"Don't call the app's tools again just to connect: the hooks connect the conversation by themselves, or from the next result of the app's tools you call anyway."
 
-// lease: a Codex connector whose thread nobody but it has used for this
-// long stops (the app's next result for the thread starts it again).
-const lease = time.Hour
+// lease: a Codex connector whose thread nobody has used for this long (no
+// turn the user started, no wake it delivered) stops, unless it holds the
+// thread's stream (the thread is still subscribed); hold: then it stops
+// once nobody has used the thread for this long, as Claude Code's waiter
+// stops after 23 hours. The app's next result for the thread, or its next
+// prompt or opening, starts it again.
+const (
+	lease = time.Hour
+	hold  = 23 * time.Hour
+)
 
 // Main runs the command and exits.
 func Main() {
@@ -91,7 +99,7 @@ func Main() {
 func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	prog := filepath.Base(args[0])
 	usage := func() int {
-		fmt.Fprintf(stderr, "usage: %s install --harness NAME --issuer URL [--yes] [--plugin] | uninstall --harness NAME | disable | enable | allow --harness NAME --app ID (--tools A,B | --none) | hook --harness NAME [--rewake] | wait | bridge --harness opencode|pi | grok init|prove --bot ID --issuer URL | harnesses | version\n", prog)
+		fmt.Fprintf(stderr, "usage: %s install --harness NAME --issuer URL [--yes] [--plugin] | uninstall --harness NAME | disable | enable | allow --harness NAME --app ID (--tools A,B | --none) | hook --harness NAME [--rewake] | wait | bridge --harness opencode|pi | grok init|prove --bot ID --issuer URL | codex-background [read-only|workspace-write|thread] | doctor [--harness NAME] | harnesses | version\n", prog)
 		fmt.Fprintf(stderr, "harnesses: %s\n", strings.Join(connector.Names(), ", "))
 		return 2
 	}
@@ -188,7 +196,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 				fmt.Fprintln(stdout, "Next: "+t)
 			}
 			// An agent that ran this mid-conversation took "nothing to
-			// approve" as done and waited (wakebench S11): the hooks
+			// approve" as done and waited: the hooks
 			// connect a conversation only from a beacon in a result that
 			// comes after the install, so say it last, where it's read.
 			fmt.Fprintln(stdout, AfterInstall)
@@ -224,12 +232,23 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			if !set.Installed() {
 				return 0 // uninstalled: a session that read its hooks before keeps calling them
 			}
-			h := &codexconnector.Hook{Settings: set, Socket: codexconnector.Socket(),
+			h := &codexconnector.Hook{Settings: set, Socket: codexconnector.Socket(), Desktop: codexconnector.BundledCodex() != "",
 				Start: func(thread, link, app, why string, rearm bool) error {
 					return codexconnector.StartDetached(bin, thread, link, app, why, rearm)
 				}}
 			h.Run(ctx, stdin, stdout)
 			return 0
+		}
+		claude := connector.ClaudeAttended
+		if *harness == "claude-code" && *event != connector.ClaudeClaimSendEvent {
+			// Where Claude Code would run the waiters as blocking hooks
+			// (claude -p with text input), or can't be read, every hook
+			// does nothing: no redeem, link, note, claim, mark or waiter,
+			// as if the plugin weren't installed (#1272). The claim's
+			// detached sender runs only when its hook already passed this.
+			if claude = connector.ClaudeSessionMode(); claude == connector.ClaudeOff {
+				return 0
+			}
 		}
 		spec, ok := connector.Lookup(*harness)
 		if !ok || spec.Format == nil {
@@ -239,6 +258,9 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		if !h.Verifier.Settings.Installed() {
 			return 0 // uninstalled: a session that read its hooks before keeps calling them
 		}
+		// Saved approvals from before commands read their link from a file
+		// can hold a link: take them out.
+		connector.ScrubLinksQuietly(*harness)
 		h.Rewake, h.EventName, h.Alive, h.Bin = *rewake, *event, connector.HarnessWatch(), bin
 		if spec.Wait {
 			h.WaitCommand = connector.WaitCommand(bin)
@@ -252,10 +274,17 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			h.StopWait = *wait
 		}
 		if *harness == "claude-code" && *rewake {
-			if connector.ClaudeUnattended() {
-				return 0 // -p: nothing to wake
-			}
 			h.WaiterKey = os.Getenv("CLAUDE_PID")
+			if pid, err := strconv.Atoi(h.WaiterKey); err == nil && pid > 1 {
+				h.Parent = pid // the waiter stops as soon as Claude has gone
+			}
+			// An SDK host's session or a one-shot query, which can't be
+			// told apart: the woken turn's Stop confirms what's handed over.
+			h.ConfirmAtTurnEnd = claude == connector.ClaudeStreaming
+			// A one-shot query closes Claude's input after its result: the
+			// waiter stops then, so Claude exits at once instead of waiting
+			// 30 s for it (connector.ClaudeInputClosed).
+			h.InputClosed = connector.ClaudeInputWatch(claude, h.Parent)
 			// Hooks the installer wrote before the session-context hook,
 			// now run by this connector: add it, so later sessions pass
 			// the mark (connector.UpgradeClaudeHooks).
@@ -285,6 +314,20 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		}
 		fmt.Fprintln(stdout, "Wakeshift is on again on this computer. Connected conversations get their messages from their next wake or turn.")
 		return 0
+	case "doctor":
+		// What support asks for when a conversation wasn't woken: no
+		// links, tokens, keys or IDs (connector.Doctor).
+		if fs.Parse(rest) != nil {
+			return 2
+		}
+		h := *harness
+		if h == "" {
+			h = "claude-code"
+		}
+		if _, ok := connector.Lookup(h); !ok {
+			return fail(unknown(h))
+		}
+		return fail(connector.Doctor(h, stdout, time.Now()))
 	case "harnesses":
 		for _, h := range harnesses.All() {
 			how := string(h.Wake)
@@ -310,8 +353,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		set := codexconnector.LoadSettings()
 		links := connector.LinksFor(set)
 		err := codexconnector.Run(ctx, codexconnector.Config{Disabled: connector.SwitchedOff, Stream: link, Issuers: set.Issuers, Thread: *thread, Socket: codexconnector.Socket(),
-			Lease: lease, Window: &codexconnector.Window{Thread: *thread}, Links: &links,
-			Lock: codexconnector.AppRunLock(*thread, *app), Exclusive: *rearm, StartGrace: 15 * time.Second, CodexGrace: time.Minute, Log: log})
+			Lease: lease, Hold: hold, Window: &codexconnector.Window{Thread: *thread}, Links: &links,
+			Lock: codexconnector.AppRunLock(*thread, *app), Exclusive: *rearm, StartGrace: 15 * time.Second, CodexGrace: time.Minute, Desktop: codexconnector.DefaultDesktop(set.Dir), NoteDir: set.Dir, Log: log})
 		log.Info("connector: stopped", "why", err)
 		return 0
 	case "status":
@@ -334,6 +377,21 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			fmt.Fprintln(stdout, "No Codex window shows that thread:", why+".")
 		}
 		return 0
+	case "codex-background":
+		// How a Codex desktop thread no window has open runs a wake:
+		// read-only (the default), workspace-write, or the thread's own
+		// sandbox. Either way, a command that needs approval fails (nobody
+		// is there to give it), and the turn still completes.
+		dir := codexconnector.LoadSettings().Dir
+		if len(rest) == 0 {
+			fmt.Fprintln(stdout, codexconnector.BackgroundPermissions(dir))
+			return 0
+		}
+		if err := codexconnector.SetBackgroundPermissions(dir, rest[0]); err != nil {
+			return fail(err)
+		}
+		fmt.Fprintf(stdout, "Wakes of Codex desktop threads that aren't open run with: %s.\n", rest[0])
+		return 0
 	case "version":
 		fmt.Fprintln(stdout, version.Version)
 		return 0
@@ -342,12 +400,12 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 }
 
 // grokCmd is `wakeshift grok init|prove --bot ID --issuer URL
-// [--challenge ID]` (connector.GrokInit, connector.GrokProve): a Grok Bot's
+// [--challenge ID [--app ID]]` (connector.GrokInit, connector.GrokProve): a Grok Bot's
 // key and proofs. It prints the outcome on stdout, never the key, and
 // exits with the connector.GrokExit* codes.
 func grokCmd(ctx context.Context, rest []string, stdout, stderr io.Writer, prog string) int {
 	if len(rest) < 1 || (rest[0] != "init" && rest[0] != "prove") {
-		fmt.Fprintf(stderr, "usage: %s grok init --bot ID --issuer URL | grok prove --bot ID --issuer URL [--challenge ID]\n", prog)
+		fmt.Fprintf(stderr, "usage: %s grok init --bot ID --issuer URL | grok prove --bot ID --issuer URL [--challenge ID [--app ID]]\n", prog)
 		return connector.GrokExitUsage
 	}
 	fs := flag.NewFlagSet("grok "+rest[0], flag.ContinueOnError)
@@ -355,15 +413,16 @@ func grokCmd(ctx context.Context, rest []string, stdout, stderr io.Writer, prog 
 	bot := fs.String("bot", "", "the bot's ID, as Wakeshift wrote it")
 	issuer := fs.String("issuer", "", "the Wakeshift, as Wakeshift wrote it")
 	challenge := fs.String("challenge", "", "prove: the register challenge's ID, as Wakeshift wrote it (none: the setup check a webhook's run answers)")
-	if fs.Parse(rest[1:]) != nil || fs.NArg() != 0 || *bot == "" || *issuer == "" || (rest[0] == "init" && *challenge != "") {
-		fmt.Fprintf(stderr, "usage: %s grok init --bot ID --issuer URL | grok prove --bot ID --issuer URL [--challenge ID]\n", prog)
+	app := fs.String("app", "", "prove: the app the register challenge must be for, as Wakeshift wrote it")
+	if fs.Parse(rest[1:]) != nil || fs.NArg() != 0 || *bot == "" || *issuer == "" || (rest[0] == "init" && (*challenge != "" || *app != "")) {
+		fmt.Fprintf(stderr, "usage: %s grok init --bot ID --issuer URL | grok prove --bot ID --issuer URL [--challenge ID [--app ID]]\n", prog)
 		return connector.GrokExitUsage
 	}
 	var r connector.GrokResult
 	if rest[0] == "init" {
 		r = connector.GrokInit(*bot, *issuer)
 	} else {
-		r = connector.GrokProve(ctx, *bot, *issuer, *challenge)
+		r = connector.GrokProve(ctx, *bot, *issuer, *challenge, *app)
 	}
 	fmt.Fprintln(stdout, r.Out)
 	return r.Code

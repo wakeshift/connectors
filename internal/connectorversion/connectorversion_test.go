@@ -100,7 +100,7 @@ func TestMinimums(t *testing.T) {
 	}
 }
 
-// Production's minimum (deploy/terraform/production/terraform.tfvars):
+// A minimum as a deployment sets it:
 // the binary from v1.4.0's own build, the plugins from v1.1.0's; every
 // build before its minimum (a minute before, earlier releases) is refused.
 func TestReleaseMinimum(t *testing.T) {

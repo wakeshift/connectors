@@ -16,6 +16,8 @@ The plugin trusts https://app.wakeshift.ai. To trust another Wakeshift, give the
 { "plugin": [["@wakeshift/opencode@<version>", { "issuers": ["https://wakeshift.example.com"] }]] }
 ```
 
+Each issuer must be an `https://` address (plain `http://` only for `localhost`, `127.0.0.1` or `[::1]`). When you change or remove the option, the plugin stops trusting the Wakeshifts it added for the old one.
+
 If you installed Wakeshift's plugin for opencode with `curl … | sh` before, this plugin removes that copy, `~/.config/opencode/plugins/wakeshift.ts`, the first time it loads.
 
 ## Update

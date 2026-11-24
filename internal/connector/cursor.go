@@ -12,7 +12,7 @@ import (
 )
 
 // Cursor (cursor-agent 2026.09.23, verified; the IDE reads the same file,
-// from source and docs). User hooks are in
+// from docs). User hooks are in
 // ~/.cursor/hooks.json (always under the home directory), which must say
 // "version": 1 or Cursor ignores the whole file. Cursor gives hooks an MCP
 // result's text only (no _meta) and tells MCP servers neither the
@@ -33,11 +33,8 @@ func init() {
 		When:     "if they come within a minute after the agent finishes a turn, otherwise at the start of the next one",
 		StopWait: 60 * time.Second, // the hook's timeout is 90s; Cursor shows "Working" meanwhile
 		Unbound:  true,
-		// No Rule (CursorRule): cursor-agent matches Shell rules on the
-		// command with its redirects taken off, and lets an allowlisted
-		// command redirect into workspace and temporary files, so the rule
-		// would let `… wait > <workspace file>` run unasked; the shell
-		// empties the file before `wakeshift wait` can refuse.
+		// No Rule (CursorRule): Wakeshift installs a rule only where it
+		// matches the wait command exactly, with nothing added.
 		Wait:  true,
 		Tools: &cursorTools,
 	})

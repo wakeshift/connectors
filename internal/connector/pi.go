@@ -182,8 +182,9 @@ const piShared = "// ---- the rest is the npm package's too (internal/connector:
 //     @wakeshift/connect-<os>-<arch>, the package @wakeshift/opencode and
 //     npx -y @wakeshift/connect install it from too, made executable at
 //     load.
-//   - The Wakeshifts it trusts are DEFAULT_ISSUERS (production;
-//     plugins/pack-npm.mjs --issuer packs it for another), added to
+//   - The Wakeshifts it trusts are DEFAULT_ISSUERS (production; the packing
+//     script, plugins/pack-npm.mjs in github.com/wakeshift/connectors, packs
+//     it for another with --issuer), added to
 //     <home>/pi/config.json, where the bridge reads them, as `wakeshift
 //     install` does. pi packages take no options.
 //   - It removes the extension file an earlier `wakeshift install --harness
@@ -199,7 +200,7 @@ func PiPackage() string {
 }
 
 // PiDefaultIssuers is the line of PiPackage that names the Wakeshifts it
-// trusts by default (plugins/pack-npm.mjs replaces it to pack the package
+// trusts by default (the packing script replaces it to pack the package
 // for another Wakeshift).
 const PiDefaultIssuers = `const DEFAULT_ISSUERS = ["https://app.wakeshift.ai"]`
 

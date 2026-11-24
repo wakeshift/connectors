@@ -41,9 +41,11 @@ import (
 
 // Home is Wakeshift's own directory on this machine (WAKESHIFT_HOME,
 // default ~/.wakeshift): the binary in bin/, each harness's settings, keys,
-// links and logs in <harness>/.
+// links and logs in <harness>/. A relative WAKESHIFT_HOME is ignored: a
+// project's settings can set a hook's environment, and a relative home
+// would be the project's own directory, its issuers the project's.
 func Home() string {
-	if h := os.Getenv("WAKESHIFT_HOME"); h != "" {
+	if h := os.Getenv("WAKESHIFT_HOME"); h != "" && filepath.IsAbs(h) {
 		return h
 	}
 	home, _ := os.UserHomeDir()
@@ -196,11 +198,19 @@ func (v *Verifier) keys(ctx context.Context, issuer string, refresh bool) func(k
 		}
 		sum := sha256.Sum256([]byte(issuer))
 		path := filepath.Join(v.Settings.Dir, "keys", hex.EncodeToString(sum[:8])+".json")
-		if k := keyIn(path, kid); k != nil && !refresh {
+		// The file's keys and its age from one open: another hook of the
+		// same turn may rename a fresh file over it at any moment, and a
+		// miss read before its rename with an age read after it took the
+		// fresh file for one without the beacon's key (not fetched again
+		// within the minute) and dropped the beacon.
+		cached, fresh := readKeys(path, v.now())
+		if k := keyFrom(cached, kid); k != nil && !refresh {
 			return k
 		}
-		if st, err := os.Stat(path); err == nil && v.now().Sub(st.ModTime()) < time.Minute {
-			return nil
+		if fresh {
+			// Fetched within the minute: not again, but the file as it is
+			// now, which another hook may have replaced since.
+			return keyIn(path, kid)
 		}
 		fctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
@@ -229,6 +239,25 @@ func (v *Verifier) keys(ctx context.Context, issuer string, refresh bool) func(k
 		}
 		return keyFrom(body, kid)
 	}
+}
+
+// readKeys is the JWKS document cached at path, and whether it was written
+// less than a minute before now; nil, false if there's none.
+func readKeys(path string, now time.Time) ([]byte, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, false
+	}
+	b, err := io.ReadAll(io.LimitReader(f, 1<<20))
+	if err != nil {
+		return nil, false
+	}
+	return b, now.Sub(st.ModTime()) < time.Minute
 }
 
 func keyIn(path, kid string) ed25519.PublicKey {
@@ -274,6 +303,13 @@ var ErrUnreachable = errors.New("Wakeshift couldn't be reached")
 // connected to a session of another workspace (409 conversation_taken);
 // the link the hook holds stays.
 var ErrTaken = errors.New("this conversation is connected to another workspace's session")
+
+// ErrLinkNotHeld is ErrTaken (errors.Is) where Wakeshift said why
+// ("reason": "link_not_held"): the ticket's own session is connected to
+// hooks that hold its link, and this redeem didn't send it. Not another
+// account's or workspace's: the same session's link, which these hooks
+// don't hold (lost, or never had it).
+var ErrLinkNotHeld = fmt.Errorf("%w: its session's hooks hold its link, and this redeem didn't send it", ErrTaken)
 
 // linkOnOrigin says whether a stream link (wss, ws, https or http) is on
 // the same host as url (https or http, the same security), so a link's
@@ -358,6 +394,9 @@ func redeemHeld(ctx context.Context, hc *http.Client, harness string, c beacon.C
 	req, _ := http.NewRequestWithContext(rctx, "POST", c.Redeem, bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(connectorversion.Header, ClientHeader(harness))
+	if fb := fallbackOf(ctx); fb != "" {
+		req.Header.Set("X-Wakeshift-Call-Redeem", fb) // redeem by call: why not by call (callredeem.go)
+	}
 	resp, err := client(hc).Do(req)
 	if err != nil {
 		return "", RedeemedApp{}, ErrUnreachable
@@ -370,9 +409,9 @@ func redeemHeld(ctx context.Context, hc *http.Client, harness string, c beacon.C
 		return "", RedeemedApp{}, updateRequired(resp)
 	}
 	var out struct {
-		URL   string                `json:"url"`
-		App   *RedeemedApp          `json:"app"`
-		Error struct{ Code string } `json:"error"`
+		URL   string                        `json:"url"`
+		App   *RedeemedApp                  `json:"app"`
+		Error struct{ Code, Reason string } `json:"error"`
 	}
 	json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out)
 	switch {
@@ -394,6 +433,8 @@ func redeemHeld(ctx context.Context, hc *http.Client, harness string, c beacon.C
 		return "", RedeemedApp{}, errors.New("the app isn't allowed for this agent any more")
 	case out.Error.Code == "wrong_thread":
 		return "", RedeemedApp{}, errors.New("the ticket was for another conversation")
+	case out.Error.Code == "conversation_taken" && out.Error.Reason == "link_not_held":
+		return "", RedeemedApp{}, ErrLinkNotHeld
 	case out.Error.Code == "conversation_taken":
 		return "", RedeemedApp{}, ErrTaken
 	default:

@@ -11,7 +11,7 @@ import (
 // github.com/wakeshift/agent-plugins (plugins/agent-plugins) with its own
 // plugin commands, instead of Wakeshift's installer. The plugin's hooks run
 // a launcher that fetches the connector the plugin pins and trusts the
-// Wakeshift the marketplace's branch was built for (docs/native-installs.md).
+// Wakeshift the marketplace's branch was built for.
 //
 // Its commands name the marketplace as {source}: wakeshift/agent-plugins for
 // production, with the harness's way of naming a branch (RefSep) for staging
@@ -184,6 +184,28 @@ func marketplaceCommand(h Harness, base, tmpl string) string {
 		return ""
 	}
 	return strings.ReplaceAll(tmpl, "{source}", src)
+}
+
+// OfferCommands is OfferCommand as the separate commands a user types one
+// at a time: a marketplace offer's install template split at its own
+// " && " before its source is filled in (a source never has one), else the
+// one command. Joined with " && ", they're OfferCommand.
+func OfferCommands(h Harness, base string) []string {
+	whole := OfferCommand(h, base)
+	if m := h.Marketplace; m != nil {
+		tmpl := m.Install
+		if m.Since != "" && !atLeast(h.client, m.Since) {
+			tmpl = m.BeforeInstall
+		}
+		var out []string
+		for _, part := range strings.Split(tmpl, " && ") {
+			out = append(out, marketplaceCommand(h, base, part))
+		}
+		if strings.Join(out, " && ") == whole {
+			return out
+		}
+	}
+	return []string{whole}
 }
 
 // PluginRoute reports whether h's offers from the Wakeshift at base install

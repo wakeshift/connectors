@@ -214,11 +214,12 @@ func TestUninstallLeavesOthersProcs(t *testing.T) {
 	}
 }
 
-// With no home (WAKESHIFT_HOME relative), uninstall removes nothing
-// outside the harness's own hooks.
+// With no home (HOME unset, WAKESHIFT_HOME relative and so ignored),
+// uninstall removes nothing outside the harness's own hooks.
 func TestUninstallNoHome(t *testing.T) {
 	isolatedHome(t)
 	t.Setenv("WAKESHIFT_HOME", "relative")
+	t.Setenv("HOME", "")
 	var out bytes.Buffer
 	if err := removeLeftovers("cursor", &out); err != nil || out.Len() != 0 {
 		t.Fatalf("%v %q", err, out.String())

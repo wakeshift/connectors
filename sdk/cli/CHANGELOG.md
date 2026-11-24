@@ -2,6 +2,10 @@
 
 What changed in each release of `@wakeshift/cli`.
 
+## Unreleased
+
+- **The link's key code line says the page asks for it**: "Key code: 7Hq2xK9p (the page asks for it)". The console's confirm page now has the person type the key code rather than showing it to compare, so a link someone else sent can't be confirmed without their terminal. Earlier versions print the same code and work unchanged.
+
 ## 0.1.4 (2026-11-09)
 
 - **`init`'s console link ends in `?ref=cli`** before its fragment, so Wakeshift can count accounts that start from the CLI. Sign-in saves the tag on the new account and nowhere else; the key stays in the fragment. This was listed under 0.1.3, which was released without it.

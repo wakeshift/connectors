@@ -23,15 +23,17 @@ The plugin has no settings. The repository's `main` branch trusts Wakeshift's se
 
 ## What it does
 
-The plugin has four hooks. Each runs `bin/wakeshift`, a short POSIX shell script in this folder that you can read, which runs Wakeshift's connector:
+The plugin's hooks are below. Each runs `bin/wakeshift`, a short POSIX shell script in this folder that you can read, which runs Wakeshift's connector:
 
 | Hook | When | What it does |
 | --- | --- | --- |
 | `PostToolUse`, MCP tools only (`mcp__.*`), in the background | After the agent calls an MCP tool | Looks for a note signed by Wakeshift in the tool's result. If there is one, it connects the conversation to Wakeshift. Results without one are ignored. |
 | `SessionStart` | When a session starts | Adds one line of context saying the plugin is installed, so apps don't offer to install it again. Makes no network request. |
 | `SessionStart` and `Stop`, in the background | When a session starts, and when Claude finishes a turn | For a connected conversation, waits for its messages and wakes the session when one arrives. For any other conversation, it exits within two minutes. |
+| `PreToolUse`, MCP tools only (`mcp__.*`) | Before the agent calls an MCP tool | Off unless `WAKESHIFT_REDEEM_BY_TOOL_CALL=1` is in its environment. Then, for a call that carries this plugin's mark, it registers the call with Wakeshift, so the result can connect the conversation without waiting for Claude Code's transcript. Prints nothing, never blocks the call, and sends nothing for other calls. |
+| `SubagentStart` | When a subagent starts | Off unless `WAKESHIFT_REDEEM_BY_TOOL_CALL=1` is in its environment. Then, it adds the same line of context as at session start to the subagent's context. Makes no network request. |
 
-Only the session-start context hook runs before Claude Code goes on, and it works locally, apart from the one-time download below. If anything goes wrong, the hooks exit without an error and do nothing.
+Only the session-start context hook runs before Claude Code goes on, and it works locally, apart from the one-time download below. When turned on, the `PreToolUse` and `SubagentStart` hooks run before it goes on too, and the call's registration gives up after a few seconds. If anything goes wrong, the hooks exit without an error and do nothing.
 
 The connector is [open source](https://github.com/wakeshift/connectors) (Apache 2.0). It's built for macOS and Linux (WSL included), on arm64 and x86_64. Native Windows isn't supported: Claude Code there reports that the hooks can't start.
 

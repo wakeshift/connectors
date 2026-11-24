@@ -1,8 +1,7 @@
 // Package agentplugins is Wakeshift's plugins for the harnesses that install
 // them from a marketplace repository with their own plugin command (Claude
 // Code, Codex, GitHub Copilot CLI) or from their own marketplace (Cursor),
-// published as github.com/wakeshift/agent-plugins (opensource/export.sh
-// agent-plugins; docs/native-installs.md).
+// published as github.com/wakeshift/agent-plugins.
 //
 // marketplace/ is the repository as published, but for what Render adds to
 // each plugin, plugins/<harness>:
@@ -38,7 +37,7 @@
 // user to trust a plugin's hooks again whenever any of its files changes,
 // and every new version of Claude Code's is one more for Anthropic's plugin
 // directory to review, so those plugins are released only when their files
-// must change (docs/claude-plugin-versions.md).
+// must change.
 //
 // Claude Code's plugin is versioned MAJOR.MINOR.PATCH (Semver), since Claude
 // Code resolves a dependent plugin's version range against the repository's
@@ -197,14 +196,14 @@ func (p Pin) sumsFile() []byte {
 	return []byte(b.String())
 }
 
-// envFile is a plugin's wakeshift.env, written by export.sh's target (the
-// repository it's published as). The launcher reads it line by line (never
+// envFile is a plugin's wakeshift.env, for target (the repository it's
+// published as). The launcher reads it line by line (never
 // runs it).
 func envFile(target, harness, issuer string, p *Pin) []byte {
 	var b strings.Builder
 	b.WriteString("# Wakeshift's plugin for " + harness + ": the Wakeshift it trusts, and the connector its\n")
 	b.WriteString("# hooks run (bin/wakeshift fetches it from connector_url and checks it against SHA256SUMS).\n")
-	b.WriteString("# Written by opensource/export.sh " + target + " in github.com/wakeshift/wakeshift.\n")
+	b.WriteString("# Rendered for github.com/wakeshift/" + target + " from plugins/agent-plugins in github.com/wakeshift/connectors.\n")
 	b.WriteString("harness=" + harness + "\n")
 	b.WriteString("issuer=" + issuer + "\n")
 	if p == nil {
@@ -268,8 +267,8 @@ func readPinAt(root, harness string) (p Pin, ok bool, err error) {
 // WAKESHIFT_CONNECTOR_MIN_VERSIONS) requires for their harness: a user of
 // such a plugin would be refused by the core and told to update to a plugin
 // version that can't help. The release pins them to its connector, and a
-// change that raises a minimum is refused until they're pinned
-// (.github/workflows/agent-plugins.yml).
+// change that raises a minimum is refused until they're pinned (the
+// release pipeline checks it).
 func Below(dir string, minimums connectorversion.Minimums) ([]string, error) {
 	var l []string
 	for _, h := range Harnesses() {
@@ -307,7 +306,7 @@ func CheckIssuer(issuer string) error {
 // (its launcher then does nothing). It returns the plugins whose files
 // changed. Everything is worked out before dir is touched; an error
 // writing it leaves dir part-written, so callers publish dir only when
-// Render succeeds (export.sh stops, and nothing is committed or pushed).
+// Render succeeds (the publish stops, and nothing is committed or pushed).
 func Render(dir, issuer string, pins map[string]Pin) (changed []string, err error) {
 	if err := CheckIssuer(issuer); err != nil {
 		return nil, err
@@ -397,7 +396,7 @@ func Render(dir, issuer string, pins map[string]Pin) (changed []string, err erro
 // if it isn't nil, else the one already in dir (ReadStandalonePin), else
 // none. Files at dir's root that aren't the plugin's (a README, LICENSE,
 // .git) are kept, and so is a file the plugin no longer has: dir is an
-// empty directory or a fresh export (opensource/export.sh). It reports
+// empty directory or a fresh export. It reports
 // whether any file changed.
 func RenderStandalone(dir, harness, issuer string, pin *Pin) (changed bool, err error) {
 	manifest, ok := standalone[harness]

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -17,8 +18,9 @@ import (
 // Claude Code (2.1.280, verified). Its MCP client sends
 // servers the tool call's ID (_meta["claudecode/toolUseId"]) but not the
 // session's, and its PostToolUse hooks get the result without _meta; the
-// result's _meta is in the transcript ("mcpMeta"), written just after the
-// hook starts. So:
+// result's _meta is in the transcript ("mcpMeta"), written after the hook
+// starts: about 1-2.5s after on 2.1.321, sometimes over 4s
+// (claudeMetaWait). So:
 //
 //   - PostToolUse (async, MCP tools): find the result's _meta in the
 //     transcript by tool_use_id, verify the beacon (bound to that call),
@@ -124,6 +126,7 @@ type claudeFormat struct{}
 type claudeInput struct {
 	SessionID      string          `json:"session_id"`
 	TranscriptPath string          `json:"transcript_path"`
+	AgentID        string          `json:"agent_id"` // a subagent's call (the Agent tool)
 	HookEventName  string          `json:"hook_event_name"`
 	ToolName       string          `json:"tool_name"`
 	ToolUseID      string          `json:"tool_use_id"`
@@ -156,7 +159,20 @@ func (claudeFormat) Parse(b []byte) (Input, error) {
 		// has it (a beacon line in its text, which anyone's words can be,
 		// doesn't stand in for it).
 		if _, at := FindBeacon(c.ToolResponse); at != InResultMeta && c.ToolUseID != "" {
-			if meta := claudeTranscriptMeta(c.TranscriptPath, c.SessionID, c.ToolUseID, 3*time.Second); meta != nil {
+			// A subagent's call: transcript_path is the session's, but the
+			// result's line is in the subagent's own transcript.
+			paths := []string{c.TranscriptPath}
+			if c.AgentID != "" {
+				if sub := claudeSubagentTranscript(c.TranscriptPath, c.SessionID, c.AgentID); sub != "" {
+					paths = []string{sub, c.TranscriptPath}
+				}
+			}
+			read := func() json.RawMessage { return claudeTranscriptMeta(paths, c.SessionID, c.ToolUseID, claudeMetaWait) }
+			if RedeemByCallEnabled() {
+				// Redeem by call (callredeem.go): the hook redeems by the call's ID
+				// first, and reads the transcript only if it can't.
+				in.lateMeta = read
+			} else if meta := read(); meta != nil {
 				in.ToolResult = meta
 			}
 		}
@@ -164,59 +180,125 @@ func (claudeFormat) Parse(b []byte) (Input, error) {
 		// Waiters: the installer runs these with --rewake (asyncRewake).
 		in.Event = Stop
 		in.transcript = c.TranscriptPath
+		in.turnEnded = c.HookEventName == "Stop"
 	}
 	return in, nil
 }
 
-// LastBeacon: the newest tool result in the session's transcript whose
-// own _meta (the line's mcpMeta) carries a beacon, and the tool it called.
-func (claudeFormat) LastBeacon(in Input) (FoundBeacon, bool) {
-	path := in.transcript
+// claudeID is a session or subagent ID as Claude Code gives it (a UUID;
+// agent_id "a5998067ef883574a"), checked before it names a file.
+var claudeID = regexp.MustCompile(`^[0-9A-Za-z_-]{1,64}$`)
+
+// claudeSubagentTranscript is where Claude Code writes a subagent's lines
+// (its calls, their results and their mcpMeta), whose hooks get the
+// session's transcript_path and session_id with the subagent's agent_id:
+// <the session transcript's folder>/<session>/subagents/agent-<agent_id>.jsonl
+// (observed with 2.1.280 and 2.1.321). Its lines carry the
+// session's sessionId. "" if the path or an ID doesn't fit.
+func claudeSubagentTranscript(path, session, agent string) string {
+	if path == "" || !filepath.IsAbs(path) || filepath.Ext(path) != ".jsonl" || !claudeID.MatchString(session) || !claudeID.MatchString(agent) {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(path), session, "subagents", "agent-"+agent+".jsonl")
+}
+
+// claudeTranscripts is the session's transcript and its subagents'
+// (claudeSubagentTranscript), for a waiter, whose hook input names no
+// subagent: a beacon in a subagent's result connects the session too.
+// nil if the session's path doesn't fit.
+func claudeTranscripts(path, session string) []string {
 	if path == "" || !filepath.IsAbs(path) || filepath.Ext(path) != ".jsonl" {
-		return FoundBeacon{}, false
+		return nil
 	}
-	f, err := os.Open(path)
+	paths := []string{path}
+	if !claudeID.MatchString(session) {
+		return paths
+	}
+	dir := filepath.Join(filepath.Dir(path), session, "subagents")
+	entries, err := os.ReadDir(dir)
 	if err != nil {
+		return paths
+	}
+	for _, e := range entries {
+		n := e.Name()
+		if e.Type().IsRegular() && strings.HasPrefix(n, "agent-") && strings.HasSuffix(n, ".jsonl") {
+			paths = append(paths, filepath.Join(dir, n))
+		}
+	}
+	return paths
+}
+
+// newerLine: a line read after another (later in its file, or in a file
+// read later) is the newer one unless both have a timestamp and it was
+// written earlier: a line without one keeps the reading order.
+func newerLine(at, than time.Time) bool {
+	return at.IsZero() || than.IsZero() || !at.Before(than)
+}
+
+// eachTranscriptLine calls fn with each whole JSON line of each file.
+func eachTranscriptLine(paths []string, fn func(line []byte)) {
+	for _, path := range paths {
+		f, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		r := bufio.NewReaderSize(f, 1<<16)
+		for {
+			line, err := r.ReadBytes('\n')
+			if len(line) > 0 && json.Valid(line) {
+				fn(line)
+			}
+			if err != nil {
+				break
+			}
+		}
+		f.Close()
+	}
+}
+
+// LastBeacon: the newest tool result in the session's transcript, or a
+// subagent's, whose own _meta (the line's mcpMeta) carries a beacon, and
+// the tool it called.
+func (claudeFormat) LastBeacon(in Input) (FoundBeacon, bool) {
+	paths := claudeTranscripts(in.transcript, in.Conversation)
+	if paths == nil {
 		return FoundBeacon{}, false
 	}
-	defer f.Close()
 	names := map[string]string{} // tool_use ID → tool name
 	var found FoundBeacon
-	r := bufio.NewReaderSize(f, 1<<16)
-	for {
-		line, err := r.ReadBytes('\n')
-		if len(line) > 0 && json.Valid(line) {
-			var l struct {
-				SessionID string `json:"sessionId"`
-				Message   struct {
-					Content json.RawMessage `json:"content"`
-				} `json:"message"`
-				MCPMeta json.RawMessage `json:"mcpMeta"`
-			}
-			if json.Unmarshal(line, &l) == nil && l.SessionID == in.Conversation {
-				var parts []struct {
-					Type      string `json:"type"`
-					ID        string `json:"id"`
-					Name      string `json:"name"`
-					ToolUseID string `json:"tool_use_id"`
-				}
-				json.Unmarshal(l.Message.Content, &parts)
-				for _, p := range parts {
-					switch {
-					case p.Type == "tool_use" && p.ID != "":
-						names[p.ID] = p.Name
-					case p.Type == "tool_result" && p.ToolUseID != "" && l.MCPMeta != nil:
-						if tok, at := FindBeacon(l.MCPMeta); tok != "" && at == InResultMeta {
-							found = FoundBeacon{Token: tok, Call: p.ToolUseID}
-						}
-					}
+	var foundAt time.Time
+	eachTranscriptLine(paths, func(line []byte) {
+		var l struct {
+			SessionID string    `json:"sessionId"`
+			Timestamp time.Time `json:"timestamp"`
+			Message   struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+			MCPMeta json.RawMessage `json:"mcpMeta"`
+		}
+		if json.Unmarshal(line, &l) != nil || l.SessionID != in.Conversation {
+			return
+		}
+		var parts []struct {
+			Type      string `json:"type"`
+			ID        string `json:"id"`
+			Name      string `json:"name"`
+			ToolUseID string `json:"tool_use_id"`
+		}
+		json.Unmarshal(l.Message.Content, &parts)
+		for _, p := range parts {
+			switch {
+			case p.Type == "tool_use" && p.ID != "":
+				names[p.ID] = p.Name
+			case p.Type == "tool_result" && p.ToolUseID != "" && l.MCPMeta != nil:
+				// The newest: later in its file, and written no earlier
+				// than the one found so far in any file (newerLine).
+				if tok, at := FindBeacon(l.MCPMeta); tok != "" && at == InResultMeta && newerLine(l.Timestamp, foundAt) {
+					found, foundAt = FoundBeacon{Token: tok, Call: p.ToolUseID}, l.Timestamp
 				}
 			}
 		}
-		if err != nil {
-			break
-		}
-	}
+	})
 	if found.Token == "" {
 		return FoundBeacon{}, false
 	}
@@ -225,19 +307,14 @@ func (claudeFormat) LastBeacon(in Input) (FoundBeacon, bool) {
 }
 
 // LastPromise: the newest result of an MCP tool (mcp__<server>__<tool>) in
-// the session's transcript whose text starts a paragraph with the core's
-// "the plugin (or hooks) connects this conversation" lead
+// the session's transcript, or a subagent's, whose text starts a paragraph
+// with the core's "the plugin (or hooks) connects this conversation" lead
 // (harnesses.PluginReadyLead), and when it was written.
 func (claudeFormat) LastPromise(in Input) (Promise, bool) {
-	path := in.transcript
-	if path == "" || !filepath.IsAbs(path) || filepath.Ext(path) != ".jsonl" {
+	paths := claudeTranscripts(in.transcript, in.Conversation)
+	if paths == nil {
 		return Promise{}, false
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return Promise{}, false
-	}
-	defer f.Close()
 	h, _ := harnesses.Get(claudeName)
 	leads := []string{harnesses.PluginReadyLead(h, false), harnesses.PluginReadyLead(h, true)}
 	promised := func(text string) bool {
@@ -251,50 +328,45 @@ func (claudeFormat) LastPromise(in Input) (Promise, bool) {
 		return false
 	}
 	names := map[string]string{} // tool_use ID → tool name
-	// Results that promised, in transcript order: a result can come before
-	// its tool_use line, so they're checked against names at the end, as
-	// FindBeacon does.
+	// Results that promised: a result can come before its tool_use line,
+	// so they're checked against names at the end, as FindBeacon does.
 	var promises []Promise
-	r := bufio.NewReaderSize(f, 1<<16)
-	for {
-		line, err := r.ReadBytes('\n')
-		if len(line) > 0 && json.Valid(line) {
-			var l struct {
-				SessionID string    `json:"sessionId"`
-				Timestamp time.Time `json:"timestamp"`
-				Message   struct {
-					Content json.RawMessage `json:"content"`
-				} `json:"message"`
-			}
-			if json.Unmarshal(line, &l) == nil && l.SessionID == in.Conversation {
-				var parts []struct {
-					Type      string          `json:"type"`
-					ID        string          `json:"id"`
-					Name      string          `json:"name"`
-					ToolUseID string          `json:"tool_use_id"`
-					Content   json.RawMessage `json:"content"`
-				}
-				json.Unmarshal(l.Message.Content, &parts)
-				for _, p := range parts {
-					switch {
-					case p.Type == "tool_use" && p.ID != "":
-						names[p.ID] = p.Name
-					case p.Type == "tool_result" && p.ToolUseID != "" && promised(claudeResultText(p.Content)):
-						promises = append(promises, Promise{Call: p.ToolUseID, At: l.Timestamp})
-					}
-				}
+	eachTranscriptLine(paths, func(line []byte) {
+		var l struct {
+			SessionID string    `json:"sessionId"`
+			Timestamp time.Time `json:"timestamp"`
+			Message   struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal(line, &l) != nil || l.SessionID != in.Conversation {
+			return
+		}
+		var parts []struct {
+			Type      string          `json:"type"`
+			ID        string          `json:"id"`
+			Name      string          `json:"name"`
+			ToolUseID string          `json:"tool_use_id"`
+			Content   json.RawMessage `json:"content"`
+		}
+		json.Unmarshal(l.Message.Content, &parts)
+		for _, p := range parts {
+			switch {
+			case p.Type == "tool_use" && p.ID != "":
+				names[p.ID] = p.Name
+			case p.Type == "tool_result" && p.ToolUseID != "" && promised(claudeResultText(p.Content)):
+				promises = append(promises, Promise{Call: p.ToolUseID, At: l.Timestamp})
 			}
 		}
-		if err != nil {
-			break
+	})
+	var newest Promise
+	ok := false
+	for _, p := range promises { // in file order: a later one written no earlier wins
+		if strings.HasPrefix(names[p.Call], "mcp__") && (!ok || newerLine(p.At, newest.At)) {
+			newest, ok = p, true
 		}
 	}
-	for i := len(promises) - 1; i >= 0; i-- {
-		if strings.HasPrefix(names[promises[i].Call], "mcp__") {
-			return promises[i], true
-		}
-	}
-	return Promise{}, false
+	return newest, ok
 }
 
 // claudeResultText is a transcript tool_result's text: its content as a
@@ -325,6 +397,15 @@ const ClaudeSessionContextEvent = "session-context"
 // ParseEvent: the plugin's session-context hook names its event; any
 // other hook is read as Parse reads it.
 func (f claudeFormat) ParseEvent(event string, b []byte) (Input, error) {
+	if event == ClaudeSubagentContextEvent {
+		// The plugin's SubagentStart hook (redeem by call): the mark for
+		// the subagent's context, which doesn't get SessionStart's.
+		var c claudeInput
+		if err := json.Unmarshal(b, &c); err != nil || c.HookEventName != "SubagentStart" || !RedeemByCallEnabled() {
+			return Input{}, err
+		}
+		return Input{Event: SessionContext, Conversation: c.SessionID, contextEvent: "SubagentStart"}, nil
+	}
 	in, err := f.Parse(b)
 	if err != nil || event != ClaudeSessionContextEvent {
 		return in, err
@@ -349,16 +430,23 @@ const ClaudeHooksMarkNote = "Wakeshift's hooks are installed in this Claude Code
 
 // SessionContext is the SessionStart output that adds the mark's note
 // (the hooks' wording when hooks: the installer's, not the plugin's), if
-// there's a mark (none under claude -p, where nothing wakes the session).
-func (claudeFormat) SessionContext(mark string, hooks bool) (Output, bool) {
-	if mark == "" || ClaudeUnattended() {
+// there's a mark (none under claude -p with text input, where nothing
+// wakes the session: ClaudeSessionMode).
+func (f claudeFormat) SessionContext(mark string, hooks bool) (Output, bool) {
+	return f.ContextFor("SessionStart", mark, hooks)
+}
+
+// ContextFor is SessionContext for the hook event that adds it
+// (SessionStart, or SubagentStart for a subagent's own context).
+func (claudeFormat) ContextFor(event, mark string, hooks bool) (Output, bool) {
+	if mark == "" || ClaudeSessionMode() == ClaudeOff {
 		return Output{}, false
 	}
 	note := ClaudeMarkNote
 	if hooks {
 		note = ClaudeHooksMarkNote
 	}
-	b, err := json.Marshal(map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "SessionStart", "additionalContext": fmt.Sprintf(note, mark)}})
+	b, err := json.Marshal(map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": event, "additionalContext": fmt.Sprintf(note, mark)}})
 	if err != nil {
 		return Output{}, false
 	}
@@ -381,64 +469,119 @@ func (claudeFormat) Continue(in Input, text string) (Output, bool) {
 	return Output{Stderr: []byte(text + "\n"), ExitCode: 2}, true
 }
 
+// claudeMetaWait is how long the PostToolUse hook waits for the result's
+// line to reach the transcript. Claude Code 2.1.321 writes it once the
+// model's next request is under way: usually within a few seconds of the
+// hook starting, occasionally later, and past 3s now and then with some
+// models. A hook that waited only 3s gave up on a result written later:
+// no redeem, so the conversation was never woken. The hook is async, so the
+// wait holds up nothing; it stays under the hook's timeout (30s: the plugin's
+// hooks.json, claudeInstaller). A result missed all the same is redeemed
+// by the conversation's waiter (missedRedeem).
+var claudeMetaWait = 25 * time.Second
+
 // claudeTranscriptMeta finds the result's _meta for a tool call in the
-// session's transcript (Claude Code writes it as the line's mcpMeta just
-// after PostToolUse hooks start), waiting up to wait for it to appear. Only
-// a line of this session for this call counts.
-func claudeTranscriptMeta(path, session, call string, wait time.Duration) json.RawMessage {
-	if path == "" || !filepath.IsAbs(path) || filepath.Ext(path) != ".jsonl" {
+// session's transcripts (paths: a subagent's, then the session's; Claude
+// Code writes it as the line's mcpMeta after
+// PostToolUse hooks start), waiting up to wait for it to appear. Only a
+// line of this session for this call counts. A result line without
+// mcpMeta (a tool whose result has no _meta or structured content) ends
+// the wait: nil.
+func claudeTranscriptMeta(paths []string, session, call string, wait time.Duration) json.RawMessage {
+	var scans []*transcriptScan
+	for _, path := range paths {
+		if path != "" && filepath.IsAbs(path) && filepath.Ext(path) == ".jsonl" {
+			scans = append(scans, &transcriptScan{path: path, session: session, call: call})
+		}
+	}
+	if len(scans) == 0 {
 		return nil
 	}
-	deadline := time.Now().Add(wait)
+	start := time.Now()
 	for {
-		if m := scanTranscript(path, session, call); m != nil {
-			return m
+		for _, sc := range scans {
+			if m, seen := sc.next(); m != nil || seen {
+				return m
+			}
 		}
-		if time.Now().After(deadline) {
+		if time.Since(start) > wait {
 			return nil
 		}
-		time.Sleep(50 * time.Millisecond)
+		// Often while the line usually comes, then less.
+		if time.Since(start) < 5*time.Second {
+			time.Sleep(50 * time.Millisecond)
+		} else {
+			time.Sleep(250 * time.Millisecond)
+		}
 	}
 }
 
-func scanTranscript(path, session, call string) json.RawMessage {
-	f, err := os.Open(path)
+// transcriptScan reads the session's transcript for the call's result (its
+// line's mcpMeta, and whether the result's line, a "user" line, is there
+// at all: the request copies Claude Code writes before it,
+// "api-request-blob", don't count) a piece at a time: each next reads only
+// what was appended since the last one (a line not finished yet is read
+// again next time).
+type transcriptScan struct {
+	path, session, call string
+	off                 int64 // the end of the last whole line read
+	found               json.RawMessage
+	seen                bool
+}
+
+func (s *transcriptScan) next() (json.RawMessage, bool) {
+	f, err := os.Open(s.path)
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	defer f.Close()
-	// The newest lines are at the end, but transcripts are small enough to
-	// read through.
+	if st, err := f.Stat(); err == nil && st.Size() < s.off {
+		s.off, s.found, s.seen = 0, nil, false // replaced: read it again
+	}
+	if _, err := f.Seek(s.off, io.SeekStart); err != nil {
+		return nil, false
+	}
 	r := bufio.NewReaderSize(f, 1<<16)
-	var found json.RawMessage
 	for {
 		line, err := r.ReadBytes('\n')
+		if err == nil {
+			s.off += int64(len(line))
+		}
 		if len(line) > 0 && json.Valid(line) {
-			var l struct {
-				SessionID string `json:"sessionId"`
-				Message   struct {
-					Content json.RawMessage `json:"content"`
-				} `json:"message"`
-				MCPMeta json.RawMessage `json:"mcpMeta"`
-			}
-			if json.Unmarshal(line, &l) == nil && l.SessionID == session && l.MCPMeta != nil {
-				var parts []struct {
-					Type      string `json:"type"`
-					ToolUseID string `json:"tool_use_id"`
-				}
-				json.Unmarshal(l.Message.Content, &parts)
-				for _, p := range parts {
-					if p.Type == "tool_result" && p.ToolUseID == call {
-						found = l.MCPMeta // {"_meta": {...}, "structuredContent": ...}
-					}
-				}
-			}
+			s.read(line)
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				return found
+				return s.found, s.seen
 			}
-			return nil
+			return nil, false
+		}
+	}
+}
+
+func (s *transcriptScan) read(line []byte) {
+	var l struct {
+		Type      string `json:"type"`
+		SessionID string `json:"sessionId"`
+		Message   struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"message"`
+		MCPMeta json.RawMessage `json:"mcpMeta"`
+	}
+	if json.Unmarshal(line, &l) != nil || l.SessionID != s.session || (l.MCPMeta == nil && l.Type != "user") {
+		return
+	}
+	var parts []struct {
+		Type      string `json:"type"`
+		ToolUseID string `json:"tool_use_id"`
+	}
+	json.Unmarshal(l.Message.Content, &parts)
+	for _, p := range parts {
+		if p.Type == "tool_result" && p.ToolUseID == s.call {
+			s.seen = s.seen || l.Type == "user"
+			if l.MCPMeta != nil {
+				s.found = l.MCPMeta // {"_meta": {...}, "structuredContent": ...}
+			}
 		}
 	}
 }
@@ -453,11 +596,6 @@ func ClaudeConfigDir() string {
 	return filepath.Join(home, ".claude")
 }
 
-// ClaudeUnattended: a -p (print) session, which can't be woken while idle
-// (its asyncRewake hooks run as plain blocking hooks), so waiters exit at
-// once there.
-func ClaudeUnattended() bool { return os.Getenv("CLAUDE_CODE_SESSION_ATTENDED") == "0" }
-
 type claudeInstaller struct{}
 
 func (claudeInstaller) path() string { return filepath.Join(ClaudeConfigDir(), "settings.json") }
@@ -470,6 +608,12 @@ func (claudeInstaller) entries(bin string) []entry {
 	waiter := map[string]any{"hooks": []any{map[string]any{"type": "command", "command": HookCommand(bin, claudeName, "--rewake"),
 		"asyncRewake": true, "timeout": 86400, "rewakeSummary": ClaudeRewakeSummary, "rewakeMessage": ClaudeRewakeMessage}}}
 	return []entry{
+		// Redeem by call (callredeem.go): the claim, synchronous and short,
+		// and the mark for subagents.
+		{event: "PreToolUse", isOur: isOur, json: map[string]any{"matcher": "mcp__.*", "hooks": []any{map[string]any{"type": "command",
+			"command": HookCommand(bin, claudeName, "--event", ClaudeClaimEvent), "timeout": 5}}}},
+		{event: "SubagentStart", isOur: isOur, json: map[string]any{"hooks": []any{map[string]any{"type": "command",
+			"command": HookCommand(bin, claudeName, "--event", ClaudeSubagentContextEvent), "timeout": 10}}}},
 		{event: "PostToolUse", isOur: isOur, json: map[string]any{"matcher": "mcp__.*", "hooks": []any{map[string]any{"type": "command",
 			"command": HookCommand(bin, claudeName), "async": true, "timeout": 30}}}},
 		{event: "SessionStart", isOur: isWaiter, json: waiter},

@@ -140,6 +140,9 @@ test("the wait URL and session key in Wakeshift's block, and JSON-RPC answers", 
   // Claude Code's Monitor command (internal/harnesses MonitorLoop), the one verify reads.
   const monitor = `start the Monitor tool now (timeout_ms 1800000) with this command: u='https://app.wakeshift.ai/v1/stream/wait?link=a.b&until=hooks&timeout=50s'; c=; p=$PPID; kill -0 "$p" 2>/dev/null || p=; s=$(date +%s); while :; do …; done . Pass session_key="wsc_Ab-9" to this app's tools from now on.`;
   assert.equal(waitUrlOf(monitor), "https://app.wakeshift.ai/v1/stream/wait?link=a.b&until=hooks&timeout=50s");
+  // Since November 2026: the link in the step that has the agent write it to a file, the query in the command.
+  const fromFile = `If you haven't written this conversation's link to the file ~/.wakeshift/links/0123456789abcdef yet, first write it with your file-writing tool (by its full path in your home directory, not in a folder named ~), its whole content this one line: https://app.wakeshift.ai/v1/stream/wait?link=a.b . Never write it with a shell command or put the link in one. To be woken, start the Monitor tool now (timeout_ms 1800000) with this command: f=$HOME/.wakeshift/links/0123456789abcdef; d=\${f%/*}; b=; u="$b&until=hooks&timeout=50s"; c=; p=$PPID; while :; do …; done; fi .`;
+  assert.equal(waitUrlOf(fromFile), "https://app.wakeshift.ai/v1/stream/wait?link=a.b&until=hooks&timeout=50s");
   assert.equal(sessionKeyOf(monitor), "wsc_Ab-9");
   assert.equal(sessionKeyOf(block), "wsc_Ab-9");
   assert.equal(waitUrlOf("nothing here"), null);

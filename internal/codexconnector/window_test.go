@@ -132,9 +132,8 @@ func TestWindowStopsAnswering(t *testing.T) {
 }
 
 // A TUI that's open but has nothing to do can go minutes without a request
-// on its connection. Quiet alone doesn't close the window: on staging a
-// connector stopped 150 s into such a quiet, and the thread missed its next
-// wake. Neither does a reset from before the quiet began, or from long into
+// on its connection. Quiet alone doesn't close the window: a connector that
+// stopped during such a quiet made the thread miss its next wake. Neither does a reset from before the quiet began, or from long into
 // it.
 func TestWindowQuietIsNotClosed(t *testing.T) {
 	l := newCodexLog(t)
@@ -273,9 +272,9 @@ func TestWindowAfterDaemonRestart(t *testing.T) {
 // After a restart (quit, codex resume), the user's first prompt starts the
 // connector before the log shows the new TUI's resume: the window found
 // first is the old one, which already closed the thread. The connector
-// keeps looking and binds to the new window instead of stopping (wakebench
-// S6, November 5, 2026: a connector the late redeem started stopped 5s in,
-// "the window closed the thread").
+// keeps looking and binds to the new window instead of stopping (a
+// connector started by the late redeem could otherwise stop early, "the
+// window closed the thread").
 func TestWindowAfterARestart(t *testing.T) {
 	l := newCodexLog(t)
 	l.at(0, threadA, span("thread/start", 4, `startup-thread-start-1`))

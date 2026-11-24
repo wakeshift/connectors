@@ -28,7 +28,8 @@ class Plugin(unittest.TestCase):
         self.p = plugin.Wakeshift(state_dir=self.dir, issuers=[self.ws.url], listener_args={"poll_wait": 0.2, "backoff_max": 0.2},
                                   wakers={"api_server": plugin.ApiRuns(self.api.port, lambda: "api-key", allowed=lambda: True),
                                           "cli": lambda s, text, batch: self.woken.append((s, text)) or True,
-                                          "tui": lambda s, text, batch: self.woken.append((s, text)) or True})
+                                          "tui": lambda s, text, batch: self.woken.append((s, text)) or True,
+                                          "desktop": lambda s, text, batch: self.woken.append((s, text)) or True})
 
     def tearDown(self):
         self.p.stop()
@@ -96,6 +97,14 @@ class Plugin(unittest.TestCase):
         self.assert_queued_until_its_turn_starts("tui-1", "tui")
         self.assertIn("tui", plugin.QUEUES)
 
+    def test_desktop_sessions_are_woken_like_cli_ones(self):
+        # Hermes Desktop chats (`source: 'gui'`): local sessions of the one
+        # gateway, their hooks saying platform "desktop". Done once the turn
+        # starts, as a CLI's.
+        self.assert_queued_until_its_turn_starts("desktop-1", "desktop")
+        self.assertIn("desktop", plugin.QUEUES)
+        self.assertIn("desktop", plugin.LOCAL)
+
     def assert_queued_until_its_turn_starts(self, sid, platform):
         out = json.loads(self.connect(sid, platform=platform))
         self.assertTrue(out["result"].endswith(plugin.NOTE_CONNECTED))
@@ -151,7 +160,7 @@ class Plugin(unittest.TestCase):
         # ran before the plugin loaded.
         out = json.loads(self.p.transform(tool_name="mcp__try__watch", result=result(self.ws.beacon()), session_id="sess-1", tool_call_id="c"))
         self.assertTrue(out["result"].endswith(plugin.NOTE_JUST_LOADED))
-        self.assertNotIn("only API server, CLI and TUI", out["result"])
+        self.assertNotIn("only API server, CLI, TUI and Desktop", out["result"])
         self.assertNotIn("Wakeshift: connected.", out["result"])
         self.assertEqual(self.ws.redeems, [])
         # The next turn names it, and the next beacon connects it.
@@ -168,7 +177,7 @@ class Plugin(unittest.TestCase):
         # turn, it never came back (#1131): Wakeshift hands the same tool's
         # result no new beacon for a few minutes, and after `/exit` and a
         # resume only a session_key the model passes finds the session.
-        for platform in ("cli", "tui", "api_server"):
+        for platform in ("cli", "tui", "desktop", "api_server"):
             with self.subTest(platform=platform):
                 surfaces = [platform]
                 self.p.surface = lambda: surfaces[0]
@@ -183,7 +192,7 @@ class Plugin(unittest.TestCase):
                 self.p.turn_started(session_id=sid, platform=platform)
                 self.assertEqual(len(self.p._links_of(sid)), 1)
                 self.p.turn_ended(session_id=sid)
-        self.assertEqual(len(self.ws.redeems), 3)
+        self.assertEqual(len(self.ws.redeems), 4)
 
     def test_a_plugin_loaded_mid_turn_never_connects_a_platform_it_cant_wake(self):
         # What Hermes names is checked as a pre_llm_call's platform would be.
@@ -478,6 +487,9 @@ class Plugin(unittest.TestCase):
         self.assertEqual(plugin._resumed_as("cli", "api_server"), "")
         self.assertEqual(plugin._resumed_as("api_server", "tui"), "")
         self.assertEqual(plugin._resumed_as("tui", "cli"), "cli")
+        self.assertEqual(plugin._resumed_as("cli", "desktop"), "desktop")  # a CLI chat continued in Hermes Desktop
+        self.assertEqual(plugin._resumed_as("desktop", "tui"), "tui")
+        self.assertEqual(plugin._resumed_as("desktop", "api_server"), "")
         self.assertEqual(plugin._resumed_as("api_server", ""), "api_server")
 
     def test_a_lost_ack_never_starts_a_second_run(self):
@@ -982,7 +994,7 @@ class SessionKeys(unittest.TestCase):
         self.assertEqual(self.p.session_key_for("sess-1", "mcp__chat__unwatch"), "")
 
     def test_the_redeems_key_without_a_user(self):
-        # An app with no user (Channel3's, the bench's realistic apps): the
+        # An app with no user (like a CI app with no sign-in): the
         # key names the conversation's own workspace, and its one session's
         # handle (<agent>@conversation) doesn't carry it, so no line in the
         # result can be matched to the redeem's session. The redeem's
@@ -1281,6 +1293,47 @@ class UsersLeave(unittest.TestCase):
         self.assertTrue(all("read as a Hermes command" in line for line in logs.output))
         self.assertEqual(self.injected, [])
 
+    def test_a_desktop_chat_in_one_gateway(self):
+        # Hermes Desktop chats are local sessions of the one gateway (route
+        # agent:main:local:dm:local-…). An install from the app leaves the
+        # setting off: the chat is told so, with the command, and its message
+        # waits; once allowed, a plugin turn in the session its route key
+        # names, never key-less, done once its turn starts.
+        self.load(one_gateway=True)
+        self.route = "agent:main:local:dm:local-desk-1"
+        self.assert_held_until_allowed("local-desk-1", "desktop", lambda: self.injected)
+        self.assertEqual(self.injected, [(self.injected[0][0], "agent:main:local:dm:local-desk-1")])
+        self.assertIn("The user didn't write it", self.injected[0][0])
+        self.assertEqual(self.api.runs, [])
+        self.assertEqual(self.ws.acked, [])
+        self.ctx.hooks["pre_llm_call"](session_id="local-desk-1", platform="desktop")
+        self.ctx.hooks["on_session_end"](session_id="local-desk-1")
+        self.assertTrue(until(lambda: self.ws.acked == ["d1"]))
+
+    def test_a_desktop_chat_connects_and_wakes(self):
+        # Allowed: connected, not "can't wake desktop conversations yet".
+        self.allowed = True
+        self.load(one_gateway=True)
+        out = self.connect("local-desk-2", "desktop")
+        self.assertIn(plugin.NOTE_CONNECTED, out)
+        self.assertNotIn("can't wake", out)
+        self.assertEqual(len(self.ws.redeems), 1)
+        self.ws.sse.put(event("d1"))
+        self.assertTrue(until(lambda: self.injected))
+        self.assertEqual(self.injected[0][1], "agent:main:local:dm:local-desk-2")
+        self.assertFalse(self.p.wakers["desktop"]("local-desk-2", "/yolo", "b"))  # never a command
+
+    def test_a_desktop_chat_where_each_chat_loads_its_own_plugins_isnt_connected(self):
+        # No one gateway to name the session: not woken, and told so.
+        self.allowed = True
+        self.load(one_gateway=False)
+        self.sid = "desk-1"
+        self.ctx.hooks["pre_llm_call"](session_id="desk-1", platform="desktop")
+        out = json.loads(self.ctx.hooks["transform_tool_result"](tool_name="mcp__try__watch", result=result(self.ws.beacon()),
+                                                                 session_id="desk-1", tool_call_id="call_1"))["result"]
+        self.assertIn("can't wake desktop conversations", out)
+        self.assertEqual(self.ws.redeems, [])
+
     def test_allowed_says_connected(self):
         self.allowed = True
         self.load()
@@ -1384,6 +1437,130 @@ class MessagingDirectMessages(UsersLeave):
                     self.assertFalse(self.p.wakers["cli"]("tg-3", text, "b"))
         self.assertTrue(all("read as a Hermes command" in line for line in logs.output))
         self.assertEqual(self.injected, [])
+
+
+class GatewayRestart(UsersLeave):
+    """A conversation connected before Hermes's gateway restarts is listened
+    for again when it starts (gateway_resumes), on every platform its turns
+    run in, and is woken without the user first writing in it (#754): in the
+    turn that installs the plugin a CLI or TUI chat connects there and then
+    (#1131), and the user's restart that follows used to leave it deaf until
+    their next message."""
+
+    def restart(self):
+        """The gateway stops and starts again: a new plugin, on the same
+        state, resumes what its platforms connected."""
+        self.ctx.unload()
+        self.ws.connected.clear()
+        self.load()
+        return self.p.resume(self.pkg.gateway_resumes(True))
+
+    def connect_in_the_install_turn(self, sid, platform):
+        # Loaded mid-turn: no pre_llm_call reached the plugin, but Hermes
+        # names the turn's platform and route to the turn's own hooks.
+        self.sid = sid
+        self.p.surface = lambda: platform
+        out = json.loads(self.ctx.hooks["transform_tool_result"](tool_name="mcp__try__watch", result=result(self.ws.beacon()),
+                                                                 session_id=sid, tool_call_id="call_1"))["result"]
+        self.assertTrue(out.endswith(plugin.NOTE_CONNECTED), out)
+        self.ctx.hooks["on_session_end"](session_id=sid)
+        return out
+
+    def test_the_platforms_a_gateway_resumes(self):
+        self.load()
+        self.assertEqual(self.pkg.gateway_resumes(False), ("api_server",))  # each `hermes chat` listened for itself
+        self.assertEqual(set(self.pkg.gateway_resumes(True)), {"api_server", "cli", "tui", "desktop", "telegram", "discord"})
+
+    def test_a_chat_connected_in_the_install_turn_is_woken_after_a_restart(self):
+        self.allowed = True
+        for platform in ("cli", "tui", "desktop"):
+            with self.subTest(platform=platform):
+                self.injected.clear()
+                sid = "local-" + platform
+                self.load()
+                self.connect_in_the_install_turn(sid, platform)
+                link = self.p._load_link(sid, (self.ws.url, "try"))
+                self.assertEqual(link["route"], "agent:main:local:dm:" + sid)  # saved with the link
+                self.assertEqual(self.restart(), 1)
+                self.assertTrue(until(self.ws.connected.is_set))
+                # No turn since the restart: the message wakes it all the same.
+                self.ws.sse.put(event("d-" + platform))
+                self.assertTrue(until(lambda: self.injected))
+                self.assertEqual(self.injected[0][1], "agent:main:local:dm:" + sid)
+                self.assertEqual(self.ws.acked, [])  # done once that turn starts, as before
+                self.ctx.hooks["pre_llm_call"](session_id=sid, platform=platform)
+                self.ctx.hooks["on_session_end"](session_id=sid)
+                self.assertTrue(until(lambda: self.ws.acked == ["d-" + platform]))
+                self.ws.acked.clear()
+                self.ctx.unload()
+                self.p._forget_link(sid, (self.ws.url, "try"))
+
+    def test_held_while_no_chat_has_it_open(self):
+        # Hermes starts a plugin turn in a local session only while a chat has
+        # it open: refused until the user resumes it, offered again, never
+        # acknowledged meanwhile.
+        self.allowed = True
+        self.load()
+        self.connect_in_the_install_turn("local-1", "cli")
+        self.restart()
+        self.assertTrue(until(self.ws.connected.is_set))
+        live = [False]
+        tries = []
+
+        def inject(content, role="user", *, session_key=None, origin=None):
+            tries.append(session_key)
+            if live[0]:
+                self.injected.append((content, session_key))
+            return live[0]
+        self.ctx.inject_message = inject
+        self.ws.sse.put(event("d1"))
+        self.assertTrue(until(lambda: len(tries) >= 2))  # refused, and offered again
+        self.assertEqual(self.ws.acked, [])
+        live[0] = True  # `hermes chat --continue`
+        self.assertTrue(until(lambda: self.injected))
+        self.assertEqual(len(self.injected), 1)
+
+    def test_a_telegram_dm_is_woken_after_a_restart(self):
+        self.allowed = True
+        self.route = "agent:main:telegram:dm:42"
+        self.load()
+        self.connect("tg-1", "telegram")
+        self.assertEqual(self.restart(), 1)
+        self.assertTrue(until(self.ws.connected.is_set))
+        self.ws.sse.put(event("d1"))
+        self.assertTrue(until(lambda: self.injected))
+        self.assertEqual(self.injected[0][1], "agent:main:telegram:dm:42")
+
+    def test_a_link_saved_without_its_route_listens_from_the_next_turn(self):
+        # Saved by a plugin from before routes were kept: it can't be named
+        # to Hermes until a turn names it, so it isn't resumed; its next
+        # turn listens again, as before.
+        self.allowed = True
+        self.load()
+        self.connect_in_the_install_turn("local-1", "cli")
+        key = (self.ws.url, "try")
+        d = self.p._load_link("local-1", key)
+        self.p._save_link("local-1", d["platform"], d["link"], key, d.get("session_key", ""))
+        self.assertNotIn("route", self.p._load_link("local-1", key))
+        self.assertEqual(self.restart(), 0)
+        self.assertEqual(self.p.sessions.get("local-1"), None)
+        self.ctx.hooks["pre_llm_call"](session_id="local-1", platform="cli")
+        self.assertTrue(until(lambda: self.p.sessions["local-1"].listeners))
+
+    def test_only_the_gateway_resumes_a_local_chat(self):
+        # A `hermes chat` that loads its own plugins (0.22.2 and earlier)
+        # listens for its own chat from its turns; a gateway there never
+        # resumes one.
+        self.allowed = True
+        self.load(one_gateway=False)
+        self.sid = "cli-1"
+        self.ctx.hooks["pre_llm_call"](session_id="cli-1", platform="cli")
+        self.ctx.hooks["transform_tool_result"](tool_name="mcp__try__watch", result=result(self.ws.beacon()),
+                                                session_id="cli-1", tool_call_id="call_1")
+        self.ctx.hooks["on_session_end"](session_id="cli-1")
+        self.ctx.unload()
+        self.load(one_gateway=False)
+        self.assertEqual(self.p.resume(self.pkg.gateway_resumes(False)), 0)
 
 
 class Commands(unittest.TestCase):
@@ -1505,7 +1682,7 @@ class UpdateCommand(unittest.TestCase):
             self.assertEqual(self.cmd(raw=raw), plugin.REINSTALL_COMMAND, raw)
 
     def test_no_private_hermes_imports(self):
-        # Hermes's catalog rule 9: public plugin surfaces only.
+        # Hermes's plugin catalog: plugins use its public plugin surfaces only.
         src = (Path(plugin.__file__)).read_text()
         self.assertNotIn("plugins_cmd", src)
 

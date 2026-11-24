@@ -6,7 +6,7 @@ import (
 )
 
 // OpenClaw is recognized by the client name its own runtime sends
-// (captured from 2026.10.4), and by Codex's _meta when it runs the turn in
+// (as observed on 2026.10.4), and by Codex's _meta when it runs the turn in
 // Codex's app-server, where Codex's client name doesn't make it Codex's.
 // Only the exact thread_source value counts.
 func TestOpenClaw(t *testing.T) {

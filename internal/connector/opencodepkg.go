@@ -17,9 +17,12 @@ import "strings"
 //     @wakeshift/connect-<os>-<arch>, the package npx -y @wakeshift/connect
 //     installs from too, made executable at load (no install script ran).
 //   - The Wakeshifts it trusts are the plugin's "issuers" option in
-//     opencode.json, else DEFAULT_ISSUERS (production; plugins/pack-npm.mjs
-//     --issuer packs it for another), added to <home>/opencode/config.json,
-//     where the bridge reads them, as `wakeshift install` does.
+//     opencode.json, else DEFAULT_ISSUERS (production; the packing script,
+//     plugins/pack-npm.mjs in github.com/wakeshift/connectors, packs it for
+//     another with --issuer), checked as CheckIssuer does and added to
+//     <home>/opencode/config.json, where the bridge reads them, as the
+//     plugin's (plugin_issuers, as trustForPlugin records them): a changed
+//     option drops those it added before.
 //   - It removes the plugin file an earlier `wakeshift install --harness
 //     opencode` wrote (opencodeInstaller.path), so a user who moves over
 //     doesn't load both after their next restart; until then the body's
@@ -29,7 +32,7 @@ func OpencodePackage() string {
 }
 
 // OpencodeDefaultIssuers is the line of OpencodePackage that names the
-// Wakeshifts it trusts by default (plugins/pack-npm.mjs replaces it to pack
+// Wakeshifts it trusts by default (the packing script replaces it to pack
 // the plugin for another Wakeshift).
 const OpencodeDefaultIssuers = `const DEFAULT_ISSUERS = ["https://app.wakeshift.ai"]`
 
@@ -49,6 +52,7 @@ import { createInterface } from "node:readline"
 import { createHash } from "node:crypto"
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
+import { isIPv4 } from "node:net"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
@@ -64,9 +68,28 @@ const connector = () => {
   return bin
 }
 
+// issuer is an issuer address as the connector takes it (CheckIssuer): an
+// https origin, or plain http on this machine only (development: localhost,
+// 127.x.x.x or [::1]); "" for anything else.
+const issuer = (i) => {
+  if (typeof i !== "string") return ""
+  i = i.replace(/\/$/, "")
+  if (/^http:\/\/\[::1\](:[0-9]{1,5})?$/.test(i)) return i
+  if (!ORIGIN.test(i)) return ""
+  if (i.startsWith("https://")) return i
+  const host = i.slice("http://".length).split(":")[0] // ORIGIN: http://<host>[:<port>]
+  return host === "localhost" || (isIPv4(host) && host.startsWith("127.")) ? i : ""
+}
+
 // The Wakeshifts the connector trusts for opencode, in the file the bridge
-// reads (<home>/opencode/config.json): the plugin's are added, nothing is
-// removed (` + "`wakeshift uninstall --harness opencode`" + ` removes the file).
+// reads (<home>/opencode/config.json), as the connector's own plugins do
+// (trustForPlugin): the plugin's that nothing trusts yet are added and
+// recorded as the plugin's (plugin_issuers), and those it added before but
+// no longer names (its "issuers" option changed) are removed. plugin_issuers
+// holds only issuers the plugin alone trusts: one already trusted isn't
+// recorded, and trusting one another way (` + "`wakeshift install`" + `) takes it out
+// (Settings.Trust), so those stay (` + "`wakeshift uninstall --harness opencode`" + `
+// removes the file).
 const trust = (home, issuers) => {
   const dir = join(home, "opencode")
   mkdirSync(dir, { recursive: true, mode: 0o700 })
@@ -74,10 +97,17 @@ const trust = (home, issuers) => {
   let cfg = {}
   try { cfg = JSON.parse(readFileSync(file, "utf8")) } catch {}
   if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) cfg = {}
-  const have = Array.isArray(cfg.issuers) ? cfg.issuers : []
-  const add = issuers.map((i) => (typeof i === "string" ? i.replace(/\/$/, "") : i)).filter((i) => typeof i === "string" && ORIGIN.test(i) && !have.includes(i))
-  if (!add.length && cfg.installed_at) return
+  const want = [...new Set(issuers.map(issuer).filter(Boolean))]
+  const was = Array.isArray(cfg.issuers) ? cfg.issuers : []
+  const ours = Array.isArray(cfg.plugin_issuers) ? cfg.plugin_issuers : []
+  const gone = ours.filter((i) => !want.includes(i))
+  const have = was.filter((i) => !gone.includes(i))
+  const add = want.filter((i) => !have.includes(i))
+  if (!add.length && !gone.length && cfg.installed_at) return
   cfg.issuers = [...have, ...add]
+  const mine = [...ours.filter((i) => want.includes(i)), ...add.filter((i) => !ours.includes(i))]
+  if (mine.length) cfg.plugin_issuers = mine
+  else delete cfg.plugin_issuers
   cfg.installed_at ??= new Date().toISOString()
   const tmp = file + "." + process.pid + ".tmp"
   writeFileSync(tmp, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 })

@@ -248,6 +248,9 @@ class CliWaker(unittest.TestCase):
                 # Ink TUI chats are woken (and gated) only where one gateway runs them.
                 self.assertEqual("tui" in ws.wakers, one_gateway)
                 self.assertEqual(ws.cant_wake("tui"), wakeshift.cant_wake_text("wakeshift") if one_gateway else "")
+                # Hermes Desktop chats too: local sessions of the same gateway.
+                self.assertEqual("desktop" in ws.wakers, one_gateway)
+                self.assertEqual(ws.cant_wake("desktop"), wakeshift.cant_wake_text("wakeshift") if one_gateway else "")
                 with self.assertLogs("wakeshift", "WARNING"):
                     self.assertFalse(ws.wakers["api_server"]("s1", "framed", "b"))
                 allowed[0] = True  # read again on each check: no restart

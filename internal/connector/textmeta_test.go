@@ -9,8 +9,7 @@ import (
 // object with a top-level _meta in that text is the tool's words, a
 // message a read tool relays as its whole text, not the result's own
 // _meta. A beacon naming no tool (from an app on an older SDK), accepted
-// only from the result's own _meta, isn't acted on from it (security
-// review, October 28, 2026).
+// only from the result's own _meta, isn't acted on from it.
 func TestToollessBeaconInJSONText(t *testing.T) {
 	t.Run("copilot", func(t *testing.T) {
 		ws := newFakeWakeshift(t)

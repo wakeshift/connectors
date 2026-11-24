@@ -241,6 +241,15 @@ func TestHermesInstallWithoutHermes(t *testing.T) {
 	t.Setenv("HERMES_HOME", t.TempDir())
 	t.Setenv("WAKESHIFT_HOME", t.TempDir())
 	t.Setenv("PATH", t.TempDir())
+	// Nor in the places Hermes puts it off PATH (~/.local/bin on a Mac
+	// with Hermes installed): the test never runs the machine's hermes.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("HERMES_BIN", "")
+	for _, c := range hermesBins() {
+		if _, err := os.Stat(c); c != "" && err == nil {
+			t.Skipf("hermes is installed at %s", c)
+		}
+	}
 	spec, _ := Lookup("hermes")
 	var out strings.Builder
 	if err := spec.Install("/bin/wakeshift", "https://app.wakeshift.test", &out); err != nil {

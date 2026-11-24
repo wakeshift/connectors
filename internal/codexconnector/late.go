@@ -36,8 +36,11 @@ const maxRollout = 32 << 20
 
 // rolloutBeacon is the newest beacon in an MCP call's result in the rollout.
 type rolloutBeacon struct {
-	Token  string
-	Server string // the MCP server, as Codex names it in the call's tool name
+	Token string
+	// Server: the MCP server, as Codex names it in the hook's tool_name
+	// (codexServerOf; the rollout has the name from Codex's config), so
+	// it's the name the PostToolUse hook pins.
+	Server string
 	Tool   string // the tool, as the server lists it
 }
 
@@ -87,7 +90,7 @@ func lastRolloutBeacon(path, thread string) (rolloutBeacon, bool) {
 			if json.Unmarshal(line, &l) == nil && l.Type == "event_msg" && l.Payload.Type == "item_completed" && l.Payload.ThreadID == thread &&
 				l.Payload.Item.Type == "McpToolCall" && l.Payload.Item.Status == "completed" && l.Payload.Item.Server != "" && l.Payload.Item.Tool != "" {
 				if tok, _ := l.Payload.Item.Result.Meta[beacon.MetaKey].(string); tok != "" {
-					found = rolloutBeacon{Token: tok, Server: beacon.NormalTool(l.Payload.Item.Server), Tool: l.Payload.Item.Tool}
+					found = rolloutBeacon{Token: tok, Server: codexServerOf(l.Payload.Item.Server), Tool: l.Payload.Item.Tool}
 				}
 			}
 		}
@@ -134,7 +137,10 @@ func (h *Hook) lateRedeem(ctx context.Context, in HookInput, onDaemon func() boo
 	if err != nil || claims.Thread != thread {
 		return ""
 	}
+	// The rollout names the tool as the app's server lists it, as the
+	// claim does.
 	if claims.Tool != "" && !beacon.ToolMatches(claims.Tool, found.Tool) {
+		logToolMismatch(h.Settings.Dir, thread, "late", claims.Tool, found.Tool)
 		return ""
 	}
 	pins := h.Pins

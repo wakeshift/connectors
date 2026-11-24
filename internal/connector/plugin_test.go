@@ -228,7 +228,7 @@ func TestInstallPluginReplacesItsOwnIssuer(t *testing.T) {
 
 var regexpInstalledAt = regexp.MustCompile(`"installed_at": "[^"]*"`)
 
-// Removing Claude Code's plugin (docs/harnesses.md, the plugin's README):
+// Removing Claude Code's plugin (the plugin's README):
 // after `claude plugin uninstall`, `wakeshift uninstall --harness
 // claude-code` takes out what the plugin's first hook set up through
 // InstallPlugin: the wait command's rule and ~/.wakeshift/claude-code (its

@@ -94,7 +94,7 @@ func (h *Hook) connectVerified(ctx context.Context, in Input, claims beacon.Clai
 		return fmt.Sprintf(NoteOutdated, outdated.Message)
 	}
 	if errors.Is(err, ErrTaken) {
-		return NoteTaken
+		return TakenNote(err)
 	}
 	if err != nil {
 		if errors.Is(err, ErrUnreachable) && h.OnTransient != nil {

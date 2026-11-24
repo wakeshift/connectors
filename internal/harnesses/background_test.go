@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -112,7 +114,26 @@ func (w *waitScript) serve(t *testing.T) string {
 	w.mu.Lock()
 	w.url = srv.URL + "/v1/stream/wait?link=a.b&timeout=50s"
 	w.mu.Unlock()
+	writeLink(t, srv.URL+"/v1/stream/wait?link=a.b")
 	return srv.URL + "/v1/stream/wait?link=a.b"
+}
+
+// writeLink writes url's link file in a new HOME, as an agent's file
+// tool would (0644, in 0755 folders it makes), makes that the test's
+// HOME, and returns the file's path.
+func writeLink(t *testing.T, url string) string {
+	t.Helper()
+	home := t.TempDir()
+	dir := filepath.Join(home, ".wakeshift", "links")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(dir, LinkKey(url))
+	if err := os.WriteFile(f, []byte(url+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	return f
 }
 
 // after is the after= each recorded round passed.
@@ -148,7 +169,7 @@ func TestMonitorLoop(t *testing.T) {
 	w := &waitScript{answers: []string{ev1 + "\n" + cursorA + "\nNEXT\n", "\n\nNEXT\n", ev2 + "\n" + cursorB + "\nNEXT\n", closed + "\n"}}
 	url := w.serve(t)
 	cmd := MonitorLoop(url)
-	if !strings.HasPrefix(cmd, "u='"+url+"&until=hooks&timeout="+WaitTimeout+"'; c=; p=$PPID; ") {
+	if !strings.HasPrefix(cmd, LinkStart+LinkKey(url)+"; ") || !strings.Contains(cmd, `u="$b&until=hooks&timeout=`+WaitTimeout+`"; c=; p=$PPID; `) || !strings.HasSuffix(cmd, "; done; fi") {
 		t.Fatalf("%s", cmd)
 	}
 	if out := runShell(t, cmd); strings.Join(out, "\n") != ev1+"\n"+ev2+"\n"+closed {
@@ -208,11 +229,12 @@ func TestMonitorLoopRestarts(t *testing.T) {
 
 // A round that renewed the conversation's link (the computer slept past
 // its expiry, or it reached its last day) answers hub.next with a new
-// link, which works once: the loop moves to it, and when it ends for its
-// restart, its hub.restart line carries that url for the agent to start
-// the command with instead of the old one. Even when the renewal comes in
-// the round that ends the run (a sleep is longer than the run).
-func TestMonitorLoopRestartCarriesARenewedLink(t *testing.T) {
+// link, which works once: the loop moves to it and saves it to the link
+// file (privately, in one rename), so the same command started again uses
+// it; the Monitor's hub.restart line is the usual one. Even when the
+// renewal comes in the round that ends the run (a sleep is longer than
+// the run).
+func TestMonitorLoopSavesARenewedLink(t *testing.T) {
 	for _, slept := range []bool{false, true} {
 		var mu sync.Mutex
 		var links []string
@@ -233,19 +255,31 @@ func TestMonitorLoopRestartCarriesARenewedLink(t *testing.T) {
 		mu.Lock()
 		renewed = srv.URL + "/v1/stream/wait?link=new.b&timeout=50s&until=hooks"
 		mu.Unlock()
-		out := runShell(t, monitorLoop(srv.URL+"/v1/stream/wait?link=old.a", 2))
+		old := srv.URL + "/v1/stream/wait?link=old.a"
+		f := writeLink(t, old)
+		out := runShell(t, monitorLoop(old, 2))
 		var last struct{ Type, URL, Note string }
-		if len(out) != 1 || json.Unmarshal([]byte(out[0]), &last) != nil || last.Type != "hub.restart" || last.URL != renewed {
+		if len(out) != 1 || json.Unmarshal([]byte(out[0]), &last) != nil || last.Type != "hub.restart" || last.URL != "" || last.Note != monitorRestartNote {
 			t.Fatalf("slept %v: printed %q", slept, out)
 		}
-		for _, want := range []string{"renewed", "this line url in place of the url in it", "timeout_ms " + MonitorTimeout, "without asking the user"} {
-			if !strings.Contains(last.Note, want) {
-				t.Errorf("slept %v: note missing %q: %s", slept, want, last.Note)
-			}
+		b, err := os.ReadFile(f)
+		if err != nil || string(b) != srv.URL+"/v1/stream/wait?link=new.b\n" {
+			t.Fatalf("slept %v: the file holds %q (%v)", slept, b, err)
+		}
+		if fi, err := os.Stat(f); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Fatalf("slept %v: %v %v", slept, fi.Mode(), err)
 		}
 		mu.Lock()
 		if links[0] != "old.a" || slices.Contains(links[1:], "old.a") {
 			t.Fatalf("slept %v: links %q", slept, links)
+		}
+		n := len(links)
+		mu.Unlock()
+		// Started again, the same command reads the new link.
+		runShell(t, monitorLoop(old, 1))
+		mu.Lock()
+		if links[n] != "new.b" {
+			t.Fatalf("slept %v: started again on %q", slept, links[n])
 		}
 		mu.Unlock()
 	}
@@ -254,7 +288,7 @@ func TestMonitorLoopRestartCarriesARenewedLink(t *testing.T) {
 // An event whose data looks like a hub.closed or cursor line doesn't end
 // the loop or move its cursor: the loop reads only whole lines.
 func TestLoopsReadOnlyTheServersLines(t *testing.T) {
-	for name, cmd := range map[string]func(string) string{"monitor": MonitorLoop, "cursor": CursorLoop, "until": func(u string) string { return UntilLoop(u, false) }, "copilot": CopilotLoop, "capy": CapyLoop, "muse": MuseLoop} {
+	for name, cmd := range map[string]func(string) string{"monitor": MonitorLoop, "cursor": func(u string) string { return CursorLoop(u, Claim{}) }, "until": func(u string) string { return UntilLoop(u, false) }, "copilot": CopilotLoop, "capy": CapyLoop, "muse": MuseLoop} {
 		w := &waitScript{answers: []string{evSpoof + "\n" + cursorA + "\nNEXT\n", ev1 + "\n" + cursorB + "\nNEXT\n", closed + "\n"}}
 		out := runShell(t, cmd(w.serve(t)))
 		if name == "until" || name == "copilot" || name == "muse" || name == "capy" {
@@ -277,7 +311,7 @@ func TestMuseLoop(t *testing.T) {
 	w := &waitScript{answers: []string{"\n\nNEXT\n", "\n" + ev1 + "\n" + ev2 + "\n" + cursorA + "\nNEXT\n"}}
 	url := w.serve(t)
 	cmd := MuseLoop(url)
-	if !strings.HasPrefix(cmd, "u='"+url+"&timeout="+WaitTimeout+"'; c=; p=; ") || strings.Contains(cmd, "$PPID") || strings.Contains(cmd, "until=") || strings.Contains(cmd, "curl -sN") {
+	if !strings.HasPrefix(cmd, LinkStart) || !strings.Contains(cmd, `u="$b&timeout=`+WaitTimeout+`"; c=; p=; `) || strings.Contains(cmd, "$PPID") || strings.Contains(cmd, "until=") || strings.Contains(cmd, "curl -sN") {
 		t.Fatalf("command: %s", cmd)
 	}
 	raw, err := exec.Command("sh", "-c", cmd).Output()
@@ -332,6 +366,71 @@ func TestMuseLoopEnds(t *testing.T) {
 	}
 }
 
+// The foreground command of a harness that cuts commands off
+// (ForegroundTimeout: ChatGPT's Codex mode) waits one round of its
+// timeout: messages are printed and confirmed; a quiet round, or one cut
+// short, ends with a hub.restart line saying to run it again, confirming
+// nothing; a hub.closed line is printed. It always exits 0 and never makes
+// a second round.
+func TestForegroundLoopOneRound(t *testing.T) {
+	codex, _ := Get("chatgpt-codex")
+	restart := func(what string, out []string) {
+		t.Helper()
+		var last struct{ Type, Note string }
+		if len(out) != 1 || json.Unmarshal([]byte(out[0]), &last) != nil || last.Type != "hub.restart" ||
+			!strings.Contains(last.Note, "Run the same command again now") || !strings.Contains(last.Note, "nothing was missed") || asksForCall(last.Note) != "" {
+			t.Fatalf("%s: printed %q", what, out)
+		}
+	}
+	w := &waitScript{answers: []string{"\n" + ev1 + "\n" + ev2 + "\n" + cursorA + "\nNEXT\n", "NEXT\n"}}
+	out := runShell(t, ForegroundLoop(codex, w.serve(t)))
+	if strings.Join(out, "\n") != ev1+"\n"+ev2 || len(w.qs()) != 1 || !strings.Contains(w.qs()[0], "timeout=90s") || strings.Contains(w.qs()[0], "say=") {
+		t.Fatalf("messages: printed %q, rounds %q", out, w.qs())
+	}
+	if c := w.confs(); len(c) != 1 || c[0] != "00000000000000aa" {
+		t.Fatalf("confirmed: %q", c)
+	}
+
+	w = &waitScript{answers: []string{"\n\nNEXT\n", "NEXT\n"}}
+	restart("quiet", runShell(t, ForegroundLoop(codex, w.serve(t))))
+	if len(w.qs()) != 1 || len(w.confs()) != 0 {
+		t.Fatalf("quiet: rounds %q, confirmed %q", w.qs(), w.confs())
+	}
+	w = &waitScript{answers: []string{ev1 + "\n", "NEXT\n"}} // cut short: no cursor
+	restart("cut short", runShell(t, ForegroundLoop(codex, w.serve(t))))
+	if len(w.qs()) != 1 || len(w.confs()) != 0 {
+		t.Fatalf("cut short: rounds %q, confirmed %q", w.qs(), w.confs())
+	}
+	w = &waitScript{answers: []string{closed + "\n"}}
+	if out := runShell(t, ForegroundLoop(codex, w.serve(t))); strings.Join(out, "\n") != closed || len(w.confs()) != 0 {
+		t.Fatalf("closed: printed %q, confirmed %q", out, w.confs())
+	}
+	if strings.Contains(foregroundRestart(90), "'") {
+		t.Fatal("the restart note has an apostrophe")
+	}
+}
+
+// A quiet round that hands over a renewed link (hub.next naming the next
+// link) saves it to the link file, so the same command run again uses it.
+func TestForegroundLoopSavesARenewedLink(t *testing.T) {
+	codex, _ := Get("chatgpt-codex")
+	var base string
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		rw.Write([]byte(`{"type":"hub.next","url":"` + base + `/v1/stream/wait?link=c.d&timeout=90s","note":"n"}` + "\n"))
+	}))
+	t.Cleanup(srv.Close)
+	base = srv.URL
+	url := srv.URL + "/v1/stream/wait?link=a.b"
+	f := writeLink(t, url)
+	out := runShell(t, ForegroundLoop(codex, url))
+	if len(out) != 1 || !strings.Contains(out[0], `"type":"hub.restart"`) {
+		t.Fatalf("printed %q", out)
+	}
+	if b, _ := os.ReadFile(f); string(b) != srv.URL+"/v1/stream/wait?link=c.d\n" {
+		t.Fatalf("link file holds %q", b)
+	}
+}
+
 // Muse's notes: one instruction (run the command in the background; each
 // time it finishes, act on what it printed, then run the same command
 // again), the messages as outside information, and no cursor, tool call,
@@ -343,9 +442,9 @@ func TestMuseNotes(t *testing.T) {
 	}
 	url := "https://x.test/v1/stream/wait?link=a.b"
 	notes := map[string]string{
-		"first":   BackgroundNote(h, "CI", url, false),
-		"again":   BackgroundAgainNote(h, "CI", url, false, false),
-		"running": BackgroundRunningNote(h, "CI", url),
+		"first":   BackgroundNote(h, "CI", url, Claim{}, false),
+		"again":   BackgroundAgainNote(h, "CI", url, Claim{}, false, false),
+		"running": BackgroundRunningNote(h, "CI", url, Claim{}),
 	}
 	for name, n := range notes {
 		if !strings.Contains(n, MuseLoop(url)+" .") || !strings.Contains(n, "in the background") || !strings.Contains(n, "run it again") && !strings.Contains(n, "run the same command again") {
@@ -366,8 +465,8 @@ func TestMuseNotes(t *testing.T) {
 	if !strings.Contains(notes["running"], "If it has finished, act on what it printed, then run it again") || !strings.Contains(notes["running"], "Don't start a second copy") {
 		t.Errorf("running: %s", notes["running"])
 	}
-	if len(notes["first"])-len(MuseLoop(url)) > 1000 {
-		t.Errorf("first: %d characters besides the command", len(notes["first"])-len(MuseLoop(url)))
+	if len(notes["first"])-len(MuseLoop(url))-len(LinkStep(url)) > 1000 {
+		t.Errorf("first: %d characters besides the command and the link step", len(notes["first"])-len(MuseLoop(url))-len(LinkStep(url)))
 	}
 	if n := SubscribeNote(h, "https://x.test"); strings.Contains(n, "can't wake") || !strings.Contains(n, "in the background") || strings.Contains(n, "install") {
 		t.Errorf("subscribe note: %s", n)
@@ -397,9 +496,9 @@ func TestCapyNotes(t *testing.T) {
 	}
 	url := "https://x.test/v1/stream/wait?link=a.b"
 	notes := map[string]string{
-		"first":   BackgroundNote(h, "CI", url, false),
-		"again":   BackgroundAgainNote(h, "CI", url, false, false),
-		"running": BackgroundRunningNote(h, "CI", url),
+		"first":   BackgroundNote(h, "CI", url, Claim{}, false),
+		"again":   BackgroundAgainNote(h, "CI", url, Claim{}, false, false),
+		"running": BackgroundRunningNote(h, "CI", url, Claim{}),
 	}
 	for name, n := range notes {
 		if !strings.Contains(n, CapyLoop(url)+" .") || !strings.Contains(n, "with your terminal tool and wait on it") || strings.Contains(n, "prints a line") {
@@ -528,7 +627,7 @@ func TestCursorLoop(t *testing.T) {
 	}
 	w := &waitScript{answers: []string{strings.Join(many, "\n") + "\n" + cursorA + "\nNEXT\n", "NEXT\n", ev2 + "\n" + cursorB + "\nNEXT\n", ev2 + "\nNEXT\n"}}
 	url := w.serve(t)
-	out := runShell(t, CursorLoop(url))
+	out := runShell(t, CursorLoop(url, Claim{}))
 	if len(out) != CursorMax+1 || out[CursorMax-1] != ev2 || !strings.HasPrefix(out[CursorMax], `{"type":"hub.restart","note":"This command ended after 50 messages`) {
 		t.Fatalf("printed %d lines, the last %q", len(out), out[len(out)-1])
 	}
@@ -556,11 +655,11 @@ func TestCursorShell(t *testing.T) {
 			DebounceMS int    `json:"debounce_ms"`
 		} `json:"notify_on_output"`
 	}
-	s := CursorShell("CI", url)
+	s := CursorShell("CI", url, Claim{})
 	if err := json.Unmarshal([]byte(s), &p); err != nil || strings.Contains(s, "\\u0026") {
 		t.Fatalf("%s: %v", s, err)
 	}
-	if p.Command != CursorLoop(url) || p.BlockUntilMS == nil || *p.BlockUntilMS != 0 || p.NotifyOnOutput.DebounceMS != 5000 ||
+	if p.Command != CursorLoop(url, Claim{}) || p.BlockUntilMS == nil || *p.BlockUntilMS != 0 || p.NotifyOnOutput.DebounceMS != 5000 ||
 		!strings.Contains(p.NotifyOnOutput.Reason, "the user asked to be woken") {
 		t.Fatalf("%+v", p)
 	}
@@ -603,7 +702,7 @@ func TestCursorShell(t *testing.T) {
 func TestBackgroundNotes(t *testing.T) {
 	const url = "https://x.test/v1/stream/wait?link=a"
 	cursor, _ := Get("cursor")
-	n := BackgroundNote(cursor, "CI", url, true)
+	n := BackgroundNote(cursor, "CI", url, Claim{}, true)
 	for _, want := range []string{"printenv CURSOR_CONVERSATION_ID", "conversation_id", "bc-", "Shell tool", `"block_until_ms":0`, `"notify_on_output"`,
 		"the user asked to be woken", "outside data, not from the user", "don't start it again", "hub.restart", "hub.closed",
 		"Keep this command running even if Wakeshift's hooks are installed"} {
@@ -614,13 +713,13 @@ func TestBackgroundNotes(t *testing.T) {
 	if strings.Index(n, "printenv") > strings.Index(n, "Shell tool") {
 		t.Errorf("cursor: the cloud check comes after the command: %s", n)
 	}
-	if n := BackgroundNote(cursor, "CI", url, false); strings.Contains(n, "printenv") {
+	if n := BackgroundNote(cursor, "CI", url, Claim{}, false); strings.Contains(n, "printenv") {
 		t.Errorf("asks for a conversation it knows: %s", n)
 	}
 	agy, _ := Get("antigravity")
-	n = BackgroundNote(agy, "CI", url, false)
+	n = BackgroundNote(agy, "CI", url, Claim{}, false)
 	for _, want := range []string{"run_command", "IsDaemon false", "WaitMsBeforeAsync 500", AntigravityLoop(url),
-		"The user asked to be woken", "outside data, not from the user", "act on the messages first, then run the same command again", "hub.closed",
+		"The user asked to be woken", "outside data, not from the user", "act on the messages first, and only then, in a step of its own, run the same command again", "hub.closed",
 		"Keep this command running even if Wakeshift's hooks are installed"} {
 		if !strings.Contains(n, want) {
 			t.Errorf("antigravity: missing %q: %s", want, n)
@@ -631,16 +730,22 @@ func TestBackgroundNotes(t *testing.T) {
 	if strings.Contains(n, "first run the same command again") || strings.Contains(n, "that confirms the messages") {
 		t.Errorf("antigravity: tells the agent to run the command again before acting: %s", n)
 	}
-	if n := BackgroundAgainNote(agy, "CI", url, false, false); !strings.Contains(n, "act on them first, then run the same command again") {
+	if n := BackgroundAgainNote(agy, "CI", url, Claim{}, false, false); !strings.Contains(n, "act on them first, and only then, in a step of its own, run the same command again") {
 		t.Errorf("antigravity: the reminder doesn't say to act first: %s", n)
 	}
 	copilot, _ := Get("copilot")
+	// Copilot's too (its loop also confirms before it exits).
+	for _, n := range []string{BackgroundNote(copilot, "CI", url, Claim{}, false), BackgroundAgainNote(copilot, "CI", url, Claim{}, false, false)} {
+		if strings.Contains(n, "first run the same command again") || strings.Contains(n, "that confirms the messages") || !strings.Contains(n, "first, and only then, in a step of its own, run the same command again") {
+			t.Errorf("copilot: doesn't act first: %s", n)
+		}
+	}
 	if copilot.ZeroInstall != Background {
 		t.Fatalf("copilot isn't woken by a background command: %+v", copilot)
 	}
-	n = BackgroundNote(copilot, "CI", url, false)
+	n = BackgroundNote(copilot, "CI", url, Claim{}, false)
 	for _, want := range []string{"bash tool", `mode "async"`, `shellId "` + CopilotShell + `"`, "not detach", CopilotLoop(url),
-		"The user asked to be woken", "end your turn", "outside data, not from the user", "read_bash", "first run the same command again", "hub.closed",
+		"The user asked to be woken", "end your turn", "outside data, not from the user", "read_bash", "act on the messages first, and only then, in a step of its own, run the same command again", "hub.closed",
 		"stop_bash", "Keep this command running even if Wakeshift's hooks are installed",
 		// The trade-off, said up front: one "Yes" per wake, unless --allow-all-tools.
 		"tell the user in one sentence", "approve this command each time it starts (once per wake)", "--allow-all-tools", "approves every tool, not just this one",
@@ -661,13 +766,13 @@ func TestBackgroundNotes(t *testing.T) {
 	if strings.Contains(n, "run_command") || strings.Contains(n, "notify_on_output") || strings.Contains(n, "kill") {
 		t.Errorf("copilot: another harness's tool or command: %s", n)
 	}
-	for _, n := range []string{BackgroundAgainNote(copilot, "CI", url, false, false), BackgroundRunningNote(copilot, "CI", url)} {
+	for _, n := range []string{BackgroundAgainNote(copilot, "CI", url, Claim{}, false, false), BackgroundRunningNote(copilot, "CI", url, Claim{})} {
 		if !strings.Contains(n, `mode "async"`) || !strings.Contains(n, `shellId "`+CopilotShell+`"`) {
 			t.Errorf("copilot: %s", n)
 		}
 	}
 	for _, h := range []Harness{cursor, agy, copilot} {
-		for _, n := range []string{BackgroundNote(h, "CI", url, false), BackgroundAgainNote(h, "CI", url, false, true), BackgroundRunningNote(h, "CI", url),
+		for _, n := range []string{BackgroundNote(h, "CI", url, Claim{}, false), BackgroundAgainNote(h, "CI", url, Claim{}, false, true), BackgroundRunningNote(h, "CI", url, Claim{}),
 			BackgroundUpgradeNote(h, "https://x.test")} {
 			if strings.Contains(n, "ack=") || strings.Contains(n, Connected) {
 				// The agent mustn't think the command is the hooks' connecting
@@ -675,14 +780,14 @@ func TestBackgroundNotes(t *testing.T) {
 				t.Errorf("%s: %s", h.ID, n)
 			}
 		}
-		again := BackgroundAgainNote(h, "CI", url, false, false)
-		if !strings.Contains(again, "isn't running") || !strings.Contains(again, url+UntilWait+"&timeout=") || len(again) >= len(BackgroundNote(h, "CI", url, false)) {
+		again := BackgroundAgainNote(h, "CI", url, Claim{}, false, false)
+		if !strings.Contains(again, "isn't running") || !strings.Contains(again, loopFor(h, url)) || !strings.Contains(again, LinkStep(url)) || len(again) >= len(BackgroundNote(h, "CI", url, Claim{}, false)) {
 			t.Errorf("%s again: %s", h.ID, again)
 		}
-		if again := BackgroundAgainNote(h, "CI", url, false, true); !strings.Contains(again, "Start it now even though the hooks are connected") {
+		if again := BackgroundAgainNote(h, "CI", url, Claim{}, false, true); !strings.Contains(again, "Start it now even though the hooks are connected") {
 			t.Errorf("%s again with hooks: %s", h.ID, again)
 		}
-		if r := BackgroundRunningNote(h, "CI", url); !strings.Contains(r, "already running") || !strings.Contains(r, "Keep it running") || !strings.Contains(r, url+UntilWait+"&timeout=") {
+		if r := BackgroundRunningNote(h, "CI", url, Claim{}); !strings.Contains(r, "already running") || !strings.Contains(r, "Keep it running") || !strings.Contains(r, loopFor(h, url)) || !strings.Contains(r, LinkStep(url)) {
 			t.Errorf("%s running: %s", h.ID, r)
 		}
 		if u := BackgroundUpgradeNote(h, "https://x.test"); !strings.HasPrefix(u, "Also ask the user once whether to install "+Kit(h)) || !strings.Contains(u, InstallCommand(h, "https://x.test")) ||
@@ -742,7 +847,7 @@ func TestLoopsEndWithTheirHarness(t *testing.T) {
 	for i := range quiet {
 		quiet[i] = "NEXT\n"
 	}
-	for name, cmd := range map[string]func(string) string{"monitor": MonitorLoop, "cursor": CursorLoop, "until": func(u string) string { return UntilLoop(u, false) }, "copilot": CopilotLoop} { // not Capy's (CapyLoop: no harness check)
+	for name, cmd := range map[string]func(string) string{"monitor": MonitorLoop, "cursor": func(u string) string { return CursorLoop(u, Claim{}) }, "until": func(u string) string { return UntilLoop(u, false) }, "copilot": CopilotLoop} { // not Capy's (CapyLoop: no harness check)
 		w := &waitScript{answers: quiet}
 		loop := cmd(w.serve(t))
 		// The "harness" (the outer sh) starts the command and exits a
@@ -759,4 +864,23 @@ func TestLoopsEndWithTheirHarness(t *testing.T) {
 			t.Fatalf("%s: %d rounds, then %d after its harness was gone", name, n, m)
 		}
 	}
+}
+
+// loopFor is the command a background harness's notes give for url (as
+// its notes quote it: Cursor's inside its Shell call's JSON).
+func loopFor(h Harness, url string) string {
+	switch h.ID {
+	case "cursor":
+		var b strings.Builder
+		e := json.NewEncoder(&b)
+		e.SetEscapeHTML(false)
+		e.Encode(CursorLoop(url, Claim{}))
+		q := strings.TrimSpace(b.String())
+		return q[1 : len(q)-1]
+	case "antigravity":
+		return AntigravityLoop(url)
+	case "copilot":
+		return CopilotLoop(url)
+	}
+	return MuseLoop(url)
 }

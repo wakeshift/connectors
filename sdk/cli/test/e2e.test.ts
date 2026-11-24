@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { getVar, readEnvFile } from "../src/envfile.js";
+import { keyCodeOf } from "../src/key.js";
 import { McpClient, textOf } from "../src/mcp.js";
 import { assertNoKey } from "./fakes.js";
 
@@ -29,7 +30,7 @@ const shipyardMain = join(repo, "bench/dist/app/main.js");
 const skip = !harnessFile ? "set WAKESHIFT_SDK_HARNESS (scripts/e2e.sh)" : false;
 if (harnessFile && !existsSync(shipyardMain)) throw new Error("build the bench first (scripts/e2e.sh does)");
 
-let h: { core: string; key: string; new_key: string; waitlist_cookie: string };
+let h: { core: string; key: string; new_key: string; waitlist_cookie: string; dev_token: string };
 let work: string;
 let project: string;
 let browserLog: string;
@@ -100,7 +101,7 @@ async function nextLink(seen: number): Promise<URL> {
 
 /** The person, signed in with dev sign-in: a console session. */
 async function console_(): Promise<(method: string, path: string, body: unknown) => Promise<{ status: number; json: any }>> {
-  const r = await fetch(h.core + "/api/v1/session/dev", { method: "POST", headers: { origin: h.core, "content-type": "application/json" }, body: JSON.stringify({ email: "cli-e2e@example.com" }) });
+  const r = await fetch(h.core + "/api/v1/session/dev", { method: "POST", headers: { origin: h.core, "content-type": "application/json" }, body: JSON.stringify({ email: "cli-e2e@example.com", token: h.dev_token }) });
   assert.equal(r.status, 200, "dev sign-in");
   const cookie = (r.headers.getSetCookie?.() ?? [r.headers.get("set-cookie") ?? ""]).map((c) => c.split(";")[0]).join("; ");
   return async (method, path, body) => {
@@ -129,7 +130,8 @@ test("init: the person confirms the link in the console, and the app exists", { 
   assert.match(pk, /^[A-Za-z0-9_-]{43}$/);
   const as = await console_();
   // The confirm page's call (docs/agentic-onboarding.md, "Contract with the CLI").
-  const made = await as("POST", "/api/v1/developer/apps/register", { id: frag.get("id"), name: frag.get("name"), public_key: pk });
+  // The person types the key code the terminal printed.
+  const made = await as("POST", "/api/v1/developer/apps/register", { id: frag.get("id"), name: frag.get("name"), public_key: pk, key_code: keyCodeOf(Buffer.from(pk, "base64url")) });
   assert.equal(made.status, 200, JSON.stringify(made.json));
   assert.ok(!JSON.stringify(made.json).includes("wst_"), "the route returned a key");
   const r = await run.done;
@@ -149,7 +151,7 @@ test("keys new: a second key, confirmed the same way, replaces the first in .env
   assert.equal(link.pathname, `/apps/${appId}/keys`);
   const pk = new URLSearchParams(link.hash.slice(1)).get("pk");
   const as = await console_();
-  const added = await as("POST", `/api/v1/developer/apps/${appId}/keys/register`, { name: "cli", public_key: pk });
+  const added = await as("POST", `/api/v1/developer/apps/${appId}/keys/register`, { name: "cli", public_key: pk, key_code: keyCodeOf(Buffer.from(pk!, "base64url")) });
   assert.equal(added.status, 200, JSON.stringify(added.json));
   const r = await run.done;
   assertNoKey(r.out + r.err, [envKey(), before]);

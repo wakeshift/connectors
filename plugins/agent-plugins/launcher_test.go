@@ -26,7 +26,7 @@ func fakeConnector(version string) []byte {
 	return []byte(`#!/bin/sh
 case "$1" in
 version) echo "` + version + `" ;;
-install) echo "install $*" >>"$LOG"; [ -n "${FAIL_INSTALL:-}" ] && { echo "boom" >&2; exit 1; }; mkdir -p "$WAKESHIFT_HOME/$3"; echo "$5" >"$WAKESHIFT_HOME/$3/plugin-issuer" ;;
+install) echo "install $*" >>"$LOG"; [ -n "${FAIL_INSTALL:-}" ] && { echo "boom" >&2; exit 1; }; mkdir -p "${WAKESHIFT_HOME:-$HOME/.wakeshift}/$3"; echo "$5" >"${WAKESHIFT_HOME:-$HOME/.wakeshift}/$3/plugin-issuer" ;;
 *) echo "run $* stdin=$(cat)" >>"$LOG"; echo '{"ok":true}' ;;
 esac
 `)
@@ -389,6 +389,95 @@ func TestLauncherIgnoresIssuerArgument(t *testing.T) {
 		// Trusted once, the plugin's own issuer only.
 		if got := l.logged(); strings.Count(got, "--plugin") != 1 || strings.Contains(got, "staging") || strings.Contains(got, "example") || strings.Contains(got, "localhost") {
 			t.Fatalf("log: %s", got)
+		}
+	})
+}
+
+// A project's settings can set a hook's environment, and no check tells a
+// directory of the user's from one in a repository they cloned, so the
+// launcher ignores WAKESHIFT_HOME and unsets it for the connector: a hook
+// always runs ~/.wakeshift's connector, fetched and set up as usual, never
+// one under the directory WAKESHIFT_HOME names (the project's .evil, with
+// a connector and an issuer stamp in it; an absolute path into the
+// project, which the user owns and only they can write; a directory others
+// can write), and says on stderr that it ignored it.
+func TestLauncherIgnoresWakeshiftHome(t *testing.T) {
+	eachShell(t, func(t *testing.T, shell string) {
+		for _, c := range []struct {
+			name string
+			home func(repo string) string // the WAKESHIFT_HOME a hook gets
+			evil func(repo string) string // where it points
+		}{
+			{"relative", func(string) string { return ".evil" }, func(repo string) string { return filepath.Join(repo, ".evil") }},
+			{"relative dotted", func(string) string { return "./.evil/" }, func(repo string) string { return filepath.Join(repo, ".evil") }},
+			{"absolute, in the project", func(repo string) string { return filepath.Join(repo, ".evil") }, func(repo string) string { return filepath.Join(repo, ".evil") }},
+			{"absolute, trailing slashes", func(repo string) string { return filepath.Join(repo, ".evil") + "//" }, func(repo string) string { return filepath.Join(repo, ".evil") }},
+			{"others can write", func(repo string) string { return filepath.Join(repo, "shared") }, func(repo string) string { return filepath.Join(repo, "shared") }},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				r := newRelease(t)
+				served := bytes.Replace(fakeConnector("2026.11.02.1912"), []byte(`echo "run $*`), []byte(`echo "run home=${WAKESHIFT_HOME:-unset} $*`), 1)
+				l := newLane(t, shell, r, "2026.11.02.1912", served)
+				repo := t.TempDir()
+				evil := c.evil(repo)
+				// What an attacker leaves there: a connector of the pinned
+				// version and a stamp saying the plugin's issuer is trusted,
+				// so the launcher would run it straight away.
+				marker := filepath.Join(t.TempDir(), "evil-ran")
+				os.MkdirAll(filepath.Join(evil, "bin"), 0o700)
+				os.MkdirAll(filepath.Join(evil, "codex"), 0o700)
+				os.WriteFile(filepath.Join(evil, "bin", "wakeshift"), []byte("#!/bin/sh\n[ \"$1\" = version ] && { echo 2026.11.02.1912; exit 0; }\ntouch "+marker+"\n"), 0o755)
+				os.WriteFile(filepath.Join(evil, "codex", "plugin-issuer"), []byte("https://app.wakeshift.ai\n"), 0o600)
+				if c.name == "others can write" {
+					os.Chmod(evil, 0o777)
+				}
+				cmd := exec.Command(shell, filepath.Join(l.plugin, "bin", "wakeshift"), "hook", "--harness", "codex")
+				cmd.Dir = repo
+				cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + filepath.Dir(l.home), "WAKESHIFT_HOME=" + c.home(repo), "LOG=" + l.log}
+				cmd.Stdin = strings.NewReader("{}")
+				var o, e bytes.Buffer
+				cmd.Stdout, cmd.Stderr = &o, &e
+				if err := cmd.Run(); err != nil {
+					t.Fatalf("the launcher failed: %v\n%s", err, e.String())
+				}
+				if _, err := os.Stat(marker); err == nil {
+					t.Fatal("ran the connector under WAKESHIFT_HOME")
+				}
+				if o.String() != "{\"ok\":true}\n" || !strings.Contains(e.String(), "ignoring WAKESHIFT_HOME="+c.home(repo)+":") {
+					t.Fatalf("stdout %q stderr %q", o.String(), e.String())
+				}
+				want := "install install --harness codex --issuer https://app.wakeshift.ai --yes --plugin\nrun home=unset hook --harness codex stdin={}\n"
+				if got := l.logged(); got != want {
+					t.Fatalf("log:\n%s\nwant:\n%s", got, want)
+				}
+				if _, err := os.Stat(l.bin()); err != nil {
+					t.Fatalf("~/.wakeshift's connector: %v", err)
+				}
+			})
+		}
+	})
+}
+
+// A WAKESHIFT_HOME that names ~/.wakeshift anyway, with or without
+// trailing slashes, changes nothing and says nothing; it's still unset for
+// the connector.
+func TestLauncherQuietWhenWakeshiftHomeIsTheDefault(t *testing.T) {
+	eachShell(t, func(t *testing.T, shell string) {
+		for _, suffix := range []string{"", "/", "//"} {
+			r := newRelease(t)
+			served := bytes.Replace(fakeConnector("2026.11.02.1912"), []byte(`echo "run $*`), []byte(`echo "run home=${WAKESHIFT_HOME:-unset} $*`), 1)
+			l := newLane(t, shell, r, "2026.11.02.1912", served)
+			l.env = append(slices.Clone(l.env[:2]), "WAKESHIFT_HOME="+l.home+suffix, "LOG="+l.log)
+			out, errOut := l.run("{}", "hook", "--harness", "codex")
+			if out != "{\"ok\":true}\n" || errOut != "" {
+				t.Fatalf("%q: stdout %q stderr %q", suffix, out, errOut)
+			}
+			if !strings.Contains(l.logged(), "run home=unset hook") {
+				t.Fatalf("%q: log %s", suffix, l.logged())
+			}
+			if _, err := os.Stat(l.bin()); err != nil {
+				t.Fatalf("%q: %v", suffix, err)
+			}
 		}
 	})
 }

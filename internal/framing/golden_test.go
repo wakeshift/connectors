@@ -76,7 +76,7 @@ func TestTypeScriptGolden(t *testing.T) {
 	}
 	have, err := os.ReadFile(golden)
 	if errors.Is(err, fs.ErrNotExist) {
-		// The published Go SDK (opensource/export.sh) has no OpenClaw
+		// The published Go SDK has no OpenClaw
 		// plugin; this repository always does, so the check runs here.
 		t.Skip("the OpenClaw plugin isn't in this tree")
 	}

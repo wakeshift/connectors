@@ -93,8 +93,8 @@ func (d *codexDaemon) broadcast(method string, params any) {
 	}
 }
 
-// drop closes every client's connection, as Codex's daemon did on October
-// 27 (its clients reconnect).
+// drop closes every client's connection, as Codex's daemon has been seen
+// to (its clients reconnect).
 func (d *codexDaemon) drop() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -418,8 +418,7 @@ func TestTurnEndedBeforeItsAnswer(t *testing.T) {
 	<-done
 }
 
-// The bench's S3: five events a moment apart took five turns, 3.5-4s
-// apart. A burst now starts one turn with all of them, confirmed once
+// Events a moment apart used to take a turn each, seconds apart. A burst now starts one turn with all of them, confirmed once
 // turn/start succeeds; what arrives while that turn runs isn't confirmed,
 // and comes in the next turn, again all together.
 func TestBurstIsOneTurn(t *testing.T) {
@@ -609,9 +608,9 @@ func turnsThenIdle(d *codexDaemon) {
 	}
 }
 
-// The S12 soak on October 29 (run 20261029-003856-6843): Codex's daemon
-// restarted, the TUI took 41s to come back and resume the thread, and its
-// resume went idle, notLoaded, idle within 20ms. The connector took the
+// When Codex's daemon restarted, the TUI took a while to come back and
+// resume the thread, and its resume went idle, notLoaded, idle within
+// milliseconds. The connector took the
 // notLoaded for the thread ending and missed the rest of the conversation.
 // Now a thread that's not loaded is waited for: no turn while it's
 // unloaded, and the waiting event's turn once it loads again.
@@ -846,8 +845,8 @@ func taken(i int) map[string]any {
 	return map[string]any{"type": "taken", "delivery_id": fmt.Sprintf("d%d", i)}
 }
 
-// S12 on October 29: Codex spent a 20-minute turn calling Agent Chat's
-// wait tool while its connector held the person's DM for after the turn.
+// Codex can spend a long turn calling an app's wait tool while its
+// connector holds a message for after the turn.
 // The wait now takes what the connector holds, and Wakeshift tells it
 // ("taken"): what the thread had in its turn doesn't start a turn after
 // it, and isn't acked by the connector. One that comes again (the wait

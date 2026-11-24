@@ -14,7 +14,7 @@ import (
 // the session's wait URL. It reads the conversation's link from the hooks'
 // own files, so the command is the same in every conversation and holds no
 // secret, and the exact rule the install added to the harness's allowlist
-// matches it (docs/harnesses.md, "Pre-approving Wakeshift's commands"). It
+// matches it. It
 // prints the same lines as the loops, and ends the same way (Cursor's
 // keeps running and ends after 50 messages with a hub.restart line; the
 // others end when messages arrive, confirming them first).
@@ -31,8 +31,8 @@ var waitCommandRE = regexp.MustCompile(`^/[A-Za-z0-9._/@+-]{1,500}/\.wakeshift/b
 
 // userRootRE is where a user's own files are, whoever's they are: a home
 // directory (/Users/<name>, /home/<name>, /root) or macOS's per-user
-// temporary directory (/var/folders/<xx>/<id>/T, 0700, where the bench
-// keeps its HOMEs). Anything else (/opt, /usr/local, /Users/Shared,
+// temporary directory (/var/folders/<xx>/<id>/T, 0700, where tests often
+// put a temporary HOME). Anything else (/opt, /usr/local, /Users/Shared,
 // /Library/Caches, /tmp) may be writable by other local users, so a binary
 // there may not be the user's own.
 var userRootRE = regexp.MustCompile(`^(?:/Users/[A-Za-z0-9._@+-]{1,64}|/home/[A-Za-z0-9._@+-]{1,64}|/root|(?:/private)?/var/folders/[A-Za-z0-9_+-]{1,8}/[A-Za-z0-9_+-]{1,64}/T)/`)
@@ -88,12 +88,11 @@ func WaitShell(app, cmd string) string {
 func waitApproval(h Harness) string {
 	switch h.ID {
 	case "cursor":
-		// No rule in Cursor's allowlist: it would also let the command
-		// run with a redirect into a workspace file.
+		// No rule in Cursor's allowlist (connector.CursorRule).
 		return "It's the same command in every conversation. Cursor asks before each start: run it once each time, and don't add it or wakeshift to the allowlist (a rule would also allow its other commands, or the command with a redirect into a file)."
 	case "antigravity":
-		// No rule in agy's settings: its rules match a prefix, which a
-		// redirect added after the command also matches.
+		// No rule in agy's settings: its rules match a prefix
+		// (connector.AntigravityRule).
 		return "It's the same command in every conversation. If agy asks to run it, allowing it in this conversation is enough; don't persist it to agy's settings (a saved rule would also allow it with a redirect into a file)."
 	case "copilot":
 		// Wakeshift's hooks approve exactly this command (Copilot's

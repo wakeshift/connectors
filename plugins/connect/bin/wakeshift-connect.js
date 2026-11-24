@@ -23,7 +23,8 @@ const { spawnSync } = require("node:child_process");
 // OpenClaw take their own plugins). TestConnectHarnesses keeps it in step.
 const HARNESSES = ["antigravity", "claude-code", "codex", "copilot", "cursor", "opencode", "pi"];
 // The Wakeshift this package trusts unless --issuer names another
-// (plugins/pack-npm.mjs --issuer packs it for another).
+// (plugins/pack-npm.mjs --issuer, in github.com/wakeshift/connectors, packs
+// it for another).
 const DEFAULT_ISSUER = "https://app.wakeshift.ai";
 const EXIT_USAGE = 64;
 const EXIT_VERIFY = 7;

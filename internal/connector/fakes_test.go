@@ -26,6 +26,7 @@ type fakeWakeshift struct {
 	redeemed []string
 	status   int
 	code     string
+	reason   string // the error's reason, if any (conversation_taken's link_not_held)
 	// tool is the tool its beacons name (beacon.Claims.Tool): "probe", the
 	// tool in the recorded hook inputs.
 	tool string
@@ -38,6 +39,9 @@ type fakeWakeshift struct {
 	// answer, if set, is the stream link redeems answer with (default: one
 	// on its own origin).
 	answer string
+	// onRedeem, if set, runs before a redeem is answered, with the link the
+	// hook held: what the core does then (superseding it revokes it).
+	onRedeem func(held string)
 }
 
 func newFakeWakeshift(t *testing.T) *fakeWakeshift {
@@ -59,11 +63,18 @@ func newFakeWakeshift(t *testing.T) *fakeWakeshift {
 		f.redeemed = append(f.redeemed, in.Ticket+"@"+in.Thread)
 		f.held = append(f.held, in.Held)
 		f.late = append(f.late, in.Late)
-		status, code, app, answer := f.status, f.code, f.app, f.answer
+		status, code, reason, app, answer, onRedeem := f.status, f.code, f.reason, f.app, f.answer, f.onRedeem
 		f.mu.Unlock()
+		if onRedeem != nil {
+			onRedeem(in.Held)
+		}
 		w.WriteHeader(status)
 		if status != 200 {
-			json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": code}})
+			e := map[string]string{"code": code}
+			if reason != "" {
+				e["reason"] = reason
+			}
+			json.NewEncoder(w).Encode(map[string]any{"error": e})
 			return
 		}
 		out := map[string]any{"url": "ws://" + r.Host + "/v1/stream?link=tok-" + in.Thread}

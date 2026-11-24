@@ -42,11 +42,10 @@ import (
 //     an idle session doesn't ask once per wake. Copilot has no allowlist
 //     a user's config can hold for every folder (its persisted approvals
 //     are per location), so the hook is the rule. Nothing else is
-//     answered: Copilot asks as it would have. Copilot (1.0.105) runs the
-//     hook before its own permission rules, and an allow wins over a
-//     --deny-tool rule (checked in a temp HOME), so the hook gives no
-//     answer while the user denies the command, or shell commands, or
-//     while it can't tell whether they do (copilotdeny.go).
+//     answered: Copilot asks as it would have. The hook respects the
+//     user's own deny rules itself: it gives no answer while the user
+//     denies the command, or shell commands, or while it can't tell
+//     whether they do (copilotdeny.go).
 
 const copilotName = "copilot"
 
@@ -57,8 +56,7 @@ func init() {
 	register(Spec{Name: copilotName, Format: copilotFormat{}, Installer: copilotInstaller{},
 		When:     "when the agent finishes a turn; while it's idle, they wait for the next one",
 		StopWait: 5 * time.Second,
-		// No Rule: Copilot CLI has no global allowlist for commands
-		// (docs/harnesses.md, "Pre-approving Wakeshift's commands"); its
+		// No Rule: Copilot CLI has no global allowlist for commands; its
 		// permissionRequest hook approves the wait command instead.
 		Wait: true, RecordProcs: true,
 	})
